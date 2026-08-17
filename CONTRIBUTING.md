@@ -42,7 +42,9 @@ dune test      # all asserts must pass
 Do not change these types or formats:
 
 - `Data.bar` = `{ date; o; h; l; c; v }`
-- `Engine.strategy` = `{ entry : bool array; exit_ : bool array; size : float array }`
+- `Engine.strategy` = `{ target : float array }`
+- Engine fill modes: `Close_same` fills at the decision close. `Open_next`
+  fills at the next open.
 - TW cache header: `date,open,high,low,close,volume`
 - Dividend cache header: `date,factor`
 - US cache header: `date,open,high,low,close,adj_close,volume`

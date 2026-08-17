@@ -40,18 +40,24 @@ The report shows each metric for the strategy and the benchmark, with a
 WIN or LOSS verdict. The run also writes `out/equity.csv`,
 `out/trades.csv`, and `out/equity.png`.
 
+The report prints the fill mode on the date-range line.
+The `out/trades.csv` file uses the header
+`date,price,from_exposure,to_exposure`.
+
 ## Commands
 
 ```
 bt fetch --market tw|us --symbol SYM [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--data-dir DIR]
 bt run STRAT_FILE --market tw|us --symbol SYM [--from D] [--to D]
        [--benchmark SYM] [--benchmark-market tw|us] [-p name=value ...]
-       [--fee-bps F] [--tax-bps F] [--slip-bps F]
+       [--fill open|close] [--fee-bps F] [--tax-bps F] [--slip-bps F]
        [--data-dir DIR] [--out-dir DIR] [--no-plot]
 ```
 
 - The default benchmark is `00685L` in market `tw`.
 - `-p name=value` overrides a `param` in the strategy file.
+- `--fill` selects the fill point: `close` fills at the decision close
+  (default), `open` fills at the next open.
 - `--no-plot` prevents the PNG output.
 - The cost flags take basis points. 100 basis points = 1%.
 
@@ -68,15 +74,58 @@ exit  when cross_below(close, bb_mid(close, n)) or hist < 0
 size 1.0
 ```
 
+Statements are one per line.
+A strategy file uses exactly one of these three styles. Do not mix styles.
+
+### Strategy styles
+
+#### Target exposure
+
+```
+target 0.5 * num(base) + 0.5 * num(base and boost)
+```
+
+`target` sets the desired exposure for each bar. The expression must give
+a scalar or a numeric series. A scalar applies to all bars. A value above
+1.0 applies daily-reset leverage.
+
+#### Partial orders
+
+```
+cap 1.0
+entry when cross_above(close, bb_lower(close, n, k))  size 0.5
+entry when cross_above(hist, 0.0)                     size 0.5
+exit  when cross_below(close, bb_mid(close, n))       size 0.5
+exit  when cross_below(hist, 0.0)                     size 1.0
+```
+
+Use any number of `entry` and `exit` statements. An inline `size` changes
+exposure by that many points. It does not state a fraction of the current
+position. The engine sums the changes on each bar. It clamps exposure from
+0 to `cap`. The default cap is 1.0.
+
+#### Legacy entry and exit
+
+```
+entry when <cond>
+exit  when <cond>
+size 1.0
+```
+
+Use exactly one `entry` statement and one `exit` statement. The standalone
+`size` is optional. This style keeps the original entry and exit behavior.
+
 ### Grammar (BNF)
 
 ```
 file       ::= { statement }
 statement  ::= "param" ident "=" number
              | "let" ident "=" expr
-             | "entry" "when" expr
-             | "exit" "when" expr
+             | "entry" "when" expr [ "size" expr ]
+             | "exit" "when" expr [ "size" expr ]
              | "size" expr
+             | "target" expr
+             | "cap" number
 expr       ::= number
              | ident
              | ident "(" [ expr { "," expr } ] ")"
@@ -104,13 +153,14 @@ Operator precedence, from low to high: `or`, `and`, `not`, comparisons,
 - `param name = number` declares a parameter. The CLI flag
   `-p name=value` can override it.
 - `let name = expr` binds an expression result to a name.
-- `entry when expr` sets the entry signal. The expression must give a
-  boolean series. Exactly one `entry` statement is mandatory.
-- `exit when expr` sets the exit signal. Exactly one `exit` statement is
-  mandatory.
-- `size expr` sets the exposure at entry. It is optional. The default
-  is 1.0. A value above 1.0 applies daily-reset leverage. A value that
-  is NaN or not positive falls back to 1.0.
+- `entry when expr` and `exit when expr` set boolean conditions. Partial
+  orders can repeat these statements and add an inline `size expr`.
+- `size expr` sets the exposure in legacy style. It is optional. The
+  default is 1.0. A value above 1.0 applies daily-reset leverage. A value
+  that is NaN or not positive falls back to 1.0.
+- `target expr` sets the target exposure. Use it once in target style.
+- `cap number` sets the maximum exposure for partial orders. It is
+  optional. The default is 1.0.
 
 ### Values and types
 
@@ -133,6 +183,12 @@ Signal helpers:
   the previous bar and is above `b` now. The result is `false` when an
   operand is NaN.
 - `cross_below(a, b)` is the mirror of `cross_above`.
+- Both cross helpers accept a scalar for either argument. The scalar
+  broadcasts across the series.
+- `hold(set, reset)` gives a boolean flip-flop series. It starts false.
+  A true `set` value turns it on. A true `reset` value turns it off.
+  Reset wins if both values are true on one bar.
+- `num(b)` converts a boolean series to a numeric series of 0.0 and 1.0.
 
 Moving averages and statistics:
 
@@ -176,8 +232,12 @@ Arithmetic helpers:
 
 ## How the engine trades
 
-- The engine reads signals at the close of a bar. It acts at the open of
-  the next bar.
+- In `close` mode, the engine reads a decision at the bar close and fills
+  it at that close. This mode is the default.
+- In `open` mode, the engine reads a decision at the bar close and fills
+  it at the next bar open.
+- A strategy states a target exposure per bar. The engine trades the
+  difference and charges costs on the traded fraction.
 - Default costs: a TW trade pays a 0.1425% fee on each side. A TW sale
   also pays a tax: 0.1% for ETFs (symbols that start with `00`) and
   0.3% for stocks. US costs are zero. Slippage is zero. Override these
