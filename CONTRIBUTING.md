@@ -67,5 +67,5 @@ Do not change these types or formats:
 ## Commits
 
 - Work on the `main` branch.
-- Author commits as `Claude <noreply@anthropic.com>`.
+- Write commit messages that state what changed and why.
 - Do not commit `data/`, `out/`, `_build/`, or `bt-test.exe`.
