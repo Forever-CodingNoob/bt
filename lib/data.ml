@@ -148,8 +148,23 @@ let api_url ~dataset ~symbol ~from_ ~to_ =
     "https://api.finmindtrade.com/api/v4/data?dataset=%s&data_id=%s&start_date=%s&end_date=%s"
     (url_encode dataset) (url_encode symbol) (url_encode from_) (url_encode to_)
 
-(* ponytail: in-process libcurl + jq pipeline; a native JSON parser only if
-   fetch ever needs to drop the jq dependency *)
+(* ponytail: curl+jq pipeline; native HTTP+JSON client if fetch ever needs to be self-contained *)
+let curl_get ~token ~url ~output =
+  (* the header travels in a 0600 temp file so the token never shows in argv *)
+  with_temp ".hdr" (fun header_path ->
+    let channel = open_out header_path in
+    Fun.protect
+      ~finally:(fun () -> close_out channel)
+      (fun () ->
+        output_string channel ("Authorization: Bearer " ^ token ^ "\n"));
+    with_temp ".status" (fun status_path ->
+      let status =
+        run_to_file "/usr/bin/curl"
+          ["-sfS"; "-H"; "@" ^ header_path; "-o"; output;
+           "-w"; "%{http_code}"; url]
+          status_path
+      in
+      (status, String.trim (read_text status_path))))
 
 let jq_message json_path =
   with_temp ".msg" (fun output ->
@@ -167,16 +182,15 @@ let check_api_response json_path =
   | Unix.WEXITED 1 -> `Error (jq_message json_path)
   | _ -> failwith "jq failed while validating the FinMind response"
 
-let require_price_response json_path response =
-  match response with
-  | Error message -> failf "fetch failed for api.finmindtrade.com (%s)" message
-  | Ok 402 -> failwith "FinMind quota exceeded (HTTP 402)"
-  | Ok status when status <> 200 ->
-      failf "fetch failed for api.finmindtrade.com (HTTP %d)" status
-  | Ok _ ->
-      (match check_api_response json_path with
-       | `Ok -> ()
-       | `Error message -> failf "FinMind API error: %s" message)
+let require_price_response json_path process_status http_code =
+  if http_code = "402" then failwith "FinMind quota exceeded (HTTP 402)"
+  else if not (process_ok process_status) || http_code <> "200" then
+    failf "fetch failed for api.finmindtrade.com (HTTP %s)"
+      (if http_code = "" || http_code = "000" then "unavailable" else http_code)
+  else
+    match check_api_response json_path with
+    | `Ok -> ()
+    | `Error message -> failf "FinMind API error: %s" message
 
 let unquote field =
   let length = String.length field in
@@ -289,7 +303,8 @@ let transform_json ~expression ~json_path ~rows_path =
 let fetch_rows ~token ~dataset ~symbol ~from_ ~to_ ~expression ~consume =
   with_temp ".json" (fun json_path ->
     let url = api_url ~dataset ~symbol ~from_ ~to_ in
-    require_price_response json_path (Http.get ~token ~url ~output:json_path);
+    let process_status, http_code = curl_get ~token ~url ~output:json_path in
+    require_price_response json_path process_status http_code;
     with_temp ".rows" (fun rows_path ->
       transform_json ~expression ~json_path ~rows_path;
       consume rows_path))
@@ -332,7 +347,7 @@ let fetch_dividends ~token ~symbol ~to_ ~cache_path =
       api_url ~dataset:"TaiwanStockDividendResult" ~symbol
         ~from_:"1900-01-01" ~to_
     in
-    let response = Http.get ~token ~url ~output:json_path in
+    let process_status, http_code = curl_get ~token ~url ~output:json_path in
     (* a failed dividend fetch never destroys previously cached factors;
        stale factors beat none, and transient 402/429/5xx would otherwise
        silently flip later runs to unadjusted prices *)
@@ -341,13 +356,15 @@ let fetch_dividends ~token ~symbol ~to_ ~cache_path =
         (if Sys.file_exists cache_path then "keeping cached dividend data"
          else "prices will be unadjusted for dividends")
     in
-    match response with
-    | Error message -> keep message
-    | Ok status when status <> 200 -> keep (Printf.sprintf "HTTP %d" status)
-    | Ok _ ->
-        match check_api_response json_path with
-        | `Error message -> keep message
-        | `Ok ->
+    if not (process_ok process_status) || http_code <> "200" then
+      keep
+        ("HTTP " ^
+         (if http_code = "" || http_code = "000" then "unavailable"
+          else http_code))
+    else
+      match check_api_response json_path with
+      | `Error message -> keep message
+      | `Ok ->
           with_temp ".rows" (fun rows_path ->
             transform_json
               ~expression:(
