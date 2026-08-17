@@ -102,28 +102,28 @@ let calmar equity_curve =
   let drawdown = max_dd equity_curve in
   if drawdown = 0. then None else Some (cagr equity_curve /. drawdown)
 
-let n_trades trades = List.length trades
+let n_trades trips = List.length trips
 
-let win_rate trades =
-  match trades with
+let win_rate trips =
+  match trips with
   | [] -> None
   | _ ->
       let winners =
         List.fold_left
-          (fun count (trade : Engine.trade) ->
-            if trade.net_ret > 0. then count + 1 else count)
-          0 trades
+          (fun count (trip : Engine.trip) ->
+            if trip.net_ret > 0. then count + 1 else count)
+          0 trips
       in
-      Some (float_of_int winners /. float_of_int (List.length trades))
+      Some (float_of_int winners /. float_of_int (List.length trips))
 
-let calculate equity_curve trades =
+let calculate equity_curve trips =
   { total_return = total_return equity_curve;
     cagr = cagr equity_curve;
     sharpe = sharpe equity_curve;
     max_dd = max_dd equity_curve;
     calmar = calmar equity_curve;
-    n_trades = n_trades trades;
-    win_rate = win_rate trades }
+    n_trades = n_trades trips;
+    win_rate = win_rate trips }
 
 let of_result (result : Engine.result) =
-  calculate result.equity_curve result.trades
+  calculate result.equity_curve result.trips

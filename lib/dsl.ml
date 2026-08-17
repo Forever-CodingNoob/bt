@@ -401,16 +401,33 @@ let compile source ~params bars =
     | Some signal -> signal
     | None -> failwith "strategy must contain exactly one exit statement"
   in
-  let size =
+  let size_at =
     match size with
-    | None -> Array.make context.length 1.
-    | Some (_, Scalar number) -> Array.make context.length number
+    | None -> (fun _ -> 1.)
+    | Some (_, Scalar number) -> (fun _ -> number)
     | Some (expression, Series series) ->
         if Array.length series <> context.length then
           fail_expr expression "size series length mismatch";
-        series
+        (fun t -> series.(t))
     | Some (expression, Bools _) ->
         fail_expr expression "size must be a scalar or numeric series"
   in
-  let strategy : Engine.strategy = { entry; exit_; size } in
+  let clamp_legacy value =
+    if Float.is_nan value || value <= 0. then 1. else value
+  in
+  let target = Array.make context.length 0. in
+  let in_position = ref false in
+  let held = ref 0. in
+  for t = 0 to context.length - 1 do
+    if !in_position then begin
+      if exit_.(t) then in_position := false
+      else target.(t) <- !held
+    end
+    else if entry.(t) then begin
+      held := clamp_legacy (size_at t);
+      in_position := true;
+      target.(t) <- !held
+    end
+  done;
+  let strategy : Engine.strategy = { target } in
   strategy

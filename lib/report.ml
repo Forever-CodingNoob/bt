@@ -30,15 +30,15 @@ let date_range = function
       let last = List.fold_left (fun _ point -> point) first rest in
       Some (fst first, fst last)
 
-let maximum_size sizes =
+let maximum_target target =
   let maximum = ref 0. in
-  for i = 0 to Array.length sizes - 1 do
-    if not (Float.is_nan sizes.(i)) && sizes.(i) > !maximum then
-      maximum := sizes.(i)
+  for i = 0 to Array.length target - 1 do
+    if not (Float.is_nan target.(i)) && target.(i) > !maximum then
+      maximum := target.(i)
   done;
   !maximum
 
-let print ~(strategy : Engine.result) ~(benchmark : Engine.result) ~sizes =
+let print ~(strategy : Engine.result) ~(benchmark : Engine.result) ~target ~fill =
   let strategy_metrics = Metrics.of_result strategy in
   let benchmark_metrics = Metrics.of_result benchmark in
   print_row "Metric" "Strategy" "Benchmark" "verdict";
@@ -64,16 +64,20 @@ let print ~(strategy : Engine.result) ~(benchmark : Engine.result) ~sizes =
     (format_optional benchmark_metrics.calmar)
     (optional_verdict strategy_metrics.calmar benchmark_metrics.calmar);
   Printf.printf "Trades: %d (win rate %s); Benchmark: -\n"
-    strategy_metrics.n_trades
+    (List.length strategy.trips)
     (match strategy_metrics.win_rate with
      | None -> "n/a"
      | Some rate -> format_percent rate);
   begin
     match date_range strategy.equity_curve with
     | None -> print_endline "Date range: n/a"
-    | Some (first, last) -> Printf.printf "Date range: %s to %s\n" first last
+    | Some (first, last) ->
+        Printf.printf "Date range: %s to %s; fill: %s\n" first last
+          (match fill with
+           | Engine.Close_same -> "close"
+           | Engine.Open_next -> "open")
   end;
-  if maximum_size sizes > 1. then
+  if maximum_target target > 1. then
     print_endline "Exposure above 1.0 uses daily-reset leverage."
 
 let write_file path contents =
@@ -108,25 +112,24 @@ let write_equity_csv ~out_dir
       in
       write strategy.equity_curve benchmark.equity_curve)
 
-let write_trades_csv ~out_dir (trades : Engine.trade list) =
+let write_trades_csv ~out_dir (fills : Engine.fill_event list) =
   let path = Filename.concat out_dir "trades.csv" in
   let output = open_out_bin path in
   Fun.protect
     ~finally:(fun () -> close_out output)
     (fun () ->
-      output_string output "entry_date,entry_px,exit_date,exit_px,net_ret\n";
+      output_string output "date,price,from_exposure,to_exposure\n";
       List.iter
-        (fun trade ->
-          Printf.fprintf output "%s,%.17g,%s,%.17g,%.17g\n"
-            trade.Engine.entry_date trade.entry_px trade.exit_date trade.exit_px
-            trade.net_ret)
-        trades)
+        (fun (fill : Engine.fill_event) ->
+          Printf.fprintf output "%s,%.17g,%.17g,%.17g\n"
+            fill.date fill.price fill.from_e fill.to_e)
+        fills)
 
 let write_csvs ~out_dir
     ~(strategy : Engine.result) ~(benchmark : Engine.result) =
   Data.mkdir_p out_dir;
   write_equity_csv ~out_dir ~strategy ~benchmark;
-  write_trades_csv ~out_dir strategy.trades
+  write_trades_csv ~out_dir strategy.fills
 
 let plot_script = {|import sys, csv
 import matplotlib

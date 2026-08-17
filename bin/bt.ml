@@ -3,7 +3,7 @@ let usage =
    \  bt fetch --market tw|us --symbol SYM [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--data-dir DIR]\n\
    \  bt run STRAT_FILE --market tw|us --symbol SYM [--from D] [--to D]\n\
    \         [--benchmark SYM] [--benchmark-market tw|us] [-p name=value ...]\n\
-   \         [--fee-bps F] [--tax-bps F] [--slip-bps F]\n\
+   \         [--fill open|close] [--fee-bps F] [--tax-bps F] [--slip-bps F]\n\
    \         [--data-dir DIR] [--out-dir DIR] [--no-plot]"
 
 let usage_error message =
@@ -120,11 +120,7 @@ let overlap_bars
       failwith "strategy and benchmark have fewer than 2 common dates"
 
 let benchmark_strategy length : Btlib.Engine.strategy =
-  let entry = Array.make length false in
-  if length > 0 then entry.(0) <- true;
-  { entry;
-    exit_ = Array.make length false;
-    size = Array.make length 1. }
+  { target = Array.make length 1. }
 
 let run argv =
   let strategy_file = ref None in
@@ -141,6 +137,7 @@ let run argv =
   let data_dir = ref "data" in
   let out_dir = ref "out" in
   let no_plot = ref false in
+  let fill = ref Btlib.Engine.Close_same in
   let options =
     [ ("--market", Arg.Set_string market, "tw or us");
       ("--symbol", Arg.Set_string symbol, "strategy symbol");
@@ -148,6 +145,14 @@ let run argv =
       ("--to", Arg.String (fun value -> to_ := Some value), "end date");
       ("--benchmark", Arg.Set_string benchmark, "benchmark symbol (default 00685L)");
       ("--benchmark-market", Arg.Set_string benchmark_market, "benchmark market");
+      ("--fill",
+       Arg.String
+         (fun value ->
+           match value with
+           | "open" -> fill := Btlib.Engine.Open_next
+           | "close" -> fill := Btlib.Engine.Close_same
+           | _ -> raise (Arg.Bad "--fill must be open or close")),
+       "fill mode: open or close (default close)");
       ("-p", Arg.String (parse_parameter parameters), "parameter override name=value");
       ("--fee-bps", Arg.Float (fun value -> fee_bps := Some value), "fee basis points");
       ("--tax-bps", Arg.Float (fun value -> tax_bps := Some value), "tax basis points");
@@ -211,14 +216,16 @@ let run argv =
     apply_cost_overrides benchmark_defaults !fee_bps !tax_bps !slip_bps
   in
   let strategy_result =
-    Btlib.Engine.run strategy_bars strategy strategy_costs
+    Btlib.Engine.run strategy_bars strategy strategy_costs ~fill:!fill
   in
   let benchmark_result =
     Btlib.Engine.run benchmark_bars
       (benchmark_strategy (Array.length benchmark_bars)) benchmark_costs
+      ~fill:!fill
   in
   Btlib.Report.print
-    ~strategy:strategy_result ~benchmark:benchmark_result ~sizes:strategy.size;
+    ~strategy:strategy_result ~benchmark:benchmark_result
+    ~target:strategy.target ~fill:!fill;
   Btlib.Report.write_csvs
     ~out_dir:!out_dir ~strategy:strategy_result ~benchmark:benchmark_result;
   if not !no_plot then Btlib.Report.write_png ~out_dir:!out_dir

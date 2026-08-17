@@ -1,8 +1,4 @@
-type strategy = {
-  entry : bool array;
-  exit_ : bool array;
-  size : float array;
-}
+type strategy = { target : float array }
 
 type costs = {
   fee_bps : float;
@@ -10,17 +6,25 @@ type costs = {
   slip_bps : float;
 }
 
-type trade = {
+type fill = Open_next | Close_same
+
+type fill_event = {
+  date : string;
+  price : float;
+  from_e : float;
+  to_e : float;
+}
+
+type trip = {
   entry_date : string;
-  entry_px : float;
   exit_date : string;
-  exit_px : float;
   net_ret : float;
 }
 
 type result = {
   equity_curve : (string * float) list;
-  trades : trade list;
+  fills : fill_event list;
+  trips : trip list;
 }
 
 let default_costs ~market ~symbol =
@@ -35,83 +39,85 @@ let default_costs ~market ~symbol =
         slip_bps = 0. }
   | _ -> invalid_arg "Engine.default_costs: market must be tw or us"
 
-let side_cost exposure bps = exposure *. bps /. 10000.
+(* NaN means flat; short exposure is out of scope *)
+let clamp_target value =
+  if Float.is_nan value || value < 0. then 0. else value
 
-let run (bars : Data.bar array) (strategy : strategy) (costs : costs) =
+let run (bars : Data.bar array) (strategy : strategy) (costs : costs) ~fill =
   let length = Array.length bars in
-  if Array.length strategy.entry <> length ||
-     Array.length strategy.exit_ <> length ||
-     Array.length strategy.size <> length then
-    invalid_arg "Engine.run: strategy length mismatch";
+  if Array.length strategy.target <> length then
+    invalid_arg "Engine.run: target length mismatch";
   let equity = ref 1. in
-  let in_position = ref false in
-  let exposure = ref 1. in
-  let entry_date = ref "" in
-  let entry_price = ref 0. in
+  let exposure = ref 0. in
   let entry_equity = ref 1. in
+  let entry_date = ref "" in
+  let fills = ref [] in
+  let trips = ref [] in
   let equity_curve = ref [] in
-  let trades = ref [] in
+  let trade ~date ~price ~desired =
+    let delta = desired -. !exposure in
+    if delta <> 0. then begin
+      if !exposure = 0. then begin
+        entry_equity := !equity;
+        entry_date := date
+      end;
+      let bps =
+        if delta > 0. then costs.fee_bps +. costs.slip_bps
+        else costs.fee_bps +. costs.tax_bps +. costs.slip_bps
+      in
+      equity := !equity *. (1. -. abs_float delta *. bps /. 10000.);
+      fills := { date; price; from_e = !exposure; to_e = desired } :: !fills;
+      exposure := desired;
+      if desired = 0. then
+        trips :=
+          { entry_date = !entry_date; exit_date = date;
+            net_ret = !equity /. !entry_equity -. 1. } :: !trips
+    end
+  in
   for t = 0 to length - 1 do
     let bar = bars.(t) in
-    if t > 0 then begin
-      let previous = bars.(t - 1) in
-      if !in_position then begin
-        if strategy.exit_.(t - 1) then begin
-          equity :=
-            !equity *.
-            (1. +. !exposure *. (bar.Data.o /. previous.Data.c -. 1.));
-          equity :=
-            !equity *.
-            (1. -. side_cost !exposure
-                      (costs.fee_bps +. costs.tax_bps +. costs.slip_bps));
-          trades :=
-            { entry_date = !entry_date;
-              entry_px = !entry_price;
-              exit_date = bar.Data.date;
-              exit_px = bar.Data.o;
-              net_ret = !equity /. !entry_equity -. 1. } :: !trades;
-          in_position := false
-        end
-        else
-          equity :=
-            !equity *.
-            (1. +. !exposure *. (bar.Data.c /. previous.Data.c -. 1.))
-      end
-      else if strategy.entry.(t - 1) then begin
-        let requested = strategy.size.(t - 1) in
-        exposure :=
-          if Float.is_nan requested || requested <= 0. then 1. else requested;
-        entry_date := bar.Data.date;
-        entry_price := bar.Data.o;
-        entry_equity := !equity;
-        equity :=
-          !equity *.
-          (1. -. side_cost !exposure (costs.fee_bps +. costs.slip_bps));
-        equity :=
-          !equity *. (1. +. !exposure *. (bar.Data.c /. bar.Data.o -. 1.));
-        in_position := true
-      end
-    end;
+    (match fill with
+     | Close_same ->
+         if t > 0 then
+           equity :=
+             !equity *.
+             (1. +. !exposure *. (bar.Data.c /. bars.(t - 1).Data.c -. 1.));
+         trade ~date:bar.Data.date ~price:bar.Data.c
+           ~desired:(clamp_target strategy.target.(t))
+     | Open_next ->
+         if t > 0 then begin
+           let desired = clamp_target strategy.target.(t - 1) in
+           if desired <> !exposure then begin
+             (* two-leg day: accrue to the open, fill, accrue to the close *)
+             equity :=
+               !equity *.
+               (1. +. !exposure *. (bar.Data.o /. bars.(t - 1).Data.c -. 1.));
+             trade ~date:bar.Data.date ~price:bar.Data.o ~desired;
+             equity :=
+               !equity *.
+               (1. +. !exposure *. (bar.Data.c /. bar.Data.o -. 1.))
+           end
+           else
+             equity :=
+               !equity *.
+               (1. +. !exposure *. (bar.Data.c /. bars.(t - 1).Data.c -. 1.))
+         end);
     equity_curve := (bar.Data.date, !equity) :: !equity_curve
   done;
-  if !in_position then begin
-    equity :=
-      !equity *.
-      (1. -. side_cost !exposure
-                (costs.fee_bps +. costs.tax_bps +. costs.slip_bps));
-    let final_bar = bars.(length - 1) in
-    begin
-      match !equity_curve with
-      | _ :: rest ->
-          equity_curve := (final_bar.Data.date, !equity) :: rest
-      | [] -> ()
-    end;
-    trades :=
-      { entry_date = !entry_date;
-        entry_px = !entry_price;
-        exit_date = final_bar.Data.date;
-        exit_px = final_bar.Data.c;
-        net_ret = !equity /. !entry_equity -. 1. } :: !trades
+  if !exposure > 0. then begin
+    let last = bars.(length - 1) in
+    let bps = costs.fee_bps +. costs.tax_bps +. costs.slip_bps in
+    equity := !equity *. (1. -. !exposure *. bps /. 10000.);
+    fills :=
+      { date = last.Data.date; price = last.Data.c;
+        from_e = !exposure; to_e = 0. } :: !fills;
+    trips :=
+      { entry_date = !entry_date; exit_date = last.Data.date;
+        net_ret = !equity /. !entry_equity -. 1. } :: !trips;
+    (match !equity_curve with
+     | _ :: rest -> equity_curve := (last.Data.date, !equity) :: rest
+     | [] -> ())
   end;
   { equity_curve = List.rev !equity_curve;
-    trades = List.rev !trades }
+    fills = List.rev !fills;
+    trips = List.rev !trips }
