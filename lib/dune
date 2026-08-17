@@ -1,6 +1,12 @@
 (library
  (name btlib)
- (libraries unix))
+ (libraries unix)
+ (foreign_stubs
+  (language c)
+  (names curl_stubs))
+ ; the sandbox has libcurl.so.4 but no libcurl-dev symlink, so link the
+ ; versioned soname directly; use -lcurl where the dev package exists
+ (c_library_flags (-l:libcurl.so.4)))
 
 (ocamllex lexer)
 
