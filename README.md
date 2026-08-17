@@ -54,6 +54,8 @@ bt run STRAT_FILE --market tw|us --symbol SYM [--from D] [--to D]
        [--data-dir DIR] [--out-dir DIR] [--no-plot]
 ```
 
+See [docs/cli.md](./docs/cli.md) for the complete reference for each command, flag, and option.
+
 - The default benchmark is `00685L` in market `tw`.
 - `-p name=value` overrides a `param` in the strategy file.
 - `--fill` selects the fill point: `close` fills at the decision close

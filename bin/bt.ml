@@ -6,6 +6,14 @@ let usage =
    \         [--fill open|close] [--fee-bps F] [--tax-bps F] [--slip-bps F]\n\
    \         [--data-dir DIR] [--out-dir DIR] [--no-plot]"
 
+let help =
+  usage ^
+  "\n\ncommands:\n\
+   \  fetch  Download market data from FinMind into the local cache.\n\
+   \  run    Run a strategy with cached data and compare it with a benchmark.\n\n\
+   Fetch requires FINMIND_TOKEN.\n\
+   Full reference: docs/cli.md"
+
 let usage_error message =
   if message <> "" then prerr_endline message;
   prerr_endline usage;
@@ -22,12 +30,16 @@ let fetch argv =
   let from_ = ref "2010-01-01" in
   let to_ = ref (today ()) in
   let data_dir = ref "data" in
-  let options =
+  let rec options =
     [ ("--market", Arg.Set_string market, "tw or us");
       ("--symbol", Arg.Set_string symbol, "FinMind symbol");
       ("--from", Arg.Set_string from_, "start date (YYYY-MM-DD)");
       ("--to", Arg.Set_string to_, "end date (YYYY-MM-DD)");
-      ("--data-dir", Arg.Set_string data_dir, "cache directory") ]
+      ("--data-dir", Arg.Set_string data_dir, "cache directory");
+      ("-h",
+       Arg.Unit
+         (fun () -> raise (Arg.Help (Arg.usage_string options usage))),
+       "show this help") ]
   in
   let anonymous value = raise (Arg.Bad (Printf.sprintf "unexpected argument %S" value)) in
   (try Arg.parse_argv argv options anonymous usage with
@@ -138,7 +150,7 @@ let run argv =
   let out_dir = ref "out" in
   let no_plot = ref false in
   let fill = ref Btlib.Engine.Close_same in
-  let options =
+  let rec options =
     [ ("--market", Arg.Set_string market, "tw or us");
       ("--symbol", Arg.Set_string symbol, "strategy symbol");
       ("--from", Arg.String (fun value -> from_ := Some value), "start date");
@@ -159,7 +171,11 @@ let run argv =
       ("--slip-bps", Arg.Float (fun value -> slip_bps := Some value), "slippage basis points");
       ("--data-dir", Arg.Set_string data_dir, "cache directory");
       ("--out-dir", Arg.Set_string out_dir, "output directory");
-      ("--no-plot", Arg.Set no_plot, "skip equity graph") ]
+      ("--no-plot", Arg.Set no_plot, "skip equity graph");
+      ("-h",
+       Arg.Unit
+         (fun () -> raise (Arg.Help (Arg.usage_string options usage))),
+       "show this help") ]
   in
   let anonymous value =
     match !strategy_file with
@@ -231,8 +247,12 @@ let run argv =
   if not !no_plot then Btlib.Report.write_png ~out_dir:!out_dir
 
 let dispatch () =
-  if Array.length Sys.argv < 2 then usage_error "";
+  if Array.length Sys.argv < 2 then begin
+    prerr_endline help;
+    exit 2
+  end;
   match Sys.argv.(1) with
+  | "--help" | "-h" | "help" -> print_endline help
   | "fetch" -> fetch (Array.sub Sys.argv 1 (Array.length Sys.argv - 1))
   | "run" -> run (Array.sub Sys.argv 1 (Array.length Sys.argv - 1))
   | command -> usage_error (Printf.sprintf "unknown subcommand %S" command)
