@@ -195,3 +195,11 @@ Arithmetic helpers:
   downloaded again in full on each fetch, because `Adj_Close` changes
   for old rows after each dividend.
 - A repeated fetch adds only new TW rows. It does not create duplicates.
+
+## Contributing
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md).
+
+## Acknowledgements
+
+As you may have noticed, this project is vibe-coded in its entirety. A huge thanks to omp, Claude Fable 5, and OpenAI GPT-5.6 Sol.
