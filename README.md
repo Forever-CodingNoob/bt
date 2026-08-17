@@ -4,6 +4,23 @@
 prices from the FinMind API, and it tests a strategy script against a
 buy-and-hold benchmark.
 
+## Contents
+
+- [Requirements](#requirements)
+- [Build and test](#build-and-test)
+- [Quick start](#quick-start)
+- [Commands](#commands)
+- [Strategy language (DSL)](#strategy-language-dsl)
+  - [Strategy styles](#strategy-styles)
+  - [Grammar (BNF)](#grammar-bnf)
+  - [Statements](#statements)
+  - [Values and types](#values-and-types)
+  - [Builtin functions](#builtin-functions)
+- [How the engine trades](#how-the-engine-trades)
+- [Data notes](#data-notes)
+- [Contributing](#contributing)
+- [Acknowledgements](#acknowledgements)
+
 ## Requirements
 
 - OCaml and dune (install with opam)

@@ -2,6 +2,22 @@
 
 `bt` downloads market data and runs backtests from the command line.
 
+## Contents
+
+- [Command syntax](#command-syntax)
+- [`bt fetch`](#bt-fetch)
+  - [Fetch options](#fetch-options)
+  - [FinMind token](#finmind-token)
+  - [Cache files](#cache-files)
+  - [Price adjustments](#price-adjustments)
+- [`bt run`](#bt-run)
+  - [Run argument and options](#run-argument-and-options)
+  - [Cost defaults](#cost-defaults)
+  - [Fill modes](#fill-modes)
+- [Run outputs](#run-outputs)
+- [Help](#help)
+- [Exit codes](#exit-codes)
+
 ## Command syntax
 
 ```text
