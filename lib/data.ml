@@ -81,9 +81,6 @@ let mkdir_p path =
 let remove_if_exists path =
   try Sys.remove path with Sys_error _ -> ()
 
-let remove_cache path =
-  if Sys.file_exists path then Sys.remove path
-
 let with_temp suffix f =
   let path = Filename.temp_file "bt-" suffix in
   Fun.protect ~finally:(fun () -> remove_if_exists path) (fun () -> f path)
@@ -153,14 +150,21 @@ let api_url ~dataset ~symbol ~from_ ~to_ =
 
 (* ponytail: curl+jq pipeline; native HTTP+JSON client if fetch ever needs to be self-contained *)
 let curl_get ~token ~url ~output =
-  with_temp ".status" (fun status_path ->
-    let status =
-      run_to_file "/usr/bin/curl"
-        ["-sf"; "-H"; "Authorization: Bearer " ^ token; "-o"; output;
-         "-w"; "%{http_code}"; url]
-        status_path
-    in
-    (status, String.trim (read_text status_path)))
+  (* the header travels in a 0600 temp file so the token never shows in argv *)
+  with_temp ".hdr" (fun header_path ->
+    let channel = open_out header_path in
+    Fun.protect
+      ~finally:(fun () -> close_out channel)
+      (fun () ->
+        output_string channel ("Authorization: Bearer " ^ token ^ "\n"));
+    with_temp ".status" (fun status_path ->
+      let status =
+        run_to_file "/usr/bin/curl"
+          ["-sfS"; "-H"; "@" ^ header_path; "-o"; output;
+           "-w"; "%{http_code}"; url]
+          status_path
+      in
+      (status, String.trim (read_text status_path))))
 
 let jq_message json_path =
   with_temp ".msg" (fun output ->
@@ -220,6 +224,21 @@ let last_cached_date path =
           | exception End_of_file -> last
         in
         loop None)
+
+let first_cached_date path =
+  if not (Sys.file_exists path) then None
+  else
+    let input = open_in path in
+    Fun.protect
+      ~finally:(fun () -> close_in input)
+      (fun () ->
+        match input_line input with
+        | exception End_of_file -> None
+        | _header ->
+            (match input_line input with
+             | exception End_of_file -> None
+             | line ->
+                 (match row_date line with "" -> None | date -> Some date)))
 
 let append_rows ~header ~rows_path ~cache_path ~after =
   let needs_header =
@@ -281,27 +300,46 @@ let transform_json ~expression ~json_path ~rows_path =
   | Unix.WEXITED 0 -> ()
   | _ -> failwith "jq failed while converting the FinMind response"
 
+let fetch_rows ~token ~dataset ~symbol ~from_ ~to_ ~expression ~consume =
+  with_temp ".json" (fun json_path ->
+    let url = api_url ~dataset ~symbol ~from_ ~to_ in
+    let process_status, http_code = curl_get ~token ~url ~output:json_path in
+    require_price_response json_path process_status http_code;
+    with_temp ".rows" (fun rows_path ->
+      transform_json ~expression ~json_path ~rows_path;
+      consume rows_path))
+
 let fetch_prices ~token ~market ~symbol ~from_ ~to_ ~cache_path =
-  let last_date = last_cached_date cache_path in
-  let start_date = match last_date with None -> from_ | Some date -> next_date date in
-  if String.compare start_date to_ <= 0 then
-    with_temp ".json" (fun json_path ->
-      let dataset, expression, header =
-        if market = "tw" then
-          ("TaiwanStockPrice",
-           ".data[] | [.date, .open, .max, .min, .close, .Trading_Volume] | @csv",
-           "date,open,high,low,close,volume")
-        else
-          ("USStockPrice",
-           ".data[] | [.date, .Open, .High, .Low, .Close, .Adj_Close, .Volume] | @csv",
-           "date,open,high,low,close,adj_close,volume")
-      in
-      let url = api_url ~dataset ~symbol ~from_:start_date ~to_ in
-      let process_status, http_code = curl_get ~token ~url ~output:json_path in
-      require_price_response json_path process_status http_code;
-      with_temp ".rows" (fun rows_path ->
-        transform_json ~expression ~json_path ~rows_path;
-        append_rows ~header ~rows_path ~cache_path ~after:last_date))
+  if market = "tw" then begin
+    (* raw TW prices never change retroactively, so the cache is append-only *)
+    let last_date = last_cached_date cache_path in
+    let start_date =
+      match last_date with None -> from_ | Some date -> next_date date
+    in
+    if String.compare start_date to_ <= 0 then
+      fetch_rows ~token ~dataset:"TaiwanStockPrice" ~symbol
+        ~from_:start_date ~to_
+        ~expression:".data[] | [.date, .open, .max, .min, .close, .Trading_Volume] | @csv"
+        ~consume:(fun rows_path ->
+          append_rows ~header:"date,open,high,low,close,volume"
+            ~rows_path ~cache_path ~after:last_date)
+  end
+  else begin
+    (* US Adj_Close is rewritten retroactively by upstream dividends and
+       splits; appending fresh rows to old ones would mix adjustment
+       baselines, so the US cache is refetched in full and rewritten *)
+    let start_date =
+      match first_cached_date cache_path with
+      | Some date when String.compare date from_ < 0 -> date
+      | _ -> from_
+    in
+    fetch_rows ~token ~dataset:"USStockPrice" ~symbol
+      ~from_:start_date ~to_
+      ~expression:".data[] | [.date, .Open, .High, .Low, .Close, .Adj_Close, .Volume] | @csv"
+      ~consume:(fun rows_path ->
+        rewrite_rows ~header:"date,open,high,low,close,adj_close,volume"
+          ~rows_path ~cache_path)
+  end
 
 let fetch_dividends ~token ~symbol ~to_ ~cache_path =
   with_temp ".json" (fun json_path ->
@@ -310,16 +348,22 @@ let fetch_dividends ~token ~symbol ~to_ ~cache_path =
         ~from_:"1900-01-01" ~to_
     in
     let process_status, http_code = curl_get ~token ~url ~output:json_path in
-    if not (process_ok process_status) then
-      if http_code <> "" && http_code <> "000" && http_code <> "200" then
-        remove_cache cache_path
-      else
-        failwith "fetch failed for api.finmindtrade.com (HTTP unavailable)"
-    else if http_code <> "200" then
-      remove_cache cache_path
+    (* a failed dividend fetch never destroys previously cached factors;
+       stale factors beat none, and transient 402/429/5xx would otherwise
+       silently flip later runs to unadjusted prices *)
+    let keep reason =
+      Printf.eprintf "warning: dividend fetch failed (%s); %s\n" reason
+        (if Sys.file_exists cache_path then "keeping cached dividend data"
+         else "prices will be unadjusted for dividends")
+    in
+    if not (process_ok process_status) || http_code <> "200" then
+      keep
+        ("HTTP " ^
+         (if http_code = "" || http_code = "000" then "unavailable"
+          else http_code))
     else
       match check_api_response json_path with
-      | `Error _ -> remove_cache cache_path
+      | `Error message -> keep message
       | `Ok ->
           with_temp ".rows" (fun rows_path ->
             transform_json

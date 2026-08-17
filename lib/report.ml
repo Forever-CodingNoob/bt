@@ -18,7 +18,7 @@ let verdict ~lower strategy benchmark =
 let optional_verdict strategy benchmark =
   match strategy, benchmark with
   | Some strategy, Some benchmark -> verdict ~lower:false strategy benchmark
-  | _ -> "LOSS"
+  | _ -> "n/a"
 
 let print_row name strategy benchmark result =
   Printf.printf "%-16s | %12s | %12s | %7s\n"
