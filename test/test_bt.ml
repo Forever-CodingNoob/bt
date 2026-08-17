@@ -231,6 +231,22 @@ let test_engine_partial_open () =
   assert (List.length result.fills = 4);
   assert (List.length result.trips = 1)
 
+let test_engine_partial_open_costs () =
+  let strategy : Engine.strategy =
+    { target = [| 0.; 0.5; 1.; 0.5; 0. |] }
+  in
+  let costs : Engine.costs =
+    { fee_bps = 100.; tax_bps = 0.; slip_bps = 0. }
+  in
+  let result = Engine.run fill_bars strategy costs ~fill:Engine.Open_next in
+  let expected =
+    0.995 *. (1. +. 0.5 *. (108. /. 106. -. 1.))
+    *. (1. +. 0.5 *. (110. /. 108. -. 1.)) *. 0.995
+    *. (112. /. 110.) *. (114. /. 112.) *. 0.995
+    *. (1. +. 0.5 *. (116. /. 114. -. 1.)) *. 0.995
+  in
+  assert_close ~tolerance:1e-12 expected (final_equity result)
+
 let dsl_bars =
   (* closes 100 105 110 100 90; open = previous close *)
   [| bar "2020-01-01" 100. 100.;
@@ -251,6 +267,13 @@ let test_target_style () =
       assert (List.length result.trips = 1);
       assert ((List.hd result.trips).Engine.net_ret < 0.))
 
+let test_hold_tie_break () =
+  with_temp_strategy
+    "target num(hold(close > 50.0, close > 0.0))\n"
+    (fun path ->
+      let strategy = Dsl.compile path ~params:[] dsl_bars in
+      assert (strategy.Engine.target = [| 0.; 0.; 0.; 0.; 0. |]))
+
 let test_order_style () =
   with_temp_strategy
     ("cap 1.0\n\
@@ -269,6 +292,7 @@ let test_style_errors () =
   rejects "target 1.0\nentry when close > 0.0\nexit when close < 0.0\n";
   rejects "target 1.0\ntarget 0.5\n";
   rejects "target 1.0\ncap 1.0\n";
+  rejects "target 1.0\nsize 1.0\n";
   rejects "entry when close > 0.0 size 0.5\nsize 1.0\n";
   rejects "exit when close < 0.0 size 0.5\n"
 
@@ -358,6 +382,7 @@ let () =
   test_parser ();
   test_indicators ();
   test_target_style ();
+  test_hold_tie_break ();
   test_order_style ();
   test_style_errors ();
   test_engine ();
@@ -366,6 +391,7 @@ let () =
   test_engine_partial ();
   test_engine_partial_costs ();
   test_engine_partial_open ();
+  test_engine_partial_open_costs ();
   test_golden ();
   test_plot_script ();
   test_detect_splits ();

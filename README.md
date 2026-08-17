@@ -153,8 +153,9 @@ Operator precedence, from low to high: `or`, `and`, `not`, comparisons,
 - `param name = number` declares a parameter. The CLI flag
   `-p name=value` can override it.
 - `let name = expr` binds an expression result to a name.
-- `entry when expr` and `exit when expr` set boolean conditions. Partial
-  orders can repeat these statements and add an inline `size expr`.
+- `entry when expr` and `exit when expr` set boolean conditions. The
+  expression must give a boolean series. Partial orders can repeat these
+  statements and add an inline `size expr`.
 - `size expr` sets the exposure in legacy style. It is optional. The
   default is 1.0. A value above 1.0 applies daily-reset leverage. A value
   that is NaN or not positive falls back to 1.0.

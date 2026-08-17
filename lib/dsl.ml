@@ -488,7 +488,7 @@ let compile source ~params bars =
     end
     else if style_2 then begin
       if size <> None then
-        failwith "standalone size cannot be mixed with inline sizes";
+        failwith "standalone size is only valid in the legacy entry/exit style";
       if entries = [] then failwith "at least one entry statement is required";
       let entry_signals =
         List.rev_map
