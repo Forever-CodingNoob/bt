@@ -70,7 +70,7 @@ size 1.0
 
 ### Grammar (BNF)
 
-$$
+```math
 \begin{align*}
 \langle\textit{file}\rangle &::= \{\ \langle\textit{statement}\rangle\ \} \\
 \langle\textit{statement}\rangle &::= \texttt{param}\ \langle\textit{ident}\rangle\ \texttt{=}\ \langle\textit{number}\rangle \\
@@ -86,10 +86,10 @@ $$
 \langle\textit{binop}\rangle &::= \texttt{+}\ \mid\ \texttt{-}\ \mid\ \texttt{*}\ \mid\ \texttt{/} \\
 &\quad\mid\ \texttt{<}\ \mid\ \texttt{<=}\ \mid\ \texttt{>}\ \mid\ \texttt{>=}\ \mid\ \texttt{==}\ \mid\ \texttt{!=} \\
 &\quad\mid\ \texttt{and}\ \mid\ \texttt{or} \\
-\langle\textit{ident}\rangle &::= (\ \textit{letter}\ \mid\ \texttt{\textunderscore}\ )\ \{\ \textit{letter}\ \mid\ \textit{digit}\ \mid\ \texttt{\textunderscore}\ \} \\
+\langle\textit{ident}\rangle &::= (\ \textit{letter}\ \mid\ \texttt{\_}\ )\ \{\ \textit{letter}\ \mid\ \textit{digit}\ \mid\ \texttt{\_}\ \} \\
 \langle\textit{number}\rangle &::= \textit{decimal literal, with an optional exponent}
 \end{align*}
-$$
+```
 
 Braces `{ }` mean repetition of zero or more times. Brackets `[ ]`
 mean an optional part.
