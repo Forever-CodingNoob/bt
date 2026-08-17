@@ -231,6 +231,47 @@ let test_engine_partial_open () =
   assert (List.length result.fills = 4);
   assert (List.length result.trips = 1)
 
+let dsl_bars =
+  (* closes 100 105 110 100 90; open = previous close *)
+  [| bar "2020-01-01" 100. 100.;
+     bar "2020-01-02" 100. 105.;
+     bar "2020-01-03" 105. 110.;
+     bar "2020-01-06" 110. 100.;
+     bar "2020-01-07" 100. 90. |]
+
+let test_target_style () =
+  with_temp_strategy
+    "target num(hold(cross_above(close, 104.0), cross_below(close, 104.0)))\n"
+    (fun path ->
+      let strategy = Dsl.compile path ~params:[] dsl_bars in
+      assert (strategy.Engine.target = [| 0.; 1.; 1.; 0.; 0. |]);
+      let result = Engine.run dsl_bars strategy zero_costs ~fill:Engine.Close_same in
+      (* buy close 105, accrue 110/105 then 100/110, sell close 100 *)
+      assert_close ~tolerance:1e-12 (100. /. 105.) (final_equity result);
+      assert (List.length result.trips = 1);
+      assert ((List.hd result.trips).Engine.net_ret < 0.))
+
+let test_order_style () =
+  with_temp_strategy
+    ("cap 1.0\n\
+      entry when cross_above(close, 104.0) size 0.5\n\
+      entry when cross_above(close, 108.0) size 0.5\n\
+      exit when cross_below(close, 104.0) size 1.0\n")
+    (fun path ->
+      let strategy = Dsl.compile path ~params:[] dsl_bars in
+      assert (strategy.Engine.target = [| 0.; 0.5; 1.; 0.; 0. |]))
+
+let test_style_errors () =
+  let rejects source =
+    with_temp_strategy source (fun path ->
+      assert_failure (fun () -> ignore (Dsl.compile path ~params:[] dsl_bars)))
+  in
+  rejects "target 1.0\nentry when close > 0.0\nexit when close < 0.0\n";
+  rejects "target 1.0\ntarget 0.5\n";
+  rejects "target 1.0\ncap 1.0\n";
+  rejects "entry when close > 0.0 size 0.5\nsize 1.0\n";
+  rejects "exit when close < 0.0 size 0.5\n"
+
 let load_fixture path =
   let input = open_in path in
   Fun.protect
@@ -316,6 +357,9 @@ let test_detect_splits () =
 let () =
   test_parser ();
   test_indicators ();
+  test_target_style ();
+  test_order_style ();
+  test_style_errors ();
   test_engine ();
   test_engine_close ();
   test_engine_close_costs ();

@@ -7,6 +7,8 @@ let keyword = function
   | "entry" -> ENTRY
   | "exit" -> EXIT
   | "size" -> SIZE
+  | "target" -> TARGET
+  | "cap" -> CAP
   | "when" -> WHEN
   | "and" -> AND
   | "or" -> OR
@@ -23,7 +25,7 @@ let ident_char = ['A'-'Z' 'a'-'z' '0'-'9' '_']
 
 rule token = parse
   | [' ' '\t' '\r'] { token lexbuf }
-  | '\n' { Lexing.new_line lexbuf; token lexbuf }
+  | '\n' { Lexing.new_line lexbuf; NEWLINE }
   | '#' [^ '\n']* { token lexbuf }
   | "==" { EQEQ }
   | "!=" { NEQ }

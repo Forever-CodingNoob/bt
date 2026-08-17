@@ -164,6 +164,11 @@ let expect_period expression value =
         fail_expr expression "period must be at least 1";
       int_of_float number
 
+let cross_operand context expression = function
+  | Scalar number -> Array.make context.length number
+  | Series series -> series
+  | Bools _ -> fail_expr expression "cross expects numbers or numeric series"
+
 let nan_min left right =
   if Float.is_nan left || Float.is_nan right then Float.nan
   else if left < right then left else right
@@ -174,8 +179,9 @@ let nan_max left right =
 
 let builtin_arity = function
   | "sma" | "ema" | "rsi" | "stddev" | "highest" | "lowest" | "lag"
-  | "bb_mid" | "cross_above" | "cross_below" | "max" | "min" -> Some 2
-  | "atr" | "abs" -> Some 1
+  | "bb_mid" | "cross_above" | "cross_below" | "max" | "min" | "hold" ->
+      Some 2
+  | "atr" | "abs" | "num" -> Some 1
   | "bb_upper" | "bb_lower" | "macd" -> Some 3
   | "macd_signal" | "macd_hist" -> Some 4
   | _ -> None
@@ -261,12 +267,36 @@ and eval_call context expression name arguments =
   | "abs", [number] -> numeric_unary expression abs_float number
   | "max", [left; right] -> numeric_binary expression nan_max left right
   | "min", [left; right] -> numeric_binary expression nan_min left right
+  | "num", [value] ->
+      (match value with
+       | Bools flags ->
+           let out = Array.make (Array.length flags) 0. in
+           for i = 0 to Array.length flags - 1 do
+             if flags.(i) then out.(i) <- 1.
+           done;
+           Series out
+       | _ -> fail_expr expression "num expects a boolean series")
+  | "hold", [set; reset] ->
+      (match set, reset with
+       | Bools set, Bools reset ->
+           check_bool_lengths expression set reset;
+           let out = Array.make (Array.length set) false in
+           let state = ref false in
+           for i = 0 to Array.length set - 1 do
+             if reset.(i) then state := false
+             else if set.(i) then state := true;
+             out.(i) <- !state
+           done;
+           Bools out
+       | _ -> fail_expr expression "hold expects two boolean series")
   | "cross_above", [left; right] ->
-      Bools (Series.cross_above (expect_series expression left)
-               (expect_series expression right))
+      Bools (Series.cross_above
+               (cross_operand context expression left)
+               (cross_operand context expression right))
   | "cross_below", [left; right] ->
-      Bools (Series.cross_below (expect_series expression left)
-               (expect_series expression right))
+      Bools (Series.cross_below
+               (cross_operand context expression left)
+               (cross_operand context expression right))
   | "bb_upper", [series; period; width] ->
       Series (Series.bb_upper (expect_series expression series)
                 (expect_period expression period)
@@ -352,57 +382,79 @@ let compile source ~params bars =
   validate_overrides declarations params;
   let context = { bars; length = Array.length bars } in
   let initial_environment = series_environment bars in
-  let environment, entry, exit_, size =
+  let environment, entries, exits, size, targets, cap =
     List.fold_left
-      (fun (environment, entry, exit_, size) statement ->
+      (fun (environment, entries, exits, size, targets, cap) statement ->
         match statement with
         | Param (name, default) ->
             let value = overridden_value params name default in
-            (name, Scalar value) :: environment, entry, exit_, size
+            ((name, Scalar value) :: environment,
+             entries, exits, size, targets, cap)
         | Let (name, expression) ->
             let value = eval context environment expression in
-            (name, value) :: environment, entry, exit_, size
-        | Entry expression ->
-            begin
-              match entry with
-              | Some _ -> failwith "strategy must contain exactly one entry statement"
-              | None ->
-                  let signal = bool_signal "entry" expression
-                      (eval context environment expression) in
-                  environment, Some signal, exit_, size
-            end
-        | Exit expression ->
-            begin
-              match exit_ with
-              | Some _ -> failwith "strategy must contain exactly one exit statement"
-              | None ->
-                  let signal = bool_signal "exit" expression
-                      (eval context environment expression) in
-                  environment, entry, Some signal, size
-            end
+            ((name, value) :: environment, entries, exits, size, targets, cap)
+        | Entry (expression, inline_size_expression) ->
+            let signal =
+              bool_signal "entry" expression
+                (eval context environment expression)
+            in
+            let inline_size =
+              match inline_size_expression with
+              | None -> None
+              | Some size_expression ->
+                  Some (size_expression,
+                        eval context environment size_expression)
+            in
+            (environment, (signal, inline_size) :: entries,
+             exits, size, targets, cap)
+        | Exit (expression, inline_size_expression) ->
+            let signal =
+              bool_signal "exit" expression
+                (eval context environment expression)
+            in
+            let inline_size =
+              match inline_size_expression with
+              | None -> None
+              | Some size_expression ->
+                  Some (size_expression,
+                        eval context environment size_expression)
+            in
+            (environment, entries, (signal, inline_size) :: exits,
+             size, targets, cap)
         | Size expression ->
             begin
               match size with
               | Some _ -> failwith "strategy may contain at most one size statement"
               | None ->
                   let value = eval context environment expression in
-                  environment, entry, exit_, Some (expression, value)
+                  (environment, entries, exits, Some (expression, value),
+                   targets, cap)
+            end
+        | Target expression ->
+            let value = eval context environment expression in
+            (environment, entries, exits, size,
+             (expression, value) :: targets, cap)
+        | Cap value ->
+            begin
+              match cap with
+              | Some _ -> failwith "strategy may contain at most one cap statement"
+              | None ->
+                  (environment, entries, exits, size, targets, Some value)
             end)
-      (initial_environment, None, None, None) statements
+      (initial_environment, [], [], None, [], None) statements
   in
   ignore environment;
-  let entry =
-    match entry with
-    | Some signal -> signal
-    | None -> failwith "strategy must contain exactly one entry statement"
+  let has_target = targets <> [] in
+  let has_inline =
+    List.exists (fun (_, inline_size) -> inline_size <> None) entries
+    || List.exists (fun (_, inline_size) -> inline_size <> None) exits
   in
-  let exit_ =
-    match exit_ with
-    | Some signal -> signal
-    | None -> failwith "strategy must contain exactly one exit statement"
+  let style_2 =
+    not has_target
+    && (has_inline || cap <> None
+        || List.length entries > 1 || List.length exits > 1)
   in
-  let size_at =
-    match size with
+  let size_at = function
     | None -> (fun _ -> 1.)
     | Some (_, Scalar number) -> (fun _ -> number)
     | Some (expression, Series series) ->
@@ -412,22 +464,100 @@ let compile source ~params bars =
     | Some (expression, Bools _) ->
         fail_expr expression "size must be a scalar or numeric series"
   in
-  let clamp_legacy value =
-    if Float.is_nan value || value <= 0. then 1. else value
+  let target =
+    if has_target then begin
+      if List.length targets > 1 then
+        failwith "only one target statement is allowed";
+      if entries <> [] || exits <> [] then
+        failwith "target cannot be mixed with entry/exit statements";
+      if cap <> None then failwith "cap is only valid with entry/exit sizes";
+      if size <> None then
+        failwith "size is only valid in legacy entry/exit style";
+      let expression, value =
+        match targets with
+        | [(expression, value)] -> expression, value
+        | _ -> assert false
+      in
+      match value with
+      | Scalar number -> Array.make context.length number
+      | Series series ->
+          if Array.length series <> context.length then
+            fail_expr expression "target series length mismatch";
+          series
+      | Bools _ -> fail_expr expression "target must be numeric"
+    end
+    else if style_2 then begin
+      if size <> None then
+        failwith "standalone size cannot be mixed with inline sizes";
+      if entries = [] then failwith "at least one entry statement is required";
+      let entry_signals =
+        List.rev_map
+          (fun (condition, inline_size) ->
+            condition, size_at inline_size)
+          entries
+      in
+      let exit_signals =
+        List.rev_map
+          (fun (condition, inline_size) ->
+            condition, size_at inline_size)
+          exits
+      in
+      let cap_value = match cap with None -> 1.0 | Some value -> value in
+      let size_points value_at t =
+        let value = value_at t in
+        if Float.is_nan value then 0. else value
+      in
+      let target = Array.make context.length 0. in
+      let exposure = ref 0. in
+      for t = 0 to context.length - 1 do
+        let delta = ref 0. in
+        List.iter
+          (fun (condition, points_at) ->
+            if condition.(t) then
+              delta := !delta +. size_points points_at t)
+          entry_signals;
+        List.iter
+          (fun (condition, points_at) ->
+            if condition.(t) then
+              delta := !delta -. size_points points_at t)
+          exit_signals;
+        exposure :=
+          Float.min cap_value (Float.max 0. (!exposure +. !delta));
+        target.(t) <- !exposure
+      done;
+      target
+    end
+    else begin
+      let entry =
+        match entries with
+        | [(signal, None)] -> signal
+        | _ -> failwith "strategy must contain exactly one entry statement"
+      in
+      let exit_ =
+        match exits with
+        | [(signal, None)] -> signal
+        | _ -> failwith "strategy must contain exactly one exit statement"
+      in
+      let size_at = size_at size in
+      let clamp_legacy value =
+        if Float.is_nan value || value <= 0. then 1. else value
+      in
+      let target = Array.make context.length 0. in
+      let in_position = ref false in
+      let held = ref 0. in
+      for t = 0 to context.length - 1 do
+        if !in_position then begin
+          if exit_.(t) then in_position := false
+          else target.(t) <- !held
+        end
+        else if entry.(t) then begin
+          held := clamp_legacy (size_at t);
+          in_position := true;
+          target.(t) <- !held
+        end
+      done;
+      target
+    end
   in
-  let target = Array.make context.length 0. in
-  let in_position = ref false in
-  let held = ref 0. in
-  for t = 0 to context.length - 1 do
-    if !in_position then begin
-      if exit_.(t) then in_position := false
-      else target.(t) <- !held
-    end
-    else if entry.(t) then begin
-      held := clamp_legacy (size_at t);
-      in_position := true;
-      target.(t) <- !held
-    end
-  done;
   let strategy : Engine.strategy = { target } in
   strategy
