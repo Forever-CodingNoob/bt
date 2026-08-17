@@ -70,26 +70,29 @@ size 1.0
 
 ### Grammar (BNF)
 
-```
-file       ::= { statement }
-statement  ::= "param" ident "=" number
-             | "let" ident "=" expr
-             | "entry" "when" expr
-             | "exit" "when" expr
-             | "size" expr
-expr       ::= number
-             | ident
-             | ident "(" [ expr { "," expr } ] ")"
-             | "(" expr ")"
-             | "-" expr
-             | "not" expr
-             | expr binop expr
-binop      ::= "+" | "-" | "*" | "/"
-             | "<" | "<=" | ">" | ">=" | "==" | "!="
-             | "and" | "or"
-ident      ::= ( letter | "_" ) { letter | digit | "_" }
-number     ::= decimal literal, with an optional exponent
-```
+$$
+\begin{align*}
+\langle\textit{file}\rangle &::= \{\ \langle\textit{statement}\rangle\ \} \\
+\langle\textit{statement}\rangle &::= \texttt{param}\ \langle\textit{ident}\rangle\ \texttt{=}\ \langle\textit{number}\rangle \\
+&\quad\mid\ \texttt{let}\ \langle\textit{ident}\rangle\ \texttt{=}\ \langle\textit{expr}\rangle \\
+&\quad\mid\ \texttt{entry}\ \texttt{when}\ \langle\textit{expr}\rangle \\
+&\quad\mid\ \texttt{exit}\ \texttt{when}\ \langle\textit{expr}\rangle \\
+&\quad\mid\ \texttt{size}\ \langle\textit{expr}\rangle \\
+\langle\textit{expr}\rangle &::= \langle\textit{number}\rangle\ \mid\ \langle\textit{ident}\rangle \\
+&\quad\mid\ \langle\textit{ident}\rangle\ \texttt{(}\ [\ \langle\textit{expr}\rangle\ \{\ \texttt{,}\ \langle\textit{expr}\rangle\ \}\ ]\ \texttt{)} \\
+&\quad\mid\ \texttt{(}\ \langle\textit{expr}\rangle\ \texttt{)} \\
+&\quad\mid\ \texttt{-}\ \langle\textit{expr}\rangle\ \mid\ \texttt{not}\ \langle\textit{expr}\rangle \\
+&\quad\mid\ \langle\textit{expr}\rangle\ \langle\textit{binop}\rangle\ \langle\textit{expr}\rangle \\
+\langle\textit{binop}\rangle &::= \texttt{+}\ \mid\ \texttt{-}\ \mid\ \texttt{*}\ \mid\ \texttt{/} \\
+&\quad\mid\ \texttt{<}\ \mid\ \texttt{<=}\ \mid\ \texttt{>}\ \mid\ \texttt{>=}\ \mid\ \texttt{==}\ \mid\ \texttt{!=} \\
+&\quad\mid\ \texttt{and}\ \mid\ \texttt{or} \\
+\langle\textit{ident}\rangle &::= (\ \textit{letter}\ \mid\ \texttt{\_}\ )\ \{\ \textit{letter}\ \mid\ \textit{digit}\ \mid\ \texttt{\_}\ \} \\
+\langle\textit{number}\rangle &::= \textit{decimal literal, with an optional exponent}
+\end{align*}
+$$
+
+Braces $\{\ \}$ mean repetition of zero or more times. Brackets $[\ ]$
+mean an optional part.
 
 A `#` starts a comment. The comment stops at the end of the line.
 
