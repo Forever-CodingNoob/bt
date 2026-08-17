@@ -1,0 +1,7 @@
+(library
+ (name btlib)
+ (libraries unix))
+
+(ocamllex lexer)
+
+(ocamlyacc parser)

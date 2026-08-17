@@ -1,0 +1,3 @@
+(executable
+ (name bt)
+ (libraries btlib))

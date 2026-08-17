@@ -1,0 +1,6 @@
+param n = 20
+param k = 2.0
+let hist = macd_hist(close, 12, 26, 9)
+entry when cross_above(close, bb_lower(close, n, k)) and hist > 0
+exit  when cross_below(close, bb_mid(close, n)) or hist < 0
+size 1.0

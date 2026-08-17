@@ -1,0 +1,4 @@
+param fast = 50
+param slow = 200
+entry when cross_above(sma(close, fast), sma(close, slow))
+exit  when cross_below(sma(close, fast), sma(close, slow))

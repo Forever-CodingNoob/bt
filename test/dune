@@ -1,0 +1,7 @@
+(test
+ (name test_bt)
+ (libraries btlib)
+ (deps
+  ../examples/sma_cross.strat
+  ../examples/bb_macd.strat
+  fixtures/synthetic.csv))
