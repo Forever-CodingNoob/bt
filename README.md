@@ -1,8 +1,8 @@
 # bt
 
 `bt` is a command-line backtest tool written in OCaml. It downloads daily
-prices from the FinMind API, and it tests a strategy script against a
-buy-and-hold benchmark.
+prices from the FinMind API and runs one or more strategy scripts. A run can
+compare all strategies with an optional buy-and-hold baseline.
 
 ## Contents
 
@@ -45,51 +45,64 @@ The binary is `_build/default/bin/bt.exe`.
    ```
 2. Download data:
    ```sh
-   bt fetch --market tw --symbol 0050 --from 2016-01-01
-   bt fetch --market tw --symbol 00685L --from 2016-01-01
+   bt fetch tw/0050 --from 2016-01-01
+   bt fetch tw/00685L --from 2016-01-01
    ```
-3. Run a backtest:
+3. Run two strategies and add a buy-and-hold baseline:
    ```sh
-   bt run examples/sma_cross.strat --market tw --symbol 0050 --benchmark 00685L
+   bt run examples/sma_cross.strat examples/00685L_bh.strat \
+     --baseline tw/00685L
    ```
 
-The report shows each metric for the strategy and the benchmark, with a
-WIN or LOSS verdict. The run also writes `out/equity.csv`,
-`out/trades.csv`, and `out/equity.png`.
+The report has one column for each strategy and one baseline column. Each
+strategy metric has a `W` or `L` marker when you use `--baseline`.
 
-The report prints the fill mode on the date-range line.
-The `out/trades.csv` file uses the header
-`date,price,from_exposure,to_exposure`.
+The default output stem joins the strategy basenames with `_vs_`. This
+example writes `out/sma_cross_vs_00685L_bh.csv` and
+`out/sma_cross_vs_00685L_bh.png`. It also writes the fill logs
+`out/sma_cross.trades.csv` and `out/00685L_bh.trades.csv`. A fill log has
+the header `date,price,from_exposure,to_exposure`.
 
 ## Commands
 
 ```
-bt fetch --market tw|us --symbol SYM [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--data-dir DIR]
-bt run STRAT_FILE --market tw|us --symbol SYM [--from D] [--to D]
-       [--benchmark SYM] [--benchmark-market tw|us] [-p name=value ...]
-       [--fill open|close] [--fee-bps F] [--tax-bps F] [--slip-bps F]
-       [--data-dir DIR] [--out-dir DIR] [--no-plot]
+bt fetch MARKET/SYMBOL [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--data-dir DIR]
+bt run STRAT... [--baseline M/SYM] [--from D] [--to D]
+       [-p name=value ...] [--fill open|close]
+       [--fee-bps F] [--tax-bps F] [--slip-bps F]
+       [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]
 ```
 
-See [docs/cli.md](./docs/cli.md) for the complete reference for each command, flag, and option.
+See [docs/cli.md](./docs/cli.md) for the complete reference.
 
-- The default benchmark is `00685L` in market `tw`.
-- `-p name=value` overrides a `param` in the strategy file.
-- `--fill` selects the fill point: `close` fills at the decision close
-  (default), `open` fills at the next open.
-- `--no-plot` prevents the PNG output.
-- The cost flags take basis points. 100 basis points = 1%.
+- Use a value such as `tw/0050` for `MARKET/SYMBOL`. You can use
+  `--market tw|us --symbol SYM` instead.
+- The default fetch range starts on `1994-10-01` and ends today.
+- Each strategy file contains exactly one `stock "market/symbol"`
+  statement.
+- `--baseline M/SYM` adds an optional buy-and-hold baseline.
+- `-p name=value` overrides a matching `param` in the strategy files.
+- `--fill` selects the fill point. `close` fills at the decision close
+  and is the default. `open` fills at the next open.
+- The default curve stem joins strategy basenames with `_vs_`.
+  `--out-name NAME` replaces this stem. The curve files are
+  `<stem>.csv` and `<stem>.png`.
+- Each strategy gets a separate `<name>.trades.csv` fill log.
+  `--out-name` does not change these log names.
+- `--no-plot` prevents updates to `plot.py` and `<stem>.png`.
+- The cost flags take basis points. 100 basis points are 1%.
 
 ## Strategy language (DSL)
 
 A strategy file is a small script. Example (`examples/bb_macd.strat`):
 
 ```
+stock "tw/0050"
 param n = 20
 param k = 2.0
 let hist = macd_hist(close, 12, 26, 9)
-entry when cross_above(close, bb_lower(close, n, k)) and hist > 0
-exit  when cross_below(close, bb_mid(close, n)) or hist < 0
+entry when cross_above(close, bb_mid(close, n)) and hist > 0
+exit  when cross_below(close, bb_lower(close, n, k)) or hist < 0
 size 1.0
 ```
 
@@ -138,7 +151,8 @@ Use exactly one `entry` statement and one `exit` statement. The standalone
 
 ```
 file       ::= { statement }
-statement  ::= "param" ident "=" number
+statement  ::= "stock" string
+             | "param" ident "=" number
              | "let" ident "=" expr
              | "entry" "when" expr [ "size" expr ]
              | "exit" "when" expr [ "size" expr ]
@@ -157,6 +171,7 @@ binop      ::= "+" | "-" | "*" | "/"
              | "and" | "or"
 ident      ::= ( letter | "_" ) { letter | digit | "_" }
 number     ::= decimal literal, with an optional exponent
+string     ::= '"' { character except '"' or newline } '"'
 ```
 
 Braces `{ }` mean repetition of zero or more times. Brackets `[ ]`
@@ -169,6 +184,9 @@ Operator precedence, from low to high: `or`, `and`, `not`, comparisons,
 
 ### Statements
 
+- `stock "market/symbol"` selects the data for the strategy. Use market
+  `tw` or `us`. Each strategy file must contain exactly one `stock`
+  statement.
 - `param name = number` declares a parameter. The CLI flag
   `-p name=value` can override it.
 - `let name = expr` binds an expression result to a name.
@@ -274,7 +292,9 @@ Arithmetic helpers:
 - US prices are adjusted with the `Adj_Close` column. The US cache is
   downloaded again in full on each fetch, because `Adj_Close` changes
   for old rows after each dividend.
-- A repeated fetch adds only new TW rows. It does not create duplicates.
+- A Taiwan fetch prepends rows when `--from` is earlier than the first
+  cached date. It also appends rows after the last cached date. Cached
+  dates are not added again, so repeated fetches are idempotent.
 
 ## Contributing
 
