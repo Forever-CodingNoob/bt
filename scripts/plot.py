@@ -14,11 +14,14 @@ with open(csv_path) as f:
         dates.append(date.fromisoformat(row[0]))
         for name, v in zip(header[1:], row[1:]):
             series[name].append(float(v))
-fig, ax = plt.subplots(figsize=(12, 6))
+fig, ax = plt.subplots(figsize=(18, 6))
 for name, ys in series.items():
     ax.plot(dates, ys, label=name, linewidth=1.5)
-ax.set_title("Equity curve (start = 1.0)")
-ax.set_ylabel("equity")
+ax.set_yscale("log")
+title = " vs ".join(header[1:])
+if dates:
+    title += " ({} to {})".format(dates[0].isoformat(), dates[-1].isoformat())
+ax.set_title(title)
 ax.legend(loc="upper left")
 ax.grid(True, alpha=0.4)
 fig.autofmt_xdate()
