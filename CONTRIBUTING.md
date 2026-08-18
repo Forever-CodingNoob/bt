@@ -18,6 +18,7 @@ test/fixtures/   Synthetic CSV data for tests
 examples/        Strategy examples
 scripts/plot.py  Equity graph renderer (run directly by bt)
 docs/cli.md      Complete CLI reference
+docs/strategy.md Strategy language reference (styles, grammar, builtins)
 docs/specs/      Design specs; docs/plans/ implementation plans
 ```
 
