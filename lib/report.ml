@@ -41,7 +41,7 @@ let maximum_target target =
 let print ~(strategy : Engine.result) ~(benchmark : Engine.result) ~target ~fill =
   let strategy_metrics = Metrics.of_result strategy in
   let benchmark_metrics = Metrics.of_result benchmark in
-  print_row "Metric" "Strategy" "Benchmark" "verdict";
+  print_row "Metric" "Strategy" "Benchmark" "Verdict";
   print_endline (String.make 55 '-');
   print_row "Total return"
     (format_percent strategy_metrics.total_return)
