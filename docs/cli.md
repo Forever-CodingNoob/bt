@@ -116,7 +116,7 @@ strategy file selects its data with exactly one
 | `--data-dir DIR` | Set the cache directory. The default is `data/`. |
 | `--out-dir DIR` | Set the output directory. The default is `out/`. |
 | `--out-name NAME` | Set the equity CSV and PNG stem. The default joins the strategy names with `_vs_`. |
-| `--no-plot` | Do not create or update `plot.py` or the equity PNG. The command still writes the equity CSV and all strategy fill logs. |
+| `--no-plot` | Do not run `scripts/plot.py` or create or update the equity PNG. The command still writes the equity CSV and all strategy fill logs. |
 | `-h`, `-help`, `--help` | Print the run options to standard output and exit with code 0. |
 
 Do not pass `--market`, `--symbol`, or `--benchmark-market` to `bt run`.
@@ -190,15 +190,16 @@ The command writes these files under `--out-dir`:
 | --- | --- |
 | `<stem>.csv` | All equity curves. The header is `date`, each strategy name in argument order, and `baseline` when requested. |
 | `<name>.trades.csv` | One fill log for each strategy. The header is `date,price,from_exposure,to_exposure`. Each row records one exposure change. The command does not write a baseline fill log. |
-| `plot.py` | The Python script that reads `<stem>.csv` and makes the graph. The command does not create or update this file with `--no-plot`. |
 | `<stem>.png` | The equity graph. The command does not create or update this file with `--no-plot`. |
 
 `--out-name` changes only `<stem>.csv` and `<stem>.png`. It does not change
-`<name>.trades.csv` or `plot.py`.
+`<name>.trades.csv`.
 
-A plot failure does not fail the backtest. The command prints
-`warning: plot failed; skipping <stem>.png` to standard error and exits with
-code 0 after it saves the CSV files.
+To create the equity graph, `bt` runs `scripts/plot.py` directly; it does not
+copy the script into the output directory. `python3` and matplotlib are
+optional. If either is unavailable or plotting otherwise fails, the command
+prints `warning: plot failed; skipping <stem>.png` to standard error and exits
+with code 0 after it saves the CSV files.
 
 ## Help
 

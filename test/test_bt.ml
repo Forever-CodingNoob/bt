@@ -521,8 +521,34 @@ let contains text fragment =
   search 0
 
 let test_plot_script () =
-  assert (contains Report.plot_script "matplotlib.use(\"Agg\")");
-  assert (contains Report.plot_script "fig.savefig")
+  let path = locate ["scripts/plot.py"; "../scripts/plot.py"] in
+  let input = open_in_bin path in
+  let contents =
+    Fun.protect
+      ~finally:(fun () -> close_in input)
+      (fun () -> really_input_string input (in_channel_length input))
+  in
+  assert (contains contents "matplotlib.use(\"Agg\")");
+  assert (contains contents "fig.savefig");
+  let out_dir = Filename.temp_file "bt-test-plot-" "" in
+  Sys.remove out_dir;
+  Unix.mkdir out_dir 0o700;
+  Fun.protect
+    ~finally:(fun () ->
+      Array.iter
+        (fun name -> Sys.remove (Filename.concat out_dir name))
+        (Sys.readdir out_dir);
+      Unix.rmdir out_dir)
+    (fun () ->
+      let csv_path = Filename.concat out_dir "equity.csv" in
+      let output = open_out csv_path in
+      Fun.protect
+        ~finally:(fun () -> close_out output)
+        (fun () ->
+          output_string output
+            "date,strategy\n2020-01-01,1.0\n2020-01-02,1.1\n");
+      Report.write_png ~out_dir ~stem:"equity";
+      assert (not (Sys.file_exists (Filename.concat out_dir "plot.py"))))
 
 let test_detect_splits () =
   (* 25:1 split between the second and third bar; normal moves elsewhere *)

@@ -25,8 +25,12 @@ compare all strategies with an optional buy-and-hold baseline.
 
 - OCaml and dune (install with opam)
 - `curl` and `jq` in `/usr/bin`
-- `python3` with matplotlib (only for the equity graph; optional)
+- `python3` with matplotlib (optional; used by `scripts/plot.py` for the equity graph)
 - A FinMind API token
+
+For plotting, `bt` runs `scripts/plot.py` directly. If `python3` or matplotlib
+is unavailable, it prints `warning: plot failed; skipping <stem>.png` and
+skips the graph without failing the backtest.
 
 ## Build and test
 
@@ -89,7 +93,7 @@ See [docs/cli.md](./docs/cli.md) for the complete reference.
   `<stem>.csv` and `<stem>.png`.
 - Each strategy gets a separate `<name>.trades.csv` fill log.
   `--out-name` does not change these log names.
-- `--no-plot` prevents updates to `plot.py` and `<stem>.png`.
+- `--no-plot` skips `scripts/plot.py` and prevents updates to `<stem>.png`.
 - The cost flags take basis points. 100 basis points are 1%.
 
 ## Strategy language (DSL)

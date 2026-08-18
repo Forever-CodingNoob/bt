@@ -139,12 +139,6 @@ let print_many ~columns ~baseline ~fill ~stocks ~targets =
   if List.exists (fun target -> maximum_target target > 1.) targets then
     print_endline "Exposure above 1.0 uses daily-reset leverage."
 
-let write_file path contents =
-  let output = open_out_bin path in
-  Fun.protect
-    ~finally:(fun () -> close_out output)
-    (fun () -> output_string output contents)
-
 let write_equity ~out_dir ~stem ~columns ~baseline =
   if columns = [] then invalid_arg "Report.write_outputs: no columns";
   let named_results =
@@ -207,8 +201,6 @@ let write_outputs ~out_dir ~stem ~columns ~baseline =
       write_fills ~out_dir ~name result.Engine.fills)
     columns
 
-let plot_script = Plot_script.source
-
 let rec wait_for pid =
   try snd (Unix.waitpid [] pid) with
   | Unix.Unix_error (Unix.EINTR, _, _) -> wait_for pid
@@ -217,17 +209,28 @@ let warn_plot stem =
   Printf.eprintf "warning: plot failed; skipping %s.png\n" stem
 
 let write_png ~out_dir ~stem =
-  try
-    Data.mkdir_p out_dir;
-    let script_path = Filename.concat out_dir "plot.py" in
-    let csv_path = Filename.concat out_dir (stem ^ ".csv") in
-    let png_path = Filename.concat out_dir (stem ^ ".png") in
-    write_file script_path plot_script;
-    let arguments = [|"python3"; script_path; csv_path; png_path|] in
-    let pid =
-      Unix.create_process "python3" arguments Unix.stdin Unix.stdout Unix.stderr
-    in
-    match wait_for pid with
-    | Unix.WEXITED 0 -> ()
-    | Unix.WEXITED _ | Unix.WSIGNALED _ | Unix.WSTOPPED _ -> warn_plot stem
-  with _ -> warn_plot stem
+  let executable_dir = Filename.dirname Sys.executable_name in
+  let direct_path = Filename.concat executable_dir "scripts/plot.py" in
+  let build_path = executable_dir ^ "/../../../scripts/plot.py" in
+  let script_path =
+    if Sys.file_exists direct_path then Some direct_path
+    else if Sys.file_exists build_path then Some build_path
+    else None
+  in
+  match script_path with
+  | None -> warn_plot stem
+  | Some script_path ->
+      try
+        Data.mkdir_p out_dir;
+        let csv_path = Filename.concat out_dir (stem ^ ".csv") in
+        let png_path = Filename.concat out_dir (stem ^ ".png") in
+        let arguments = [|"python3"; script_path; csv_path; png_path|] in
+        let pid =
+          Unix.create_process "python3" arguments
+            Unix.stdin Unix.stdout Unix.stderr
+        in
+        match wait_for pid with
+        | Unix.WEXITED 0 -> ()
+        | Unix.WEXITED _ | Unix.WSIGNALED _ | Unix.WSTOPPED _ ->
+            warn_plot stem
+      with _ -> warn_plot stem

@@ -2,17 +2,6 @@
  (name btlib)
  (libraries unix))
 
-(rule
- (targets plot_script.ml)
- (deps %{project_root}/scripts/plot.py)
- (action
-  (with-stdout-to
-   %{targets}
-   (progn
-    (echo "let source = {plot|")
-    (cat %{project_root}/scripts/plot.py)
-    (echo "|plot}")))))
-
 (ocamllex lexer)
 
 (ocamlyacc parser)

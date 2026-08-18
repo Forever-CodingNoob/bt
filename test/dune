@@ -5,4 +5,5 @@
   ../examples/sma_cross.strat
   ../examples/bb_macd.strat
   ../examples/00685L_bh.strat
+  ../scripts/plot.py
   fixtures/synthetic.csv))
