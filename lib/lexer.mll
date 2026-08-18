@@ -7,6 +7,7 @@ let keyword = function
   | "entry" -> ENTRY
   | "exit" -> EXIT
   | "size" -> SIZE
+  | "stock" -> STOCK
   | "target" -> TARGET
   | "cap" -> CAP
   | "when" -> WHEN
@@ -43,6 +44,8 @@ rule token = parse
   | ',' { COMMA }
   | number as value { NUMBER (float_of_string value) }
   | ident_start ident_char* as name { keyword name }
+  | '"' [^ '"' '\n']* '"' as s
+      { STRING (String.sub s 1 (String.length s - 2)) }
   | eof { EOF }
   | _ as character {
       failwith (Printf.sprintf "unexpected character %C" character)

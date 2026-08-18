@@ -376,8 +376,7 @@ let bool_signal kind expression = function
   | Bools signal -> signal
   | _ -> fail_expr expression (Printf.sprintf "%s must be a boolean series" kind)
 
-let compile source ~params bars =
-  let statements = parse_file source in
+let compile_ast statements ~params bars =
   let declarations = declared_params statements in
   validate_overrides declarations params;
   let context = { bars; length = Array.length bars } in
@@ -440,7 +439,9 @@ let compile source ~params bars =
               | Some _ -> failwith "strategy may contain at most one cap statement"
               | None ->
                   (environment, entries, exits, size, targets, Some value)
-            end)
+            end
+        | Stock _ ->
+            (environment, entries, exits, size, targets, cap))
       (initial_environment, [], [], None, [], None) statements
   in
   ignore environment;
@@ -561,3 +562,33 @@ let compile source ~params bars =
   in
   let strategy : Engine.strategy = { target } in
   strategy
+
+let compile source ~params bars =
+  compile_ast (parse_file source) ~params bars
+
+let stock_of ~filename statements =
+  let stocks =
+    List.fold_left
+      (fun acc -> function Stock s -> s :: acc | _ -> acc) [] statements
+  in
+  match stocks with
+  | [] ->
+      failwith (Printf.sprintf
+        "%s: add a stock statement, e.g. stock \"tw/00685L\"" filename)
+  | _ :: _ :: _ ->
+      failwith (Printf.sprintf
+        "%s: multiple stocks per strat are not supported yet" filename)
+  | [spec] ->
+      (match String.index_opt spec '/' with
+       | Some i when i > 0 && i < String.length spec - 1 ->
+           let market = String.sub spec 0 i in
+           let symbol =
+             String.sub spec (i + 1) (String.length spec - i - 1)
+           in
+           if market <> "tw" && market <> "us" then
+             failwith (Printf.sprintf
+               "%s: market must be tw or us in stock \"%s\"" filename spec)
+           else (market, symbol)
+       | _ ->
+           failwith (Printf.sprintf
+             "%s: stock expects \"market/symbol\", got \"%s\"" filename spec))

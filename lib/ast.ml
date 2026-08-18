@@ -13,5 +13,6 @@ type stmt =
   | Size of expr                  (* legacy standalone size *)
   | Target of expr
   | Cap of float
+  | Stock of string
 
 type file = stmt list

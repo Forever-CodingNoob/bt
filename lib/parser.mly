@@ -3,10 +3,10 @@ open Ast
 %}
 
 %token PARAM LET ENTRY EXIT SIZE WHEN AND OR NOT
-%token NEWLINE TARGET CAP
+%token NEWLINE TARGET CAP STOCK
 %token ASSIGN EQEQ NEQ LE GE LT GT PLUS MINUS STAR SLASH
 %token LPAREN RPAREN COMMA
-%token <string> IDENT
+%token <string> IDENT STRING
 %token <float> NUMBER
 %token EOF UMINUS
 
@@ -44,6 +44,7 @@ stmt:
 | SIZE expr { Size $2 }
 | TARGET expr { Target $2 }
 | CAP NUMBER { Cap $2 }
+| STOCK STRING { Stock $2 }
 ;
 
 expr:

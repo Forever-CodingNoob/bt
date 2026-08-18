@@ -255,6 +255,25 @@ let dsl_bars =
      bar "2020-01-06" 110. 100.;
      bar "2020-01-07" 100. 90. |]
 
+let test_stock_statement () =
+  with_temp_strategy
+    "stock \"tw/00685L\"\ntarget 1.0\n"
+    (fun path ->
+      let parsed = Dsl.parse_file path in
+      assert (Dsl.stock_of ~filename:path parsed = ("tw", "00685L"));
+      (* stock is ignored by compilation *)
+      let strategy = Dsl.compile path ~params:[] dsl_bars in
+      assert (Array.length strategy.Engine.target = Array.length dsl_bars));
+  let rejects source =
+    with_temp_strategy source (fun path ->
+      assert_failure (fun () ->
+        ignore (Dsl.stock_of ~filename:path (Dsl.parse_file path))))
+  in
+  rejects "target 1.0\n";
+  rejects "stock \"tw/1\"\nstock \"tw/2\"\ntarget 1.0\n";
+  rejects "stock \"jp/7203\"\ntarget 1.0\n";
+  rejects "stock \"tw00685L\"\ntarget 1.0\n"
+
 let test_target_style () =
   with_temp_strategy
     "target num(hold(cross_above(close, 104.0), cross_below(close, 104.0)))\n"
@@ -380,6 +399,7 @@ let test_detect_splits () =
 
 let () =
   test_parser ();
+  test_stock_statement ();
   test_indicators ();
   test_target_style ();
   test_hold_tie_break ();
