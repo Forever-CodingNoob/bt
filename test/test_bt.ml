@@ -499,6 +499,17 @@ let test_prepend_rows () =
       assert (adjusted.(3).Data.date = "2020-01-04");
       assert_close 4. adjusted.(3).Data.c)
 
+let test_head_probe_gate () =
+  assert
+    (not (Data.should_probe_head ~from_:None
+       ~first_cached:"2008-01-01"));
+  assert
+    (Data.should_probe_head ~from_:(Some "1994-10-01")
+       ~first_cached:"2008-01-01");
+  assert
+    (not (Data.should_probe_head ~from_:(Some "2010-01-01")
+       ~first_cached:"2008-01-01"))
+
 let contains text fragment =
   let text_length = String.length text in
   let fragment_length = String.length fragment in
@@ -548,6 +559,7 @@ let () =
   test_multi_strat_fixture ();
   test_baseline_output_header ();
   test_prepend_rows ();
+  test_head_probe_gate ();
   test_plot_script ();
   test_detect_splits ();
   print_endline "ok"

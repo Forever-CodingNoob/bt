@@ -37,13 +37,13 @@ let parse_market_symbol label value =
 let fetch argv =
   let market = ref "" in
   let symbol = ref "" in
-  let from_ = ref "1994-10-01" in
+  let from_ = ref None in
   let to_ = ref (today ()) in
   let data_dir = ref "data" in
   let rec options =
     [ ("--market", Arg.Set_string market, "tw or us");
       ("--symbol", Arg.Set_string symbol, "FinMind symbol");
-      ("--from", Arg.Set_string from_, "start date (YYYY-MM-DD)");
+      ("--from", Arg.String (fun value -> from_ := Some value), "start date; give an explicit date to backfill an existing cache (default 1994-10-01 for new caches)");
       ("--to", Arg.Set_string to_, "end date (YYYY-MM-DD)");
       ("--data-dir", Arg.Set_string data_dir, "cache directory");
       ("-h",

@@ -251,6 +251,11 @@ let first_cached_date path =
              | line ->
                  (match row_date line with "" -> None | date -> Some date)))
 
+let should_probe_head ~from_ ~first_cached =
+  match from_ with
+  | None -> false
+  | Some date -> String.compare date first_cached < 0
+
 let append_rows ~header ~rows_path ~cache_path ~after =
   let needs_header =
     not (Sys.file_exists cache_path) || (Unix.stat cache_path).Unix.st_size = 0
@@ -366,18 +371,19 @@ let fetch_rows ~token ~dataset ~symbol ~from_ ~to_ ~expression ~consume =
       consume rows_path))
 
 let fetch_prices ~token ~market ~symbol ~from_ ~to_ ~cache_path =
+  let default_from = "1994-10-01" in
   if market = "tw" then begin
     (* raw TW prices never change retroactively; cached rows win at both seams *)
     let tw_expression =
       ".data[] | [.date, .open, .max, .min, .close, .Trading_Volume] | @csv"
     in
     let tw_header = "date,open,high,low,close,volume" in
-    (* ponytail: after backfill bottoms out, every fetch re-probes the empty head gap (one API call + cache rewrite); record a probed floor date if rate limits ever matter *)
-    (match first_cached_date cache_path with
-     | Some first when String.compare from_ first < 0 ->
+    (match from_, first_cached_date cache_path with
+     | Some start_date, Some first
+       when should_probe_head ~from_ ~first_cached:first ->
          let day_before = previous_date first in
          fetch_rows ~token ~dataset:"TaiwanStockPrice" ~symbol
-           ~from_ ~to_:day_before
+           ~from_:start_date ~to_:day_before
            ~expression:tw_expression
            ~consume:(fun rows_path ->
              prepend_rows ~header:tw_header ~rows_path ~cache_path
@@ -385,7 +391,10 @@ let fetch_prices ~token ~market ~symbol ~from_ ~to_ ~cache_path =
      | _ -> ());
     let last_date = last_cached_date cache_path in
     let start_date =
-      match last_date with None -> from_ | Some date -> next_date date
+      match last_date, from_ with
+      | Some date, _ -> next_date date
+      | None, Some date -> date
+      | None, None -> default_from
     in
     if String.compare start_date to_ <= 0 then
       fetch_rows ~token ~dataset:"TaiwanStockPrice" ~symbol
@@ -399,10 +408,14 @@ let fetch_prices ~token ~market ~symbol ~from_ ~to_ ~cache_path =
     (* US Adj_Close is rewritten retroactively by upstream dividends and
        splits; appending fresh rows to old ones would mix adjustment
        baselines, so the US cache is refetched in full and rewritten *)
+    let first = first_cached_date cache_path in
     let start_date =
-      match first_cached_date cache_path with
-      | Some date when String.compare date from_ < 0 -> date
-      | _ -> from_
+      match from_, first with
+      | None, Some date -> date
+      | None, None -> default_from
+      | Some requested, Some date when String.compare date requested < 0 ->
+          date
+      | Some requested, _ -> requested
     in
     fetch_rows ~token ~dataset:"USStockPrice" ~symbol
       ~from_:start_date ~to_
@@ -448,7 +461,9 @@ let fetch_dividends ~token ~symbol ~to_ ~cache_path =
 let fetch ~market ~symbol ~from_ ~to_ ~data_dir =
   let market = market_name market in
   check_symbol symbol;
-  validate_range from_ to_;
+  (match from_ with
+   | None -> ignore (parse_date "to" to_)
+   | Some date -> validate_range date to_);
   let token =
     match Sys.getenv_opt "FINMIND_TOKEN" with
     | Some token when String.trim token <> "" -> token

@@ -72,12 +72,14 @@ Replace `data/` with the value of `--data-dir` when you set that option.
 For Taiwan prices, `bt fetch` adds data at both ends of the cache. If
 `--from` is earlier than the first cached date, it fetches the missing
 earlier range and prepends it. It also fetches dates after the last cached
-date and appends them. Cached rows win at both boundaries. Therefore, the
-command does not add a date twice, and a repeated fetch is idempotent. The
-command fetches the full Taiwan dividend history and rewrites `SYM.div.csv`
-on each run. If this fetch fails, the command keeps the existing dividend
-file. If no file exists, the command warns that prices will be unadjusted
-for dividends.
+date and appends them. Cached rows win at both boundaries.
+A plain fetch updates an existing cache forward only; pass an explicit
+`--from` earlier than the cache start to backfill.
+Therefore, the command does not add a date twice, and a repeated fetch is
+idempotent. The command fetches the full Taiwan dividend history and
+rewrites `SYM.div.csv` on each run. If this fetch fails, the command keeps the
+existing dividend file. If no file exists, the command warns that prices
+will be unadjusted for dividends.
 
 For US prices, `bt fetch` rewrites `SYM.csv` on each run. If a cache exists,
 the request starts at the earlier of its first date and `--from`. This full
