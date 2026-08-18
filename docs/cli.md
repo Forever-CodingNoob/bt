@@ -118,6 +118,7 @@ strategy file selects its data with exactly one
 | `-h`, `-help`, `--help` | Print the run options to standard output and exit with code 0. |
 
 Do not pass `--market`, `--symbol`, or `--benchmark-market` to `bt run`.
+`--benchmark` was renamed to `--baseline`.
 Put the market and symbol in each strategy file. Use `--baseline` only when
 you want a separate buy-and-hold comparison.
 

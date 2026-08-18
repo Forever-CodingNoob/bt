@@ -286,7 +286,8 @@ let test_stock_statement () =
   rejects "target 1.0\n";
   rejects "stock \"tw/1\"\nstock \"tw/2\"\ntarget 1.0\n";
   rejects "stock \"jp/7203\"\ntarget 1.0\n";
-  rejects "stock \"tw00685L\"\ntarget 1.0\n"
+  rejects "stock \"tw00685L\"\ntarget 1.0\n";
+  rejects "stock \"tw/0050/extra\"\ntarget 1.0\n"
 
 let test_target_style () =
   with_temp_strategy
@@ -461,18 +462,42 @@ let test_prepend_rows () =
     output_string out text;
     close_out out
   in
-  write cache "date,open,high,low,close,volume\n2020-01-03,3.,3.,3.,3.,1\n2020-01-04,4.,4.,4.,4.,1\n";
-  write rows "2020-01-01,1.,1.,1.,1.,1\n2020-01-02,2.,2.,2.,2.,1\n2020-01-03,9.,9.,9.,9.,9\n";
+  write cache "date,open,high,low,close,volume\n2020-01-03,2.,3.,3.,3.,1\n2020-01-04,3.,4.,4.,4.,1\n";
+  write rows "2020-01-01,1.,1.,1.,1.,1\n2020-01-02,1.,2.,2.,2.,1\n2020-01-03,9.,9.,9.,9.,9\n";
   Data.prepend_rows ~header:"date,open,high,low,close,volume"
     ~rows_path:rows ~cache_path:cache ~before:"2020-01-03";
   let bars = Data.read_bars ~market:"tw" cache in
-  Sys.remove cache;
   Sys.remove rows;
   (* the 2020-01-03 row from the fetch is dropped: cache wins at the seam *)
   assert (Array.length bars = 4);
   assert (bars.(0).Data.date = "2020-01-01");
   assert (bars.(2).Data.date = "2020-01-03");
-  assert (bars.(2).Data.c = 3.)
+  assert (bars.(2).Data.c = 3.);
+  let data_dir = Filename.temp_file "bt-test-data-" "" in
+  Sys.remove data_dir;
+  Unix.mkdir data_dir 0o700;
+  let tw_dir = Filename.concat data_dir "tw" in
+  Unix.mkdir tw_dir 0o700;
+  let symbol = "SEAM" in
+  let stock_path = Filename.concat tw_dir (symbol ^ ".csv") in
+  let dividend_path = Filename.concat tw_dir (symbol ^ ".div.csv") in
+  Fun.protect
+    ~finally:(fun () ->
+      (try Sys.remove cache with Sys_error _ -> ());
+      (try Sys.remove stock_path with Sys_error _ -> ());
+      (try Sys.remove dividend_path with Sys_error _ -> ());
+      Unix.rmdir tw_dir;
+      Unix.rmdir data_dir)
+    (fun () ->
+      Sys.rename cache stock_path;
+      write dividend_path "date,factor\n2020-01-04,0.5\n";
+      let adjusted =
+        Data.load ~market:"tw" ~symbol ~from_:None ~to_:None ~data_dir
+      in
+      assert (adjusted.(0).Data.date = "2020-01-01");
+      assert_close (1. *. 0.5) adjusted.(0).Data.c;
+      assert (adjusted.(3).Data.date = "2020-01-04");
+      assert_close 4. adjusted.(3).Data.c)
 
 let contains text fragment =
   let text_length = String.length text in

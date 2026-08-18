@@ -215,7 +215,7 @@ Build and test clean; `git add -A`; do not commit.
 - Produces:
   - `Data.filter_dates : keep:(string -> bool) -> bar array -> bar array`.
   - `Report.stem : names:string list -> out_name:string option -> string` (pure; joins basenames with `_vs_` or returns the override).
-  - `Report.print_many : columns:(string * Engine.result) list -> baseline:Engine.result option -> fill:Engine.fill -> unit`.
+  - `Report.print_many : columns:(string * Engine.result) list -> baseline:Engine.result option -> fill:Engine.fill -> stocks:(string * string) list -> targets:float array list -> unit`.
   - `Report.write_outputs : out_dir:string -> stem:string -> columns:(string * Engine.result) list -> baseline:Engine.result option -> unit` (CSV named `<stem>.csv`, per-strat `<name>.trades.csv`).
   - `Report.write_png ~out_dir ~stem` (plot.py invocation now takes the stem-named csv and writes `<stem>.png`).
 

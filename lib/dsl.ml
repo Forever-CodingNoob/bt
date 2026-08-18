@@ -580,7 +580,8 @@ let stock_of ~filename statements =
         "%s: multiple stocks per strat are not supported yet" filename)
   | [spec] ->
       (match String.index_opt spec '/' with
-       | Some i when i > 0 && i < String.length spec - 1 ->
+       | Some i when i > 0 && i < String.length spec - 1 &&
+                     not (String.contains_from spec (i + 1) '/') ->
            let market = String.sub spec 0 i in
            let symbol =
              String.sub spec (i + 1) (String.length spec - i - 1)

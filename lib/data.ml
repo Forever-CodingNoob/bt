@@ -372,6 +372,7 @@ let fetch_prices ~token ~market ~symbol ~from_ ~to_ ~cache_path =
       ".data[] | [.date, .open, .max, .min, .close, .Trading_Volume] | @csv"
     in
     let tw_header = "date,open,high,low,close,volume" in
+    (* ponytail: after backfill bottoms out, every fetch re-probes the empty head gap (one API call + cache rewrite); record a probed floor date if rate limits ever matter *)
     (match first_cached_date cache_path with
      | Some first when String.compare from_ first < 0 ->
          let day_before = previous_date first in
