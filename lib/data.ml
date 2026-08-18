@@ -57,6 +57,17 @@ let next_date value =
   else
     Printf.sprintf "%04d-01-01" (year + 1)
 
+let previous_date value =
+  let year, month, day = parse_date "cached" value in
+  if day > 1 then
+    Printf.sprintf "%04d-%02d-%02d" year month (day - 1)
+  else if month > 1 then
+    let previous_month = month - 1 in
+    Printf.sprintf "%04d-%02d-%02d" year previous_month
+      (days_in_month year previous_month)
+  else
+    Printf.sprintf "%04d-12-31" (year - 1)
+
 let validate_range from_ to_ =
   ignore (parse_date "from" from_);
   ignore (parse_date "to" to_);
@@ -268,6 +279,51 @@ let append_rows ~header ~rows_path ~cache_path ~after =
           in
           loop ()))
 
+let prepend_rows ~header ~rows_path ~cache_path ~before =
+  let directory = Filename.dirname cache_path in
+  let temporary = Filename.temp_file ~temp_dir:directory ".bt-prepend-" ".csv" in
+  let completed = ref false in
+  Fun.protect
+    ~finally:(fun () -> if not !completed then remove_if_exists temporary)
+    (fun () ->
+      let output = open_out_bin temporary in
+      Fun.protect
+        ~finally:(fun () -> close_out output)
+        (fun () ->
+          output_string output (header ^ "\n");
+          let rows = open_in rows_path in
+          Fun.protect
+            ~finally:(fun () -> close_in rows)
+            (fun () ->
+              let rec loop () =
+                match input_line rows with
+                | line ->
+                    let normalized = normalize_row line in
+                    let date = row_date normalized in
+                    if date <> "" && String.compare date before < 0 then
+                      output_string output (normalized ^ "\n");
+                    loop ()
+                | exception End_of_file -> ()
+              in
+              loop ());
+          let cache = open_in cache_path in
+          Fun.protect
+            ~finally:(fun () -> close_in cache)
+            (fun () ->
+              (match input_line cache with
+               | _header -> ()
+               | exception End_of_file -> ());
+              let rec loop () =
+                match input_line cache with
+                | line ->
+                    output_string output (line ^ "\n");
+                    loop ()
+                | exception End_of_file -> ()
+              in
+              loop ()));
+      Sys.rename temporary cache_path;
+      completed := true)
+
 let rewrite_rows ~header ~rows_path ~cache_path =
   let directory = Filename.dirname cache_path in
   let temporary = Filename.temp_file ~temp_dir:directory ".bt-div-" ".csv" in
@@ -311,7 +367,21 @@ let fetch_rows ~token ~dataset ~symbol ~from_ ~to_ ~expression ~consume =
 
 let fetch_prices ~token ~market ~symbol ~from_ ~to_ ~cache_path =
   if market = "tw" then begin
-    (* raw TW prices never change retroactively, so the cache is append-only *)
+    (* raw TW prices never change retroactively; cached rows win at both seams *)
+    let tw_expression =
+      ".data[] | [.date, .open, .max, .min, .close, .Trading_Volume] | @csv"
+    in
+    let tw_header = "date,open,high,low,close,volume" in
+    (match first_cached_date cache_path with
+     | Some first when String.compare from_ first < 0 ->
+         let day_before = previous_date first in
+         fetch_rows ~token ~dataset:"TaiwanStockPrice" ~symbol
+           ~from_ ~to_:day_before
+           ~expression:tw_expression
+           ~consume:(fun rows_path ->
+             prepend_rows ~header:tw_header ~rows_path ~cache_path
+               ~before:first)
+     | _ -> ());
     let last_date = last_cached_date cache_path in
     let start_date =
       match last_date with None -> from_ | Some date -> next_date date
@@ -319,9 +389,9 @@ let fetch_prices ~token ~market ~symbol ~from_ ~to_ ~cache_path =
     if String.compare start_date to_ <= 0 then
       fetch_rows ~token ~dataset:"TaiwanStockPrice" ~symbol
         ~from_:start_date ~to_
-        ~expression:".data[] | [.date, .open, .max, .min, .close, .Trading_Volume] | @csv"
+        ~expression:tw_expression
         ~consume:(fun rows_path ->
-          append_rows ~header:"date,open,high,low,close,volume"
+          append_rows ~header:tw_header
             ~rows_path ~cache_path ~after:last_date)
   end
   else begin

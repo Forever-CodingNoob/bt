@@ -1,6 +1,7 @@
 let usage =
   "usage:\n\
-   \  bt fetch --market tw|us --symbol SYM [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--data-dir DIR]\n\
+   \  bt fetch [MARKET/SYMBOL] [--market tw|us] [--symbol SYM] [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--data-dir DIR]\n\
+   \           positional MARKET/SYMBOL is equivalent to --market and --symbol\n\
    \  bt run STRAT_FILE --market tw|us --symbol SYM [--from D] [--to D]\n\
    \         [--benchmark SYM] [--benchmark-market tw|us] [-p name=value ...]\n\
    \         [--fill open|close] [--fee-bps F] [--tax-bps F] [--slip-bps F]\n\
@@ -27,7 +28,7 @@ let today () =
 let fetch argv =
   let market = ref "" in
   let symbol = ref "" in
-  let from_ = ref "2010-01-01" in
+  let from_ = ref "1994-10-01" in
   let to_ = ref (today ()) in
   let data_dir = ref "data" in
   let rec options =
@@ -41,7 +42,19 @@ let fetch argv =
          (fun () -> raise (Arg.Help (Arg.usage_string options usage))),
        "show this help") ]
   in
-  let anonymous value = raise (Arg.Bad (Printf.sprintf "unexpected argument %S" value)) in
+  let has_positional = ref false in
+  let anonymous value =
+    if !has_positional then
+      raise (Arg.Bad (Printf.sprintf "unexpected argument %S; expected one positional MARKET/SYMBOL" value));
+    match String.index_opt value '/' with
+    | Some index when index > 0 && index < String.length value - 1 ->
+        has_positional := true;
+        market := String.sub value 0 index;
+        symbol := String.sub value (index + 1) (String.length value - index - 1)
+    | _ ->
+        raise (Arg.Bad
+          (Printf.sprintf "invalid fetch argument %S; expected MARKET/SYMBOL" value))
+  in
   (try Arg.parse_argv argv options anonymous usage with
    | Arg.Bad message ->
        prerr_string message;

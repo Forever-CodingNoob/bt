@@ -369,6 +369,27 @@ let test_golden () =
   end;
   assert_close golden_expected (final_equity result)
 
+let test_prepend_rows () =
+  let cache = Filename.temp_file "bt-test-cache" ".csv" in
+  let rows = Filename.temp_file "bt-test-rows" ".csv" in
+  let write path text =
+    let out = open_out path in
+    output_string out text;
+    close_out out
+  in
+  write cache "date,open,high,low,close,volume\n2020-01-03,3.,3.,3.,3.,1\n2020-01-04,4.,4.,4.,4.,1\n";
+  write rows "2020-01-01,1.,1.,1.,1.,1\n2020-01-02,2.,2.,2.,2.,1\n2020-01-03,9.,9.,9.,9.,9\n";
+  Data.prepend_rows ~header:"date,open,high,low,close,volume"
+    ~rows_path:rows ~cache_path:cache ~before:"2020-01-03";
+  let bars = Data.read_bars ~market:"tw" cache in
+  Sys.remove cache;
+  Sys.remove rows;
+  (* the 2020-01-03 row from the fetch is dropped: cache wins at the seam *)
+  assert (Array.length bars = 4);
+  assert (bars.(0).Data.date = "2020-01-01");
+  assert (bars.(2).Data.date = "2020-01-03");
+  assert (bars.(2).Data.c = 3.)
+
 let contains text fragment =
   let text_length = String.length text in
   let fragment_length = String.length fragment in
@@ -413,6 +434,7 @@ let () =
   test_engine_partial_open ();
   test_engine_partial_open_costs ();
   test_golden ();
+  test_prepend_rows ();
   test_plot_script ();
   test_detect_splits ();
   print_endline "ok"
