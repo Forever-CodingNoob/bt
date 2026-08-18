@@ -14,10 +14,18 @@ lib/engine.ml    Backtest loop and cost model
 lib/metrics.ml   CAGR, Sharpe, MaxDD, Calmar, trade statistics
 lib/report.ml    Terminal table, CSV output, PNG plot
 test/test_bt.ml  Assert-based tests (dune test)
+test/fixtures/   Synthetic CSV data for tests
 examples/        Strategy examples
+scripts/plot.py  Equity graph renderer (run directly by bt)
+docs/cli.md      Complete CLI reference
+docs/specs/      Design specs; docs/plans/ implementation plans
 ```
 
 ## Build and test
+
+First create the project-local opam switch; see "Build and test" in
+README.md. All commands below assume `eval $(opam env)` ran in this
+directory.
 
 ```sh
 dune build     # must be clean; warnings are errors
@@ -36,6 +44,8 @@ dune test      # all asserts must pass
   A comparison with NaN gives `false`.
 - Put one space on each side of `=`. Do not align code with extra
   spaces.
+- Do not embed Python (or other foreign code) in `.ml` files. Python
+  scripts are standalone files in `scripts/`.
 
 ## Fixed contracts
 
@@ -48,6 +58,7 @@ Do not change these types or formats:
 - TW cache header: `date,open,high,low,close,volume`
 - Dividend cache header: `date,factor`
 - US cache header: `date,open,high,low,close,adj_close,volume`
+- Fill log header: `date,price,from_exposure,to_exposure`
 
 ## How to add an indicator
 
@@ -63,9 +74,3 @@ Do not change these types or formats:
   numbers.
 - Each non-trivial branch needs one check that fails when the logic
   breaks.
-
-## Commits
-
-- Work on the `main` branch.
-- Write commit messages that state what changed and why.
-- Do not commit `data/`, `out/`, `_build/`, or `bt-test.exe`.

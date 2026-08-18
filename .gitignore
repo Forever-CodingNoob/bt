@@ -4,3 +4,4 @@ out/
 .superpowers/
 *.swp
 *.exe
+_opam/
