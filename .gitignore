@@ -3,4 +3,4 @@ data/
 out/
 .superpowers/
 *.swp
-bt-test.exe
+*.exe
