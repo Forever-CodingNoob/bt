@@ -589,6 +589,13 @@ let filter_range ~from_ ~to_ bars =
   done;
   Array.of_list !selected
 
+let filter_dates ~keep bars =
+  let selected = ref [] in
+  for index = Array.length bars - 1 downto 0 do
+    if keep bars.(index).date then selected := bars.(index) :: !selected
+  done;
+  Array.of_list !selected
+
 let load ~market ~symbol ~from_ ~to_ ~data_dir =
   let market = market_name market in
   check_symbol symbol;

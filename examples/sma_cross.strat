@@ -1,3 +1,4 @@
+stock "tw/0050"
 param fast = 50
 param slow = 200
 entry when cross_above(sma(close, fast), sma(close, slow))

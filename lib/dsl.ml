@@ -345,7 +345,7 @@ let series_environment (bars : Data.bar array) =
     "close", Series close;
     "volume", Series volume ]
 
-let declared_params statements =
+let declared_params_ast statements =
   let reversed =
     List.fold_left
       (fun declarations -> function
@@ -377,7 +377,7 @@ let bool_signal kind expression = function
   | _ -> fail_expr expression (Printf.sprintf "%s must be a boolean series" kind)
 
 let compile_ast statements ~params bars =
-  let declarations = declared_params statements in
+  let declarations = declared_params_ast statements in
   validate_overrides declarations params;
   let context = { bars; length = Array.length bars } in
   let initial_environment = series_environment bars in

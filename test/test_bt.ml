@@ -40,6 +40,9 @@ let sma_strategy_path () =
 let bb_strategy_path () =
   locate ["examples/bb_macd.strat"; "../examples/bb_macd.strat"]
 
+let buy_hold_strategy_path () =
+  locate ["examples/00685L_bh.strat"; "../examples/00685L_bh.strat"]
+
 let fixture_path () =
   locate ["test/fixtures/synthetic.csv"; "fixtures/synthetic.csv"]
 
@@ -52,6 +55,16 @@ let sample_bars =
      bar "2020-01-03" 120. 126.;
      bar "2020-01-04" 126. 138.6;
      bar "2020-01-05" 138.6 145.53 |]
+
+let test_filter_dates () =
+  let filtered =
+    Data.filter_dates
+      ~keep:(fun date -> date = "2020-01-02" || date = "2020-01-04")
+      sample_bars
+  in
+  assert
+    (Array.map (fun (bar : Data.bar) -> bar.date) filtered =
+     [| "2020-01-02"; "2020-01-04" |])
 
 let fill_bars =
   [| bar "2020-01-01" 100. 100.;
@@ -75,6 +88,7 @@ let rec scalar_value = function
 let test_parser () =
   ignore (Dsl.parse_file (sma_strategy_path ()));
   ignore (Dsl.parse_file (bb_strategy_path ()));
+  ignore (Dsl.parse_file (buy_hold_strategy_path ()));
   with_temp_strategy "exit when close < 0\n" (fun path ->
     assert_failure (fun () -> ignore (Dsl.compile path ~params:[] sample_bars)));
   with_temp_strategy
@@ -369,6 +383,76 @@ let test_golden () =
   end;
   assert_close golden_expected (final_equity result)
 
+let test_report_stem () =
+  assert (Report.stem ~names:["a"; "b"] ~out_name:None = "a_vs_b");
+  assert (Report.stem ~names:["a"] ~out_name:(Some "x") = "x")
+
+let test_multi_strat_fixture () =
+  let sma_source =
+    {|stock "tw/FIXTURE"
+param fast = 50
+param slow = 200
+entry when cross_above(sma(close, fast), sma(close, slow))
+exit  when cross_below(sma(close, fast), sma(close, slow))
+|}
+  in
+  let buy_hold_source =
+    {|stock "tw/FIXTURE"
+target 1.0
+|}
+  in
+  with_temp_strategy sma_source (fun sma_path ->
+    with_temp_strategy buy_hold_source (fun buy_hold_path ->
+      let bars = load_fixture (fixture_path ()) in
+      let declarations =
+        Dsl.declared_params_ast (Dsl.parse_file sma_path)
+      in
+      assert (declarations = ["fast", 50.; "slow", 200.]);
+      let sma =
+        Dsl.compile sma_path ~params:["fast", 5.; "slow", 20.] bars
+      in
+      let buy_hold = Dsl.compile buy_hold_path ~params:[] bars in
+      let sma_result =
+        Engine.run bars sma zero_costs ~fill:Engine.Open_next
+      in
+      let buy_hold_result =
+        Engine.run bars buy_hold zero_costs ~fill:Engine.Close_same
+      in
+      let last = Array.length bars - 1 in
+      assert_close golden_expected (final_equity sma_result);
+      assert_close
+        (bars.(last).Data.c /. bars.(0).Data.c)
+        (final_equity buy_hold_result)))
+
+let test_baseline_output_header () =
+  let out_dir = Filename.temp_file "bt-test-report-" "" in
+  Sys.remove out_dir;
+  Unix.mkdir out_dir 0o700;
+  Fun.protect
+    ~finally:(fun () ->
+      Array.iter
+        (fun name -> Sys.remove (Filename.concat out_dir name))
+        (Sys.readdir out_dir);
+      Unix.rmdir out_dir)
+    (fun () ->
+      let result : Engine.result =
+        { equity_curve = ["2020-01-01", 1.; "2020-01-02", 1.1];
+          fills = [];
+          trips = [] }
+      in
+      Report.write_outputs
+        ~out_dir ~stem:"pair" ~columns:["a", result]
+        ~baseline:(Some result);
+      let input = open_in (Filename.concat out_dir "pair.csv") in
+      let header =
+        Fun.protect
+          ~finally:(fun () -> close_in input)
+          (fun () -> input_line input)
+      in
+      assert (header = "date,a,baseline");
+      assert (not (Sys.file_exists
+        (Filename.concat out_dir "baseline.trades.csv"))))
+
 let test_prepend_rows () =
   let cache = Filename.temp_file "bt-test-cache" ".csv" in
   let rows = Filename.temp_file "bt-test-rows" ".csv" in
@@ -420,6 +504,7 @@ let test_detect_splits () =
 
 let () =
   test_parser ();
+  test_filter_dates ();
   test_stock_statement ();
   test_indicators ();
   test_target_style ();
@@ -434,6 +519,9 @@ let () =
   test_engine_partial_open ();
   test_engine_partial_open_costs ();
   test_golden ();
+  test_report_stem ();
+  test_multi_strat_fixture ();
+  test_baseline_output_header ();
   test_prepend_rows ();
   test_plot_script ();
   test_detect_splits ();

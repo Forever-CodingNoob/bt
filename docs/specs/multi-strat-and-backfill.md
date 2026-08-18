@@ -4,7 +4,7 @@ Status: design approved in discussion; pending spec review.
 
 ## Context
 
-`bt run` compares one strategy against one hardcoded benchmark, with the
+`bt run` compares one strategy against one hardcoded baseline, with the
 stock given by CLI flags. Research needs side-by-side backtests of
 several strategies, each owning its stock. The TW cache cannot extend
 backward, and the fetch default starts at 2010.
@@ -37,7 +37,7 @@ stock "tw/00685L"
 ## 2. Multi-strat CLI
 
 ```
-bt run STRAT... [--benchmark M/SYM] [--from D] [--to D] [--fill open|close]
+bt run STRAT... [--baseline M/SYM] [--from D] [--to D] [--fill open|close]
        [-p name=value ...] [--fee-bps F] [--tax-bps F] [--slip-bps F]
        [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]
 ```
@@ -48,21 +48,22 @@ bt run STRAT... [--benchmark M/SYM] [--from D] [--to D] [--fill open|close]
   its own market/symbol; explicit cost flags override for all.
 - `-p name=value` applies to every strat that declares that param.
   If no strat declares it, error.
-- Date range: all strats (and the benchmark) intersect to their common
-  trading dates, per the current benchmark rule. `--from`/`--to`
+- Date range: all strats (and the baseline) intersect to their common
+  trading dates, per the current baseline rule. `--from`/`--to`
   narrow further. Fewer than 2 common bars is an error.
 - Duplicate strat file basenames are an error (column and output name
-  collisions). The basename `benchmark` is rejected when `--benchmark`
+  collisions). The basename `baseline` is rejected when `--baseline`
   is given, for the same reason.
 
-## 3. Benchmark sugar
+## 3. Baseline sugar
 
-- `--benchmark tw/00685L` injects an implicit buy-and-hold column
+- `--baseline tw/00685L` injects an implicit buy-and-hold column
   (target 1.0, that market's cost defaults, same fill mode).
-  `--benchmark-market` is removed. There is no default benchmark.
-- With a benchmark, each strat metric cell carries a compact W/L
-  marker against the benchmark (lower wins for MaxDD). Without it,
-  plain side-by-side metrics.
+  The market is part of `M/SYM`; there is no separate market flag or
+  default baseline.
+- With a baseline, each strat metric cell carries a compact W/L marker
+  against the baseline (lower wins for MaxDD). Without it, plain
+  side-by-side metrics.
 
 ## 4. Data layer
 
@@ -79,16 +80,16 @@ bt run STRAT... [--benchmark M/SYM] [--from D] [--to D] [--fill open|close]
 ## 5. Report and outputs
 
 - Terminal table: one column per strat (header = file basename), plus
-  `benchmark` when present. Below the table, one line per strat:
+  `baseline` when present. Below the table, one line per strat:
   basename, stock, trip count, win rate. Date range and fill mode
   lines stay.
 - `out/<stem>.csv` and `out/<stem>.png` where `<stem>` is the strat
-  basenames joined with `_vs_` (benchmark excluded from the name), or
+  basenames joined with `_vs_` (baseline excluded from the name), or
   the value of `--out-name` when given. CSV columns: `date`, one
-  column per strat basename, `benchmark` last when present. The plot
+  column per strat basename, `baseline` last when present. The plot
   script is already header-driven and needs no change.
 - Fill logs: `out/<basename>.trades.csv` per strat, current fill-log
-  format. The benchmark writes no fill log.
+  format. The baseline writes no fill log.
 - `out/plot.py` name unchanged.
 
 ## 6. Examples and migration
@@ -123,4 +124,4 @@ bt run STRAT... [--benchmark M/SYM] [--from D] [--to D] [--fill open|close]
 - Output naming: default stem `a_vs_b`, `--out-name` override,
   duplicate-basename error.
 - Live verification: backfill 0050 to 1994, run channel-ladder vs
-  00685L_bh with benchmark sugar, check PNG has N labeled curves.
+  00685L_bh with baseline sugar, check PNG has N labeled curves.

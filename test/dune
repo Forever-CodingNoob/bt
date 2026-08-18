@@ -4,4 +4,5 @@
  (deps
   ../examples/sma_cross.strat
   ../examples/bb_macd.strat
+  ../examples/00685L_bh.strat
   fixtures/synthetic.csv))

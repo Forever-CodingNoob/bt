@@ -18,7 +18,7 @@
 - One space on each side of `=`; no alignment padding; no emojis.
 - Engine (`lib/engine.ml`), metrics (`lib/metrics.ml`), and indicators (`lib/series.ml`) are untouched.
 - The golden literal 1.7291207425596153 (sma_cross, fast=5, slow=20, fixture, `Open_next`) must keep passing.
-- Clean cutover: `bt run` loses `--market`, `--symbol`, `--benchmark-market`. No compatibility shims.
+- Clean cutover: `bt run` accepts neither `--market`/`--symbol` nor a separate baseline-market option. No compatibility shims.
 - The user has edited example strat files; READ every file immediately before editing it. Never write from memory.
 - Do NOT run `git commit`. Stage with `git add -A` (never `.swp` files) and report; the coordinator commits after user confirmation.
 - Build: `eval $(opam env) && dune build --root .`; test: `eval $(opam env) && dune test --root . --force`. No formatters, no network (live checks happen in coordinator verification).
@@ -215,8 +215,8 @@ Build and test clean; `git add -A`; do not commit.
 - Produces:
   - `Data.filter_dates : keep:(string -> bool) -> bar array -> bar array`.
   - `Report.stem : names:string list -> out_name:string option -> string` (pure; joins basenames with `_vs_` or returns the override).
-  - `Report.print_many : columns:(string * Engine.result) list -> benchmark:Engine.result option -> fill:Engine.fill -> unit`.
-  - `Report.write_outputs : out_dir:string -> stem:string -> columns:(string * Engine.result) list -> benchmark:Engine.result option -> unit` (CSV named `<stem>.csv`, per-strat `<name>.trades.csv`).
+  - `Report.print_many : columns:(string * Engine.result) list -> baseline:Engine.result option -> fill:Engine.fill -> unit`.
+  - `Report.write_outputs : out_dir:string -> stem:string -> columns:(string * Engine.result) list -> baseline:Engine.result option -> unit` (CSV named `<stem>.csv`, per-strat `<name>.trades.csv`).
   - `Report.write_png ~out_dir ~stem` (plot.py invocation now takes the stem-named csv and writes `<stem>.png`).
 
 - [ ] **Step 1: Date-set intersection in `lib/data.ml`**
@@ -232,16 +232,16 @@ let filter_dates ~keep bars =
 
 - [ ] **Step 2: Run pipeline in `bin/bt.ml`**
 
-Read the current `run` function first. New flow (replace `overlap_bars`; delete `--market`/`--symbol`/`--benchmark-market` options and the old single-strat wiring):
+Read the current `run` function first. New flow (replace `overlap_bars`; delete `--market`/`--symbol` and any separate baseline-market option, plus the old single-strat wiring):
 
-1. Anonymous args accumulate as strat paths (at least one required). Duplicate basenames (extension stripped) → usage error. Basename `benchmark` with `--benchmark` given → usage error.
+1. Anonymous args accumulate as strat paths (at least one required). Duplicate basenames (extension stripped) → usage error. Basename `baseline` with `--baseline` given → usage error.
 2. Parse each strat once (`Dsl.parse_file`), get `(market, symbol)` via `Dsl.stock_of`.
-3. `--benchmark M/SYM` parses with the same split helper as fetch's positional.
-4. Load bars per strat (and benchmark) with `Data.load` over the CLI range.
+3. `--baseline M/SYM` parses with the same split helper as fetch's positional.
+4. Load bars per strat (and baseline) with `Data.load` over the CLI range.
 5. Compute the common date set: for each bar array build the sorted date list; keep dates present in ALL arrays (fold `List.filter` over a string-set built with `Hashtbl` or sorted-list intersection; tail-recursive). Fewer than 2 common dates → error `strats have fewer than 2 common trading dates`.
 6. `Data.filter_dates` every array to the common set.
 7. Per strat: `Dsl.compile_ast`, per-strat `Engine.default_costs` from its market/symbol, apply CLI cost overrides, `Engine.run ~fill`.
-8. Benchmark: `{ target = Array.make n 1.0 }` on its filtered bars, its own default costs plus overrides.
+8. Baseline: `{ target = Array.make n 1.0 }` on its filtered bars, its own default costs plus overrides.
 9. `-p` validation moves across strats: collect declared params of every strat (expose the existing declared-params helper from `Dsl` as `Dsl.declared_params_ast : Ast.file -> (string * float) list` if not already public); error if an override matches none of the strats. Pass the full `params` list to every `compile_ast` (unknown names for THAT strat are filtered by the caller before the call — build the per-strat subset from its declared list).
 10. `Report.print_many`, `Report.stem`, `Report.write_outputs`, then `Report.write_png ~stem` unless `--no-plot`.
 
@@ -249,9 +249,9 @@ Read the current `run` function first. New flow (replace `overlap_bars`; delete 
 
 Read the file first. Replace `print`/`write_csvs`/`write_equity_csv`/`write_trades_csv` with the interfaces above:
 
-- Table: column width 12 stays; header row = `Metric`, one column per strat basename (truncate a name longer than 12 to its last 12 chars), `benchmark` last when present. Each metric row prints the per-strat formatted value; when a benchmark exists, append a marker to each strat cell: `format_value ^ " W"` or `" L"` (lower-wins only for MaxDD; `n/a` cells get no marker). Below the table, per strat: `<name>: <stock> — trades N (win rate X); ` then the shared `Date range: ...; fill: ...` line. The leverage footer prints if ANY strat's max target exceeds 1.
-- CSV: header `date,<name1>,...,benchmark?`; rows zip the equity curves (all curves share the common date set by construction; assert equal lengths, fail loudly otherwise).
-- Fill logs: one `<name>.trades.csv` per strat, existing format. Benchmark writes none.
+- Table: column width 12 stays; header row = `Metric`, one column per strat basename (truncate a name longer than 12 to its last 12 chars), `baseline` last when present. Each metric row prints the per-strat formatted value; when a baseline exists, append a marker to each strat cell: `format_value ^ " W"` or `" L"` (lower-wins only for MaxDD; `n/a` cells get no marker). Below the table, per strat: `<name>: <stock> — trades N (win rate X); ` then the shared `Date range: ...; fill: ...` line. The leverage footer prints if ANY strat's max target exceeds 1.
+- CSV: header `date,<name1>,...,baseline?`; rows zip the equity curves (all curves share the common date set by construction; assert equal lengths, fail loudly otherwise).
+- Fill logs: one `<name>.trades.csv` per strat, existing format. Baseline writes none.
 - `write_png ~out_dir ~stem` runs `python3 out/plot.py <out_dir>/<stem>.csv <out_dir>/<stem>.png`. `plot_script` is unchanged (header-driven).
 - `stem`: basenames (extension stripped) joined with `"_vs_"`; `--out-name` overrides.
 
@@ -287,27 +287,27 @@ Build and test clean; `git add -A`; do not commit.
 
 - [ ] **Step 1: README**
 
-- Commands block: new `bt run STRAT... [--benchmark M/SYM] [--out-name NAME] ...` grammar; remove `--market/--symbol/--benchmark-market` from the run line; note the `stock` statement; fetch line gains the positional form and the 1994-10-01 default.
+- Commands block: new `bt run STRAT... [--baseline M/SYM] [--out-name NAME] ...` grammar; remove `--market`/`--symbol` and any separate baseline-market option from the run line; note the `stock` statement; fetch line gains the positional form and the 1994-10-01 default.
 - DSL statements section: add `stock "market/symbol"` with the exactly-one rule.
 - Outputs: `<stem>.csv`/`<stem>.png` naming rule and `--out-name`; per-strat `<name>.trades.csv`.
 - Update the Contents TOC only if a heading changed.
 
 - [ ] **Step 2: docs/cli.md**
 
-Rewrite the `bt run` section: positional strats, all flags with defaults, benchmark sugar and W/L markers, output naming, common-date intersection rule, duplicate-basename and reserved-benchmark errors. Update fetch: positional form, new default, backfill behavior (prepend; idempotent).
+Rewrite the `bt run` section: positional strats, all flags with defaults, baseline sugar and W/L markers, output naming, common-date intersection rule, duplicate-basename and reserved-baseline errors. Update fetch: positional form, new default, backfill behavior (prepend; idempotent).
 
 - [ ] **Step 3: Verification (coordinator runs live parts)**
 
 ```sh
 eval $(opam env) && dune build --root . && dune test --root . --force
-./_build/default/bin/bt.exe run examples/sma_cross.strat examples/00685L_bh.strat --benchmark tw/00685L --no-plot
+./_build/default/bin/bt.exe run examples/sma_cross.strat examples/00685L_bh.strat --baseline tw/00685L --no-plot
 ./_build/default/bin/bt.exe run examples/sma_cross.strat --out-name smoke
 export FINMIND_TOKEN=...   # coordinator only
 ./_build/default/bin/bt.exe fetch tw/0050 --from 2008-01-01   # backfill: cache start moves back
 ./_build/default/bin/bt.exe fetch tw/0050 --from 2008-01-01   # idempotent: no duplicates
 ```
 
-Expected: table shows two strat columns plus benchmark with W/L markers; `out/sma_cross_vs_00685L_bh.csv` and `.png` exist (PNG has three labeled curves); `out/smoke.csv`/`.png` from the override; backfilled cache starts near 2008 with `sort | uniq -d` empty; run errors mention the strat file when `stock` is missing.
+Expected: table shows two strat columns plus baseline with W/L markers; `out/sma_cross_vs_00685L_bh.csv` and `.png` exist (PNG has three labeled curves); `out/smoke.csv`/`.png` from the override; backfilled cache starts near 2008 with `sort | uniq -d` empty; run errors mention the strat file when `stock` is missing.
 
 - [ ] **Step 4: Stage**
 
