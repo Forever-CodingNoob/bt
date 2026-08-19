@@ -325,6 +325,8 @@ let run argv =
         in
         let result =
           Btlib.Engine.run engine_assets strategy costs
+            ~margin:{ Btlib.Engine.financing_rate = 0.; maintenance_ratio = 0.;
+                      ratios = Array.make (Array.length engine_assets) 1. }
             ~capital:!capital ~fill:!fill
         in
         let gross = Array.make (Array.length (snd engine_assets.(0))) 0. in
@@ -349,6 +351,8 @@ let run argv =
         Some
           (Btlib.Engine.run [| (market ^ "/" ^ symbol, bars) |]
              (baseline_strategy (Array.length bars)) [| costs |]
+             ~margin:{ Btlib.Engine.financing_rate = 0.; maintenance_ratio = 0.;
+                       ratios = Array.make 1 1. }
              ~capital:!capital ~fill:!fill)
   in
   let columns =

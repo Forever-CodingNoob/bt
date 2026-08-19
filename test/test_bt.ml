@@ -194,9 +194,188 @@ let engine_zero_expected = 1.2127499999999998
 let engine_fee_expected = 1.188616275
 let golden_expected = 1.7291207425596153
 
+let no_margin count : Engine.margin =
+  { financing_rate = 0.; maintenance_ratio = 0.;
+    ratios = Array.make count 1. }
+
 let run_single bars target costs ~capital ~fill =
   Engine.run [| ("tw/TEST", bars) |] { Engine.targets = [| target |] }
-    [| costs |] ~capital ~fill
+    [| costs |] ~margin:(no_margin 1) ~capital ~fill
+
+let test_engine_drift () =
+  (* constant 0.5 target: one fill, position drifts, no daily reset *)
+  let bars =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 105. 110.;
+       bar "2020-01-03" 115. 121. |]
+  in
+  let result =
+    run_single bars [| 0.5; 0.5; 0.5 |] zero_costs
+      ~capital:None ~fill:Engine.Close_same
+  in
+  (* v = 0.5 -> 0.55 -> 0.605; cash 0.5; equity 1.105 (reset would give
+     1.05 * 1.05 = 1.1025) *)
+  assert_close ~tolerance:1e-12 (0.5 +. 0.5 *. 1.1 *. (121. /. 110.))
+    (final_equity result);
+  (* one entry fill plus the final force-close *)
+  assert (List.length result.fills = 2);
+  (match result.trips with
+   | [trip] -> assert_close ~tolerance:1e-12 (121. /. 100. -. 1.) trip.net_ret
+   | _ -> assert false)
+
+let test_engine_interest () =
+  (* 2x held over a weekend: 3 calendar days accrue, then 1 day *)
+  let bars =
+    [| bar "2020-01-03" 100. 100.;
+       bar "2020-01-06" 100. 100.;
+       bar "2020-01-07" 100. 100. |]
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.0635; maintenance_ratio = 1.3;
+      ratios = [| 0.6 |] }
+  in
+  let result =
+    Engine.run [| ("tw/TEST", bars) |]
+      { Engine.targets = [| [| 2.; 2.; 2. |] |] }
+      [| zero_costs |] ~margin ~capital:None ~fill:Engine.Close_same
+  in
+  let expected =
+    2. -. (1. +. 0.0635 *. 3. /. 365.) *. (1. +. 0.0635 /. 365.)
+  in
+  assert_close ~tolerance:1e-12 expected (final_equity result)
+
+let test_engine_initial_margin_clamp () =
+  (* requested 3x on a 60% ratio scales to 2.5x once *)
+  let bars =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 100. 100. |]
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.; maintenance_ratio = 0.; ratios = [| 0.6 |] }
+  in
+  let result =
+    Engine.run [| ("tw/TEST", bars) |]
+      { Engine.targets = [| [| 3.; 3. |] |] }
+      [| zero_costs |] ~margin ~capital:None ~fill:Engine.Close_same
+  in
+  assert (result.margin_stats.Engine.clamps = 1);
+  (match result.fills with
+   | first :: _ -> assert_close ~tolerance:1e-12 2.5 first.Engine.to_e
+   | [] -> assert false);
+  assert_close ~tolerance:1e-12 1. (final_equity result)
+
+let test_engine_mixed_ratio_clamp () =
+  (* need = 1.5 * 0.4 + 1.0 * 0.5 = 1.1 -> k = 1 / 1.1 *)
+  let flat price =
+    [| bar "2020-01-01" price price; bar "2020-01-02" price price |]
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.; maintenance_ratio = 0.; ratios = [| 0.6; 0.5 |] }
+  in
+  let result =
+    Engine.run [| ("tw/A", flat 100.); ("tw/B", flat 50.) |]
+      { Engine.targets = [| [| 1.5; 1.5 |]; [| 1.; 1. |] |] }
+      [| zero_costs; zero_costs |] ~margin ~capital:None
+      ~fill:Engine.Close_same
+  in
+  assert (result.margin_stats.Engine.clamps = 1);
+  (match result.fills with
+   | a :: b :: _ ->
+       assert_close ~tolerance:1e-12 (1.5 /. 1.1) a.Engine.to_e;
+       assert_close ~tolerance:1e-12 (1. /. 1.1) b.Engine.to_e
+   | _ -> assert false)
+
+let test_engine_margin_call () =
+  (* 2.5x, falling closes: maintenance 133.3% -> 126.7% -> call,
+     full liquidation at the next open, flat under the unchanged
+     target, re-entry when the target changes value *)
+  let bars =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 80. 80.;
+       bar "2020-01-03" 76. 76.;
+       bar "2020-01-06" 76. 90.;
+       bar "2020-01-07" 90. 90. |]
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.; maintenance_ratio = 1.3; ratios = [| 0.6 |] }
+  in
+  let result =
+    Engine.run [| ("tw/TEST", bars) |]
+      { Engine.targets = [| [| 2.5; 2.5; 2.5; 2.5; 1.0 |] |] }
+      [| zero_costs |] ~margin ~capital:None ~fill:Engine.Close_same
+  in
+  (* v: 2.5 -> 2.0 (equity 0.5) -> 1.9 (equity 0.4, maint 1.2667 < 1.3);
+     liquidation at open 76 repays the 1.5 loan: equity 0.4; the target
+     stays 2.5 on the liquidation bar (no re-entry), then changes to 1.0
+     on the last bar: re-entry fill at close 90, then the final force
+     close sells it back at 90 (zero cost, zero return). *)
+  assert_close ~tolerance:1e-12 0.4 (final_equity result);
+  assert (List.length result.fills = 4);
+  assert (result.margin_stats.Engine.margin_calls = 1);
+  (match result.margin_stats.Engine.min_maintenance with
+   | Some ratio -> assert_close ~tolerance:1e-12 (1.9 /. 1.5) ratio
+   | None -> assert false);
+  (match result.trips with
+   | [first; second] ->
+       assert_close ~tolerance:1e-12 (76. /. 100. -. 1.) first.net_ret;
+       assert_close ~tolerance:1e-12 0. second.net_ret
+   | _ -> assert false)
+
+let test_engine_bankruptcy () =
+  (* buy 2.5 at 100: v = 2.5, cash = -1.5. At 50, v = 1.25,
+     equity = -0.25, and maintenance = 1.25 / 1.5, so the next-open
+     liquidation repays 1.25 and freezes the bankrupt account at -0.25. *)
+  let bars =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 50. 50.;
+       bar "2020-01-03" 50. 60. |]
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.; maintenance_ratio = 1.3; ratios = [| 0.6 |] }
+  in
+  let result =
+    Engine.run [| ("tw/TEST", bars) |]
+      { Engine.targets = [| [| 2.5; 2.5; 2.5 |] |] }
+      [| zero_costs |] ~margin ~capital:None ~fill:Engine.Close_same
+  in
+  let last = final_equity result in
+  assert (not (Float.is_nan last));
+  assert_close ~tolerance:1e-12 (-0.25) last;
+  assert (List.length result.fills = 2);
+  assert (result.margin_stats.Engine.margin_calls = 1);
+  (match result.margin_stats.Engine.min_maintenance with
+   | Some ratio -> assert_close ~tolerance:1e-12 (1.25 /. 1.5) ratio
+   | None -> assert false);
+  (match result.trips with
+   | [trip] -> assert_close ~tolerance:1e-12 (-0.5) trip.net_ret
+   | _ -> assert false)
+
+let test_engine_buyhold_costs () =
+  (* all-in with fees: cash stays exactly 0, so the equity path equals
+     the old engine's formula bit for bit *)
+  let bars =
+    [| bar "2020-01-01" 100. 100.; bar "2020-01-02" 100. 110. |]
+  in
+  let costs : Engine.costs =
+    { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0. }
+  in
+  let result =
+    run_single bars [| 1.; 1. |] costs ~capital:None ~fill:Engine.Close_same
+  in
+  assert_close ~tolerance:1e-15
+    ((1. -. 0.01) *. 1.1 *. (1. -. 0.01)) (final_equity result)
+
+let test_engine_no_borrow_stats () =
+  let bars =
+    [| bar "2020-01-01" 100. 100.; bar "2020-01-02" 100. 110. |]
+  in
+  let result =
+    run_single bars [| 1.; 1. |] zero_costs
+      ~capital:None ~fill:Engine.Close_same
+  in
+  assert (result.margin_stats.Engine.min_maintenance = None);
+  assert (result.margin_stats.Engine.margin_calls = 0);
+  assert (result.margin_stats.Engine.clamps = 0)
 
 let test_engine () =
   let target = [|0.; 1.; 1.; 1.; 1.|] in
@@ -299,26 +478,33 @@ let test_engine_partial_costs () =
   let result =
     run_single fill_bars target costs ~capital:None ~fill:Engine.Close_same
   in
-  (* each 0.5-point fill costs 0.5 * 1% = 0.005, in engine order *)
-  let expected =
-    0.995
-    *. (1. +. 0.5 *. (108. /. 104. -. 1.)) *. 0.995
-    *. (112. /. 108.) *. 0.995
-    *. (1. +. 0.5 *. (116. /. 112. -. 1.)) *. 0.995
-  in
+  (* Value and cash drift separately. Fees use the drifted exposure delta:
+     buy the remaining cash at 108, sell 0.5 at 112, then close the
+     drifted position at 116. *)
+  let v1 = 0.5 *. (1. -. 0.005) in
+  let c1 = (1. -. 0.005) -. v1 in
+  let v2 = v1 *. (108. /. 104.) in
+  let e2 = c1 +. v2 in
+  let e2' = e2 -. 0.01 *. (e2 -. v2) in
+  let e3 = e2' *. (112. /. 108.) in
+  let e3' = e3 *. (1. -. 0.005) in
+  let v4 = 0.5 *. e3' *. (116. /. 112.) in
+  let e4 = 0.5 *. e3' +. v4 in
+  let expected = e4 -. 0.01 *. v4 in
   assert_close ~tolerance:1e-12 expected (final_equity result)
 
 let test_engine_partial_open () =
-  (* same targets under Open_next: fills at the next opens 106, 110, 114;
-     the 0.5 exposure left at the end is force-closed at the last close *)
+  (* Fills occur at the next opens 106, 110, and 114. The 0.5 position
+     drifts from open 106 through close 108 to open 110; continuous
+     compounding between fills replaces the per-leg daily reset. *)
   let target = [|0.; 0.5; 1.; 0.5; 0.|] in
   let result =
     run_single fill_bars target zero_costs ~capital:None ~fill:Engine.Open_next
   in
   let expected =
-    (1. +. 0.5 *. (108. /. 106. -. 1.))
-    *. (1. +. 0.5 *. (110. /. 108. -. 1.)) *. (112. /. 110.)
-    *. (114. /. 112.) *. (1. +. 0.5 *. (116. /. 114. -. 1.))
+    (0.5 +. 0.5 *. (110. /. 106.))
+    *. (114. /. 110.)
+    *. (0.5 +. 0.5 *. (116. /. 114.))
   in
   assert_close ~tolerance:1e-12 expected (final_equity result);
   assert (List.length result.fills = 4);
@@ -332,12 +518,19 @@ let test_engine_partial_open_costs () =
   let result =
     run_single fill_bars target costs ~capital:None ~fill:Engine.Open_next
   in
-  let expected =
-    0.995 *. (1. +. 0.5 *. (108. /. 106. -. 1.))
-    *. (1. +. 0.5 *. (110. /. 108. -. 1.)) *. 0.995
-    *. (112. /. 110.) *. (114. /. 112.) *. 0.995
-    *. (1. +. 0.5 *. (116. /. 114. -. 1.)) *. 0.995
-  in
+  (* The half position bought at 106 drifts through the 108 close and 110
+     open. Every fee uses the drifted exposure delta: buy the remaining
+     cash, sell 0.5 at 114, then close the drifted position at 116. *)
+  let c1 = (1. -. 0.005) -. 0.5 *. (1. -. 0.005) in
+  let v1 = 0.5 *. (1. -. 0.005) *. (108. /. 106.) in
+  let v2 = v1 *. (110. /. 108.) in
+  let e2 = c1 +. v2 in
+  let e2' = e2 -. 0.01 *. (e2 -. v2) in
+  let e3 = e2' *. (114. /. 110.) in
+  let e3' = e3 *. (1. -. 0.005) in
+  let v4 = 0.5 *. e3' *. (116. /. 114.) in
+  let e4 = 0.5 *. e3' +. v4 in
+  let expected = e4 -. 0.01 *. v4 in
   assert_close ~tolerance:1e-12 expected (final_equity result)
 
 let test_engine_portfolio_close () =
@@ -356,12 +549,15 @@ let test_engine_portfolio_close () =
   in
   let result =
     Engine.run [| ("tw/A", a); ("tw/B", b) |] strategy
-      [| zero_costs; zero_costs |] ~capital:None ~fill:Engine.Close_same
+      [| zero_costs; zero_costs |] ~margin:(no_margin 2)
+      ~capital:None ~fill:Engine.Close_same
   in
-  (* day 2: 1 + 0.5 * (110/100 - 1) = 1.05; B fills to 0.4 at 45.
-     day 3: 1.05 * (1 + 0.5 * (121/110 - 1) + 0.4 * (54/45 - 1))
-          = 1.05 * 1.13. Both close at day-3 closes. *)
-  assert_close ~tolerance:1e-12 (1.05 *. 1.13) (final_equity result);
+  (* after day 2, cash = 0.08, A = 0.55, and B = 0.42; on day 3,
+     A drifts to 0.605 and B to 0.504 before both close for free *)
+  assert_close ~tolerance:1e-12
+    (0.08 +. 0.5 *. 1.1 *. (121. /. 110.)
+     +. 0.4 *. 1.05 *. (54. /. 45.))
+    (final_equity result);
   assert (List.length result.fills = 4);
   assert (List.length result.trips = 2);
   let by_entry (trip : Engine.trip) = trip.entry_date in
@@ -398,12 +594,21 @@ let test_engine_portfolio_costs () =
     Engine.run [| ("tw/A", a); ("tw/B", b) |]
       { Engine.targets =
           [| [| 0.5; 0.5; 0. |]; [| 0.; 0.4; 0. |] |] }
-      [| a_costs; b_costs |] ~capital:None ~fill:Engine.Close_same
+      [| a_costs; b_costs |] ~margin:(no_margin 2)
+      ~capital:None ~fill:Engine.Close_same
   in
-  let expected =
-    (1. -. 0.005) *. 1.05 *. 1.13
-    *. (1. -. 0.005) *. (1. -. 0.004)
-  in
+  (* A's buy costs 0.5%; B's buy is free; each final sell costs 1%
+     of that position's drifted value. *)
+  let v_a0 = 0.5 *. (1. -. 0.005) in
+  let c0 = (1. -. 0.005) -. v_a0 in
+  let v_a1 = v_a0 *. 1.1 in
+  let equity1 = c0 +. v_a1 in
+  let v_b1 = 0.4 *. equity1 in
+  let c1 = c0 -. v_b1 in
+  let v_a2 = v_a1 *. (121. /. 110.) in
+  let v_b2 = v_b1 *. (54. /. 45.) in
+  let equity2 = c1 +. v_a2 +. v_b2 in
+  let expected = equity2 -. 0.01 *. v_a2 -. 0.01 *. v_b2 in
   assert_close ~tolerance:1e-12 expected (final_equity result)
 
 let test_engine_portfolio_min_fee () =
@@ -422,7 +627,8 @@ let test_engine_portfolio_min_fee () =
     Engine.run [| ("tw/A", a); ("tw/B", b) |]
       { Engine.targets =
           [| [| 0.5; 0. |]; [| 0.5; 0. |] |] }
-      [| costs; costs |] ~capital:(Some 10000.) ~fill:Engine.Close_same
+      [| costs; costs |] ~margin:(no_margin 2)
+      ~capital:(Some 10000.) ~fill:Engine.Close_same
   in
   let after_a_buy = 1. -. 0.002 in
   let after_b_buy =
@@ -452,7 +658,8 @@ let test_engine_portfolio_open () =
   in
   let result =
     Engine.run [| ("tw/A", a); ("tw/B", b) |] strategy
-      [| zero_costs; zero_costs |] ~capital:None ~fill:Engine.Open_next
+      [| zero_costs; zero_costs |] ~margin:(no_margin 2)
+      ~capital:None ~fill:Engine.Open_next
   in
   (* day 2: A fills at open 102; legs 1 (flat) then 104/102.
      day 3: B fills at open 53; leg 1: 106/104 - 1 on A alone;
@@ -477,9 +684,15 @@ let test_engine_vwap_trip () =
     run_single bars [| 0.5; 1.0; 0.0 |] zero_costs
       ~capital:None ~fill:Engine.Close_same
   in
-  (* scale in 0.5 at 100 and 0.5 at 110: entry VWAP 105; exit all at 126 *)
+  (* The first half drifts to weight 11/21 at 110, so reaching target 1
+     buys only the remaining weight 10/21. *)
+  let entry_price =
+    (0.5 *. 100. +. (10. /. 21.) *. 110.) /. (0.5 +. 10. /. 21.)
+  in
   (match result.trips with
-   | [trip] -> assert_close ~tolerance:1e-12 (126. /. 105. -. 1.) trip.net_ret
+   | [trip] ->
+       assert_close ~tolerance:1e-12
+         (126. /. entry_price -. 1.) trip.net_ret
    | _ -> assert false)
 
 let test_engine_vwap_multi_exit () =
@@ -492,10 +705,14 @@ let test_engine_vwap_multi_exit () =
     run_single bars [| 1.0; 0.5; 0.0 |] zero_costs
       ~capital:None ~fill:Engine.Close_same
   in
-  (* Exit VWAP = (0.5 * 110 + 0.5 * 126) / 1.0 = 118. *)
+  (* After selling to 0.5 at 110, the position drifts to weight 126/236
+     before the final sale at 126. *)
+  let w = 126. /. 236. in
+  let exit_price = (0.5 *. 110. +. w *. 126.) /. (0.5 +. w) in
   match result.trips with
   | [trip] ->
-      assert_close ~tolerance:1e-12 (118. /. 100. -. 1.) trip.net_ret
+      assert_close ~tolerance:1e-12
+        (exit_price /. 100. -. 1.) trip.net_ret
   | _ -> assert false
 
 let dsl_bars =
@@ -536,7 +753,7 @@ let test_target_style () =
       assert (strategy.Engine.targets.(0) = [| 0.; 1.; 1.; 0.; 0. |]);
       let result =
         Engine.run [| ("tw/TEST", dsl_bars) |] strategy [| zero_costs |]
-          ~capital:None ~fill:Engine.Close_same
+          ~margin:(no_margin 1) ~capital:None ~fill:Engine.Close_same
       in
       (* buy close 105, accrue 110/105 then 100/110, sell close 100 *)
       assert_close ~tolerance:1e-12 (100. /. 105.) (final_equity result);
@@ -610,7 +827,7 @@ let test_golden () =
   in
   let result =
     Engine.run [| ("tw/TEST", bars) |] strategy [| costs |]
-      ~capital:None ~fill:Engine.Open_next
+      ~margin:(no_margin 1) ~capital:None ~fill:Engine.Open_next
   in
   assert (List.length result.trips = 4);
   assert (List.length result.fills = 8);
@@ -660,11 +877,11 @@ target 1.0
       let buy_hold = Dsl.compile buy_hold_path ~params:[] bars in
       let sma_result =
         Engine.run [| ("tw/TEST", bars) |] sma [| zero_costs |]
-          ~capital:None ~fill:Engine.Open_next
+          ~margin:(no_margin 1) ~capital:None ~fill:Engine.Open_next
       in
       let buy_hold_result =
         Engine.run [| ("tw/TEST", bars) |] buy_hold [| zero_costs |]
-          ~capital:None ~fill:Engine.Close_same
+          ~margin:(no_margin 1) ~capital:None ~fill:Engine.Close_same
       in
       let last = Array.length bars - 1 in
       assert_close golden_expected (final_equity sma_result);
@@ -686,7 +903,9 @@ let test_baseline_output_header () =
       let result : Engine.result =
         { equity_curve = ["2020-01-01", 1.; "2020-01-02", 1.1];
           fills = [];
-          trips = [] }
+          trips = [];
+          margin_stats =
+            { min_maintenance = None; margin_calls = 0; clamps = 0 } }
       in
       Report.write_outputs
         ~out_dir ~stem:"pair" ~columns:["a", result]
@@ -899,7 +1118,9 @@ let test_multi_stock_cli () =
            begin
              match String.split_on_char ',' last with
              | ["2020-01-03"; equity] ->
-                 assert_close ~tolerance:1e-9 1.38 (float_of_string equity)
+                 (* day 2 equity = 1.15; day 3: A = 1.21, B = 0.66,
+                    cash = -0.5, so equity = 1.37 with financing off *)
+                 assert_close ~tolerance:1e-9 1.37 (float_of_string equity)
              | _ -> assert false
            end
        | _ -> assert false);
@@ -1105,6 +1326,14 @@ let () =
   test_hold_tie_break ();
   test_order_style ();
   test_style_errors ();
+  test_engine_drift ();
+  test_engine_interest ();
+  test_engine_initial_margin_clamp ();
+  test_engine_mixed_ratio_clamp ();
+  test_engine_margin_call ();
+  test_engine_bankruptcy ();
+  test_engine_buyhold_costs ();
+  test_engine_no_borrow_stats ();
   test_engine ();
   test_engine_close ();
   test_engine_close_costs ();
