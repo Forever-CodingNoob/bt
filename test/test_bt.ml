@@ -890,6 +890,8 @@ let test_multi_stock_errors () =
   expect "stock \"tw/A\" as close\nclose.target 1.0\n";
   (* alias collides with a param *)
   expect "stock \"tw/A\" as n\nparam n = 5\nn.target 1.0\n";
+  (* alias collides with a let *)
+  expect "stock \"tw/A\" as n\nlet n = 5\nn.target 1.0\n";
   (* unknown alias in a statement *)
   expect "stock \"tw/A\" as a\nb.target 1.0\n";
   (* bare statement in an aliased file *)
