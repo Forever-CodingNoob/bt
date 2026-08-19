@@ -25,8 +25,8 @@ bt fetch MARKET/SYMBOL [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--data-dir DIR]
 bt fetch --market tw|us --symbol SYM [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--data-dir DIR]
 bt run STRAT... [--baseline M/SYM] [--from D] [--to D]
        [-p name=value ...] [--fill open|close]
-       [--fee-bps F] [--tax-bps F] [--slip-bps F]
-       [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]
+       [--fee-bps F] [--tax-bps F] [--slip-bps F] [--min-fee F]
+       [--capital TWD] [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]
 ```
 
 ## `bt fetch`
@@ -110,9 +110,11 @@ strategy file selects its data with exactly one
 | `--to YYYY-MM-DD` | Set the last date to load. The default has no upper limit, so `bt` uses the last cached common date. |
 | `-p name=value` | Override each matching strategy `param` with a float value. Repeat this option for more parameters. The command rejects a name that no strategy declares. |
 | `--fill open\|close` | Select the fill mode. The default is `close`. |
+| `--capital TWD` | Set the portfolio starting value in TWD. Supplying it enables the per-order minimum fee; the default does not apply a minimum. |
 | `--fee-bps F` | Override the fee in basis points for all strategies and the baseline. |
 | `--tax-bps F` | Override the sell tax in basis points for all strategies and the baseline. |
 | `--slip-bps F` | Override slippage in basis points for all strategies and the baseline. |
+| `--min-fee F` | Override the minimum commission per order in TWD for all strategies and the baseline. The minimum applies only with `--capital`. |
 | `--data-dir DIR` | Set the cache directory. The default is `data/`. |
 | `--out-dir DIR` | Set the output directory. The default is `out/`. |
 | `--out-name NAME` | Set the equity CSV and PNG stem. The default joins the strategy names with `_vs_`. |
@@ -146,16 +148,19 @@ file with the basename `baseline` reports
 
 One basis point is 0.01%. One hundred basis points are 1%.
 
-| Market and symbol | Fee | Sell tax | Slippage |
-| --- | --- | --- | --- |
-| US | 0 bps (0%) | 0 bps (0%) | 0 bps (0%) |
-| Taiwan symbol that starts with `00` | 14.25 bps (0.1425%) | 10 bps (0.10%) | 0 bps (0%) |
-| Other Taiwan symbol | 14.25 bps (0.1425%) | 30 bps (0.30%) | 0 bps (0%) |
+| Market and symbol | Fee | Minimum fee | Sell tax | Slippage |
+| --- | --- | --- | --- | --- |
+| US | 0 bps (0%) | 0 TWD | 0 bps (0%) | 0 bps (0%) |
+| Taiwan symbol that starts with `00` | 3.99 bps (0.0399%) | 20 TWD per order | 10 bps (0.10%) | 0 bps (0%) |
+| Other Taiwan symbol | 3.99 bps (0.0399%) | 20 TWD per order | 30 bps (0.30%) | 0 bps (0%) |
 
-An exposure increase pays the fee and slippage. An exposure decrease pays
-the fee, sell tax, and slippage. The cost is proportional to the absolute
-exposure change. The three cost options override the applicable defaults
-for every strategy and the baseline.
+An exposure increase pays the commission and slippage. An exposure decrease
+pays the commission, sell tax, and slippage. Commission is proportional to
+the absolute exposure change. When `--capital` is given, each order instead
+pays the greater of that proportional commission and the minimum fee. Without
+`--capital`, the minimum is ignored. Sell tax and slippage remain proportional.
+The four cost options override the applicable defaults for every strategy and
+the baseline; `--min-fee 0` disables the minimum.
 
 ### Fill modes
 

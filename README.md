@@ -82,8 +82,8 @@ the header `date,price,from_exposure,to_exposure`.
 bt fetch MARKET/SYMBOL [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--data-dir DIR]
 bt run STRAT... [--baseline M/SYM] [--from D] [--to D]
        [-p name=value ...] [--fill open|close]
-       [--fee-bps F] [--tax-bps F] [--slip-bps F]
-       [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]
+       [--fee-bps F] [--tax-bps F] [--slip-bps F] [--min-fee F]
+       [--capital TWD] [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]
 ```
 
 See [docs/cli.md](./docs/cli.md) for the complete reference.
@@ -103,7 +103,8 @@ See [docs/cli.md](./docs/cli.md) for the complete reference.
 - Each strategy gets a separate `<name>.trades.csv` fill log.
   `--out-name` does not change these log names.
 - `--no-plot` skips `scripts/plot.py` and prevents updates to `<stem>.png`.
-- The cost flags take basis points. 100 basis points are 1%.
+- `--fee-bps`, `--tax-bps`, and `--slip-bps` take basis points. 100 basis
+  points are 1%. `--capital` and `--min-fee` take TWD.
 
 ## Strategy language (DSL)
 
@@ -145,10 +146,11 @@ styles, grammar, statements, types, and every builtin.
   it at the next bar open.
 - A strategy states a target exposure per bar. The engine trades the
   difference and charges costs on the traded fraction.
-- Default costs: a TW trade pays a 0.1425% fee on each side. A TW sale
-  also pays a tax: 0.1% for ETFs (symbols that start with `00`) and
-  0.3% for stocks. US costs are zero. Slippage is zero. Override these
-  with the cost flags (0.1425% = 14.25 basis points).
+- Default costs: a TW trade pays the online commission of 0.0399% on each
+  side, with a 20 TWD minimum per order. The minimum applies only when
+  `--capital` is given. A TW sale also pays a tax: 0.1% for ETFs (symbols
+  that start with `00`) and 0.3% for stocks. US costs are zero. Slippage
+  is zero. Override these with the cost flags (0.0399% = 3.99 basis points).
 - An open position at the end of the data is closed at the last close.
 
 ## Data notes

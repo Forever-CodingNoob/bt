@@ -4,8 +4,8 @@ let usage =
    \           positional MARKET/SYMBOL is equivalent to --market and --symbol\n\
    \  bt run STRAT... [--baseline M/SYM] [--from D] [--to D]\n\
    \         [-p name=value ...] [--fill open|close]\n\
-   \         [--fee-bps F] [--tax-bps F] [--slip-bps F]\n\
-   \         [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]"
+   \         [--fee-bps F] [--tax-bps F] [--slip-bps F] [--min-fee F]\n\
+   \         [--capital TWD] [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]"
 
 let help =
   usage ^
@@ -91,14 +91,16 @@ let parse_parameter parameters value =
   | _ ->
       raise (Arg.Bad (Printf.sprintf "invalid parameter %S; expected name=value" value))
 
-let apply_cost_overrides defaults fee_bps tax_bps slip_bps :
+let apply_cost_overrides defaults fee_bps tax_bps slip_bps min_fee :
     Btlib.Engine.costs =
   { fee_bps =
       (match fee_bps with Some value -> value | None -> defaults.Btlib.Engine.fee_bps);
     tax_bps =
       (match tax_bps with Some value -> value | None -> defaults.Btlib.Engine.tax_bps);
     slip_bps =
-      (match slip_bps with Some value -> value | None -> defaults.Btlib.Engine.slip_bps) }
+      (match slip_bps with Some value -> value | None -> defaults.Btlib.Engine.slip_bps);
+    min_fee =
+      (match min_fee with Some value -> value | None -> defaults.Btlib.Engine.min_fee) }
 
 let load_bars ~market ~symbol ~from_ ~to_ ~data_dir =
   let cache_path =
@@ -160,9 +162,11 @@ let run argv =
   let to_ = ref None in
   let baseline = ref None in
   let parameters = ref [] in
+  let capital = ref None in
   let fee_bps = ref None in
   let tax_bps = ref None in
   let slip_bps = ref None in
+  let min_fee = ref None in
   let data_dir = ref "data" in
   let out_dir = ref "out" in
   let out_name = ref None in
@@ -184,10 +188,15 @@ let run argv =
            | "close" -> fill := Btlib.Engine.Close_same
            | _ -> raise (Arg.Bad "--fill must be open or close")),
        "fill mode: open or close (default close)");
+      ("--capital",
+       Arg.Float (fun value -> capital := Some value),
+       "portfolio starting value in TWD; enables the per-order minimum fee");
       ("-p", Arg.String (parse_parameter parameters), "parameter override name=value");
       ("--fee-bps", Arg.Float (fun value -> fee_bps := Some value), "fee basis points");
       ("--tax-bps", Arg.Float (fun value -> tax_bps := Some value), "tax basis points");
       ("--slip-bps", Arg.Float (fun value -> slip_bps := Some value), "slippage basis points");
+      ("--min-fee", Arg.Float (fun value -> min_fee := Some value),
+       "minimum fee per order in TWD");
       ("--data-dir", Arg.Set_string data_dir, "cache directory");
       ("--out-dir", Arg.Set_string out_dir, "output directory");
       ("--out-name", Arg.String (fun value -> out_name := Some value), "output stem");
@@ -293,10 +302,11 @@ let run argv =
             ~market:input.market ~symbol:input.symbol
         in
         let costs =
-          apply_cost_overrides defaults !fee_bps !tax_bps !slip_bps
+          apply_cost_overrides defaults !fee_bps !tax_bps !slip_bps !min_fee
         in
         let result =
-          Btlib.Engine.run input.bars strategy costs ~fill:!fill
+          Btlib.Engine.run input.bars strategy costs
+            ~capital:!capital ~fill:!fill
         in
         (input.name, input.market ^ "/" ^ input.symbol,
          strategy.target, result))
@@ -308,11 +318,12 @@ let run argv =
     | Some (market, symbol, bars) ->
         let defaults = Btlib.Engine.default_costs ~market ~symbol in
         let costs =
-          apply_cost_overrides defaults !fee_bps !tax_bps !slip_bps
+          apply_cost_overrides defaults !fee_bps !tax_bps !slip_bps !min_fee
         in
         Some
           (Btlib.Engine.run bars
-             (baseline_strategy (Array.length bars)) costs ~fill:!fill)
+             (baseline_strategy (Array.length bars)) costs
+             ~capital:!capital ~fill:!fill)
   in
   let columns =
     List.map (fun (name, _, _, result) -> name, result) runs

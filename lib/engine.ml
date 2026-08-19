@@ -4,6 +4,7 @@ type costs = {
   fee_bps : float;
   tax_bps : float;
   slip_bps : float;
+  min_fee : float;
 }
 
 type fill = Open_next | Close_same
@@ -29,21 +30,23 @@ type result = {
 
 let default_costs ~market ~symbol =
   match String.lowercase_ascii market with
-  | "us" -> { fee_bps = 0.; tax_bps = 0.; slip_bps = 0. }
+  | "us" -> { fee_bps = 0.; tax_bps = 0.; slip_bps = 0.; min_fee = 0. }
   | "tw" ->
       let is_etf =
         String.length symbol >= 2 && symbol.[0] = '0' && symbol.[1] = '0'
       in
-      { fee_bps = 14.25;
+      { fee_bps = 3.99;
         tax_bps = if is_etf then 10. else 30.;
-        slip_bps = 0. }
+        slip_bps = 0.;
+        min_fee = 20. }
   | _ -> invalid_arg "Engine.default_costs: market must be tw or us"
 
 (* NaN means flat; short exposure is out of scope *)
 let clamp_target value =
   if Float.is_nan value || value < 0. then 0. else value
 
-let run (bars : Data.bar array) (strategy : strategy) (costs : costs) ~fill =
+let run (bars : Data.bar array) (strategy : strategy) (costs : costs)
+    ~capital:(capital : float option) ~fill =
   let length = Array.length bars in
   if Array.length strategy.target <> length then
     invalid_arg "Engine.run: target length mismatch";
@@ -54,6 +57,20 @@ let run (bars : Data.bar array) (strategy : strategy) (costs : costs) ~fill =
   let fills = ref [] in
   let trips = ref [] in
   let equity_curve = ref [] in
+  let charge ~equity_before ~delta =
+    let amount = abs_float delta in
+    let commission = amount *. costs.fee_bps /. 10000. in
+    let commission =
+      match capital with
+      | Some value when costs.min_fee > 0. ->
+          Float.max commission (costs.min_fee /. (equity_before *. value))
+      | _ -> commission
+    in
+    let non_commission_bps =
+      if delta > 0. then costs.slip_bps else costs.tax_bps +. costs.slip_bps
+    in
+    commission +. amount *. non_commission_bps /. 10000.
+  in
   let trade ~date ~price ~desired =
     let delta = desired -. !exposure in
     if delta <> 0. then begin
@@ -61,11 +78,8 @@ let run (bars : Data.bar array) (strategy : strategy) (costs : costs) ~fill =
         entry_equity := !equity;
         entry_date := date
       end;
-      let bps =
-        if delta > 0. then costs.fee_bps +. costs.slip_bps
-        else costs.fee_bps +. costs.tax_bps +. costs.slip_bps
-      in
-      equity := !equity *. (1. -. abs_float delta *. bps /. 10000.);
+      let equity_before = !equity in
+      equity := equity_before *. (1. -. charge ~equity_before ~delta);
       fills := { date; price; from_e = !exposure; to_e = desired } :: !fills;
       exposure := desired;
       if desired = 0. then
@@ -106,8 +120,10 @@ let run (bars : Data.bar array) (strategy : strategy) (costs : costs) ~fill =
   done;
   if !exposure > 0. then begin
     let last = bars.(length - 1) in
-    let bps = costs.fee_bps +. costs.tax_bps +. costs.slip_bps in
-    equity := !equity *. (1. -. !exposure *. bps /. 10000.);
+    let equity_before = !equity in
+    equity :=
+      equity_before *.
+      (1. -. charge ~equity_before ~delta:(-. !exposure));
     fills :=
       { date = last.Data.date; price = last.Data.c;
         from_e = !exposure; to_e = 0. } :: !fills;
