@@ -154,7 +154,7 @@ let common_dates = function
         initial rest
 
 let baseline_strategy length : Btlib.Engine.strategy =
-  { target = Array.make length 1. }
+  { targets = [| Array.make length 1. |] }
 
 let run argv =
   let strategy_files = ref [] in
@@ -305,11 +305,12 @@ let run argv =
           apply_cost_overrides defaults !fee_bps !tax_bps !slip_bps !min_fee
         in
         let result =
-          Btlib.Engine.run input.bars strategy costs
-            ~capital:!capital ~fill:!fill
+          Btlib.Engine.run
+            [| (input.market ^ "/" ^ input.symbol, input.bars) |]
+            strategy [| costs |] ~capital:!capital ~fill:!fill
         in
         (input.name, input.market ^ "/" ^ input.symbol,
-         strategy.target, result))
+         strategy.targets.(0), result))
       inputs
   in
   let baseline_result =
@@ -321,8 +322,8 @@ let run argv =
           apply_cost_overrides defaults !fee_bps !tax_bps !slip_bps !min_fee
         in
         Some
-          (Btlib.Engine.run bars
-             (baseline_strategy (Array.length bars)) costs
+          (Btlib.Engine.run [| (market ^ "/" ^ symbol, bars) |]
+             (baseline_strategy (Array.length bars)) [| costs |]
              ~capital:!capital ~fill:!fill)
   in
   let columns =

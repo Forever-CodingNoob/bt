@@ -194,26 +194,28 @@ let engine_zero_expected = 1.2127499999999998
 let engine_fee_expected = 1.188616275
 let golden_expected = 1.7291207425596153
 
+let run_single bars target costs ~capital ~fill =
+  Engine.run [| ("tw/TEST", bars) |] { Engine.targets = [| target |] }
+    [| costs |] ~capital ~fill
+
 let test_engine () =
-  let strategy : Engine.strategy =
-    { target = [|0.; 1.; 1.; 1.; 1.|] }
-  in
+  let target = [|0.; 1.; 1.; 1.; 1.|] in
   let zero_result =
-    Engine.run sample_bars strategy zero_costs ~capital:None ~fill:Engine.Open_next
+    run_single sample_bars target zero_costs ~capital:None ~fill:Engine.Open_next
   in
   assert_close ~tolerance:1e-12 engine_zero_expected (final_equity zero_result);
   let fee_costs : Engine.costs =
     { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0. }
   in
   let fee_result =
-    Engine.run sample_bars strategy fee_costs ~capital:None ~fill:Engine.Open_next
+    run_single sample_bars target fee_costs ~capital:None ~fill:Engine.Open_next
   in
   assert_close ~tolerance:1e-12 engine_fee_expected (final_equity fee_result)
 
 let test_engine_close () =
-  let strategy : Engine.strategy = { target = [|0.; 1.; 1.; 0.; 0.|] } in
+  let target = [|0.; 1.; 1.; 0.; 0.|] in
   let result =
-    Engine.run fill_bars strategy zero_costs ~capital:None ~fill:Engine.Close_same
+    run_single fill_bars target zero_costs ~capital:None ~fill:Engine.Close_same
   in
   (* buy at close 104, accrue 108/104 and 112/108, sell at close 112 *)
   assert_close ~tolerance:1e-12 (112. /. 104.) (final_equity result);
@@ -223,34 +225,32 @@ let test_engine_close () =
   assert (trip.Engine.entry_date = "2020-01-02");
   assert (trip.Engine.exit_date = "2020-01-06");
   (* NaN target means flat: same run with a NaN leading bar *)
-  let with_nan : Engine.strategy =
-    { target = [|Float.nan; 1.; 1.; 0.; 0.|] }
-  in
+  let with_nan = [|Float.nan; 1.; 1.; 0.; 0.|] in
   let result_nan =
-    Engine.run fill_bars with_nan zero_costs ~capital:None ~fill:Engine.Close_same
+    run_single fill_bars with_nan zero_costs ~capital:None ~fill:Engine.Close_same
   in
   assert_close ~tolerance:1e-12
     (final_equity result) (final_equity result_nan)
 
 let test_engine_close_costs () =
-  let strategy : Engine.strategy = { target = [|0.; 1.; 1.; 0.; 0.|] } in
+  let target = [|0.; 1.; 1.; 0.; 0.|] in
   let costs : Engine.costs =
     { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0. }
   in
   let result =
-    Engine.run fill_bars strategy costs ~capital:None ~fill:Engine.Close_same
+    run_single fill_bars target costs ~capital:None ~fill:Engine.Close_same
   in
   (* 1% haircut on each side of the round trip *)
   assert_close ~tolerance:1e-12
     (0.99 *. 0.99 *. 112. /. 104.) (final_equity result)
 
 let test_engine_min_fee () =
-  let strategy : Engine.strategy = { target = [| 0.; 1.; 1.; 0.; 0. |] } in
+  let target = [| 0.; 1.; 1.; 0.; 0. |] in
   let costs : Engine.costs =
     { fee_bps = 3.99; tax_bps = 0.; slip_bps = 0.; min_fee = 20. }
   in
   let result =
-    Engine.run fill_bars strategy costs
+    run_single fill_bars target costs
       ~capital:(Some 10000.) ~fill:Engine.Close_same
   in
   let e1 = (1. -. 0.002) *. 112. /. 104. in
@@ -263,12 +263,12 @@ let test_engine_min_fee () =
   assert_close ~tolerance:1e-12 expected (final_equity result)
 
 let test_engine_min_fee_without_capital () =
-  let strategy : Engine.strategy = { target = [| 0.; 1.; 1.; 0.; 0. |] } in
+  let target = [| 0.; 1.; 1.; 0.; 0. |] in
   let costs : Engine.costs =
     { fee_bps = 3.99; tax_bps = 0.; slip_bps = 0.; min_fee = 20. }
   in
   let result =
-    Engine.run fill_bars strategy costs ~capital:None ~fill:Engine.Close_same
+    run_single fill_bars target costs ~capital:None ~fill:Engine.Close_same
   in
   let expected =
     (1. -. 3.99 /. 10000.) *. (112. /. 104.)
@@ -277,11 +277,9 @@ let test_engine_min_fee_without_capital () =
   assert_close ~tolerance:1e-12 expected (final_equity result)
 
 let test_engine_partial () =
-  let strategy : Engine.strategy =
-    { target = [|0.; 0.5; 1.; 0.5; 0.|] }
-  in
+  let target = [|0.; 0.5; 1.; 0.5; 0.|] in
   let result =
-    Engine.run fill_bars strategy zero_costs ~capital:None ~fill:Engine.Close_same
+    run_single fill_bars target zero_costs ~capital:None ~fill:Engine.Close_same
   in
   let expected =
     (1. +. 0.5 *. (108. /. 104. -. 1.))
@@ -294,14 +292,12 @@ let test_engine_partial () =
   assert ((List.hd result.trips).Engine.net_ret > 0.)
 
 let test_engine_partial_costs () =
-  let strategy : Engine.strategy =
-    { target = [|0.; 0.5; 1.; 0.5; 0.|] }
-  in
+  let target = [|0.; 0.5; 1.; 0.5; 0.|] in
   let costs : Engine.costs =
     { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0. }
   in
   let result =
-    Engine.run fill_bars strategy costs ~capital:None ~fill:Engine.Close_same
+    run_single fill_bars target costs ~capital:None ~fill:Engine.Close_same
   in
   (* each 0.5-point fill costs 0.5 * 1% = 0.005, in engine order *)
   let expected =
@@ -315,11 +311,9 @@ let test_engine_partial_costs () =
 let test_engine_partial_open () =
   (* same targets under Open_next: fills at the next opens 106, 110, 114;
      the 0.5 exposure left at the end is force-closed at the last close *)
-  let strategy : Engine.strategy =
-    { target = [|0.; 0.5; 1.; 0.5; 0.|] }
-  in
+  let target = [|0.; 0.5; 1.; 0.5; 0.|] in
   let result =
-    Engine.run fill_bars strategy zero_costs ~capital:None ~fill:Engine.Open_next
+    run_single fill_bars target zero_costs ~capital:None ~fill:Engine.Open_next
   in
   let expected =
     (1. +. 0.5 *. (108. /. 106. -. 1.))
@@ -331,14 +325,12 @@ let test_engine_partial_open () =
   assert (List.length result.trips = 1)
 
 let test_engine_partial_open_costs () =
-  let strategy : Engine.strategy =
-    { target = [| 0.; 0.5; 1.; 0.5; 0. |] }
-  in
+  let target = [| 0.; 0.5; 1.; 0.5; 0. |] in
   let costs : Engine.costs =
     { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0. }
   in
   let result =
-    Engine.run fill_bars strategy costs ~capital:None ~fill:Engine.Open_next
+    run_single fill_bars target costs ~capital:None ~fill:Engine.Open_next
   in
   let expected =
     0.995 *. (1. +. 0.5 *. (108. /. 106. -. 1.))
@@ -347,6 +339,89 @@ let test_engine_partial_open_costs () =
     *. (1. +. 0.5 *. (116. /. 114. -. 1.)) *. 0.995
   in
   assert_close ~tolerance:1e-12 expected (final_equity result)
+
+let test_engine_portfolio_close () =
+  let a =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 100. 110.;
+       bar "2020-01-03" 110. 121. |]
+  in
+  let b =
+    [| bar "2020-01-01" 50. 50.;
+       bar "2020-01-02" 50. 45.;
+       bar "2020-01-03" 45. 54. |]
+  in
+  let strategy : Engine.strategy =
+    { targets = [| [| 0.5; 0.5; 0. |]; [| 0.; 0.4; 0. |] |] }
+  in
+  let result =
+    Engine.run [| ("tw/A", a); ("tw/B", b) |] strategy
+      [| zero_costs; zero_costs |] ~capital:None ~fill:Engine.Close_same
+  in
+  (* day 2: 1 + 0.5 * (110/100 - 1) = 1.05; B fills to 0.4 at 45.
+     day 3: 1.05 * (1 + 0.5 * (121/110 - 1) + 0.4 * (54/45 - 1))
+          = 1.05 * 1.13. Both close at day-3 closes. *)
+  assert_close ~tolerance:1e-12 (1.05 *. 1.13) (final_equity result);
+  assert (List.length result.fills = 4);
+  assert (List.length result.trips = 2);
+  let by_entry (trip : Engine.trip) = trip.entry_date in
+  let sorted =
+    List.sort (fun x y -> compare (by_entry x) (by_entry y)) result.trips
+  in
+  (match sorted with
+   | [a_trip; b_trip] ->
+       assert_close ~tolerance:1e-12 (121. /. 100. -. 1.) a_trip.net_ret;
+       assert_close ~tolerance:1e-12 (54. /. 45. -. 1.) b_trip.net_ret
+   | _ -> assert false);
+  (match result.fills with
+   | first :: _ -> assert (first.Engine.stock = "tw/A")
+   | [] -> assert false)
+
+let test_engine_portfolio_open () =
+  let a =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 102. 104.;
+       bar "2020-01-03" 106. 108. |]
+  in
+  let b =
+    [| bar "2020-01-01" 50. 50.;
+       bar "2020-01-02" 51. 52.;
+       bar "2020-01-03" 53. 54. |]
+  in
+  let strategy : Engine.strategy =
+    { targets = [| [| 1.; 1.; 1. |]; [| 0.; 0.5; 0.5 |] |] }
+  in
+  let result =
+    Engine.run [| ("tw/A", a); ("tw/B", b) |] strategy
+      [| zero_costs; zero_costs |] ~capital:None ~fill:Engine.Open_next
+  in
+  (* day 2: A fills at open 102; legs 1 (flat) then 104/102.
+     day 3: B fills at open 53; leg 1: 106/104 - 1 on A alone;
+     leg 2: (108/106 - 1) + 0.5 * (54/53 - 1).
+     Final bar force-closes A at 108 and B at 54 (no cost). *)
+  let expected =
+    (104. /. 102.)
+    *. (1. +. (106. /. 104. -. 1.))
+    *. (1. +. (108. /. 106. -. 1.) +. 0.5 *. (54. /. 53. -. 1.))
+  in
+  assert_close ~tolerance:1e-12 expected (final_equity result);
+  assert (List.length result.fills = 4);
+  assert (List.length result.trips = 2)
+
+let test_engine_vwap_trip () =
+  let bars =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 105. 110.;
+       bar "2020-01-03" 120. 126. |]
+  in
+  let result =
+    run_single bars [| 0.5; 1.0; 0.0 |] zero_costs
+      ~capital:None ~fill:Engine.Close_same
+  in
+  (* scale in 0.5 at 100 and 0.5 at 110: entry VWAP 105; exit all at 126 *)
+  (match result.trips with
+   | [trip] -> assert_close ~tolerance:1e-12 (126. /. 105. -. 1.) trip.net_ret
+   | _ -> assert false)
 
 let dsl_bars =
   (* closes 100 105 110 100 90; open = previous close *)
@@ -364,7 +439,7 @@ let test_stock_statement () =
       assert (Dsl.stock_of ~filename:path parsed = ("tw", "00685L"));
       (* stock is ignored by compilation *)
       let strategy = Dsl.compile path ~params:[] dsl_bars in
-      assert (Array.length strategy.Engine.target = Array.length dsl_bars));
+      assert (Array.length strategy.Engine.targets.(0) = Array.length dsl_bars));
   let rejects source =
     with_temp_strategy source (fun path ->
       assert_failure (fun () ->
@@ -381,9 +456,9 @@ let test_target_style () =
     "target num(hold(cross_above(close, 104.0), cross_below(close, 104.0)))\n"
     (fun path ->
       let strategy = Dsl.compile path ~params:[] dsl_bars in
-      assert (strategy.Engine.target = [| 0.; 1.; 1.; 0.; 0. |]);
+      assert (strategy.Engine.targets.(0) = [| 0.; 1.; 1.; 0.; 0. |]);
       let result =
-        Engine.run dsl_bars strategy zero_costs
+        Engine.run [| ("tw/TEST", dsl_bars) |] strategy [| zero_costs |]
           ~capital:None ~fill:Engine.Close_same
       in
       (* buy close 105, accrue 110/105 then 100/110, sell close 100 *)
@@ -396,7 +471,7 @@ let test_hold_tie_break () =
     "target num(hold(close > 50.0, close > 0.0))\n"
     (fun path ->
       let strategy = Dsl.compile path ~params:[] dsl_bars in
-      assert (strategy.Engine.target = [| 0.; 0.; 0.; 0.; 0. |]))
+      assert (strategy.Engine.targets.(0) = [| 0.; 0.; 0.; 0.; 0. |]))
 
 let test_order_style () =
   with_temp_strategy
@@ -406,7 +481,7 @@ let test_order_style () =
       exit when cross_below(close, 104.0) size 1.0\n")
     (fun path ->
       let strategy = Dsl.compile path ~params:[] dsl_bars in
-      assert (strategy.Engine.target = [| 0.; 0.5; 1.; 0.; 0. |]))
+      assert (strategy.Engine.targets.(0) = [| 0.; 0.5; 1.; 0.; 0. |]))
 
 let test_style_errors () =
   let rejects source =
@@ -457,7 +532,8 @@ let test_golden () =
     { fee_bps = 0.; tax_bps = 0.; slip_bps = 0.; min_fee = 0. }
   in
   let result =
-    Engine.run bars strategy costs ~capital:None ~fill:Engine.Open_next
+    Engine.run [| ("tw/TEST", bars) |] strategy [| costs |]
+      ~capital:None ~fill:Engine.Open_next
   in
   assert (List.length result.trips = 4);
   assert (List.length result.fills = 8);
@@ -506,10 +582,12 @@ target 1.0
       in
       let buy_hold = Dsl.compile buy_hold_path ~params:[] bars in
       let sma_result =
-        Engine.run bars sma zero_costs ~capital:None ~fill:Engine.Open_next
+        Engine.run [| ("tw/TEST", bars) |] sma [| zero_costs |]
+          ~capital:None ~fill:Engine.Open_next
       in
       let buy_hold_result =
-        Engine.run bars buy_hold zero_costs ~capital:None ~fill:Engine.Close_same
+        Engine.run [| ("tw/TEST", bars) |] buy_hold [| zero_costs |]
+          ~capital:None ~fill:Engine.Close_same
       in
       let last = Array.length bars - 1 in
       assert_close golden_expected (final_equity sma_result);
@@ -763,6 +841,9 @@ let () =
   test_engine_partial_costs ();
   test_engine_partial_open ();
   test_engine_partial_open_costs ();
+  test_engine_portfolio_close ();
+  test_engine_portfolio_open ();
+  test_engine_vwap_trip ();
   test_golden ();
   test_report_stem ();
   test_multi_strat_fixture ();

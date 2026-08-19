@@ -579,7 +579,7 @@ let compile_ast statements ~params bars =
       target
     end
   in
-  let strategy : Engine.strategy = { target } in
+  let strategy : Engine.strategy = { targets = [| target |] } in
   strategy
 
 let compile source ~params bars =

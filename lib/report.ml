@@ -186,11 +186,11 @@ let write_fills ~out_dir ~name (fills : Engine.fill_event list) =
   Fun.protect
     ~finally:(fun () -> close_out output)
     (fun () ->
-      output_string output "date,price,from_exposure,to_exposure\n";
+      output_string output "date,stock,price,from_exposure,to_exposure\n";
       List.iter
         (fun (fill : Engine.fill_event) ->
-          Printf.fprintf output "%s,%.17g,%.17g,%.17g\n"
-            fill.date fill.price fill.from_e fill.to_e)
+          Printf.fprintf output "%s,%s,%.17g,%.17g,%.17g\n"
+            fill.date fill.stock fill.price fill.from_e fill.to_e)
         fills)
 
 let write_outputs ~out_dir ~stem ~columns ~baseline =
