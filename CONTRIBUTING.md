@@ -10,7 +10,7 @@ lib/ast.ml       Strategy AST types
 lib/lexer.mll    Lexer (ocamllex)
 lib/parser.mly   Grammar (ocamlyacc)
 lib/dsl.ml       Evaluator; compiles a script to Engine.strategy
-lib/engine.ml    Backtest loop and cost model
+lib/engine.ml    Portfolio engine (per-asset targets and costs)
 lib/metrics.ml   CAGR, Sharpe, MaxDD, Calmar, trade statistics
 lib/report.ml    Terminal table, CSV output, PNG plot
 test/test_bt.ml  Assert-based tests (dune test)

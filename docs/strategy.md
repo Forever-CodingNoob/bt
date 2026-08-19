@@ -7,13 +7,14 @@ docs/cli.md for the CLI flags.
 ## Contents
 
 - [Strategy styles](#strategy-styles)
+- [Multi-stock strategies](#multi-stock-strategies)
 - [Grammar (BNF)](#grammar-bnf)
 - [Statements](#statements)
 - [Values and types](#values-and-types)
 - [Builtin functions](#builtin-functions)
 
-Statements are one per line. A strategy file uses exactly one of the
-three styles below. Do not mix styles.
+Statements are one per line. Each stock uses exactly one of the three
+styles below. Do not mix styles for one stock.
 
 ## Strategy styles
 
@@ -53,21 +54,72 @@ size 1.0
 Use exactly one `entry` statement and one `exit` statement. The standalone
 `size` is optional. This style keeps the original entry and exit behavior.
 
+## Multi-stock strategies
+
+Add `as alias` to every stock declaration to use the qualified form:
+
+```
+stock "tw/00685L" as bull
+stock "tw/0050" as bear
+```
+
+Aliases are all-or-nothing within a file. Without aliases, declare exactly
+one stock and use bare stock-scoped statements and bar series. With aliases,
+every stock declaration needs an alias, and every stock-scoped statement and
+bar series needs that alias.
+
+Qualified statement forms are:
+
+```
+bull.target 0.8 * num(x)
+bear.entry when <cond> size <expr>
+bear.exit when <cond>
+bull.size <expr>
+bear.cap 1.0
+```
+
+Use `alias.open`, `alias.high`, `alias.low`, `alias.close`, and
+`alias.volume` for bar series. Use `alias.atr(n)` for ATR. Do not qualify
+other builtins; pass a qualified series instead, such as
+`sma(bull.close, n)`.
+
+Each alias groups its own statements and follows one strategy style
+independently. Different stocks may use different styles. `param` and `let`
+remain file-global. Expressions may combine series from any aliases, which
+supports cross-asset signals.
+
+Before evaluation, `bt` intersects all stock calendars. Every series uses
+the common dates. Fewer than two common dates is an error.
+
+Compilation fails for:
+
+- a mix of aliased and unaliased stock declarations, or more than one
+  unaliased stock;
+- a duplicate alias or duplicate market/symbol;
+- an alias that collides with a `param`, `let`, builtin, or predefined
+  series name;
+- an undeclared alias, or a declared stock with no statements;
+- a bare stock-scoped statement, bare predefined series, or bare `atr(n)`
+  in an aliased file; or
+- a qualified builtin other than `atr`.
+
 ## Grammar (BNF)
 
 ```
 file       ::= { statement }
-statement  ::= "stock" string
+statement  ::= "stock" string [ "as" ident ]
              | "param" ident "=" number
              | "let" ident "=" expr
-             | "entry" "when" expr [ "size" expr ]
-             | "exit" "when" expr [ "size" expr ]
-             | "size" expr
-             | "target" expr
-             | "cap" number
+             | [ident "."] "entry" "when" expr [ "size" expr ]
+             | [ident "."] "exit" "when" expr [ "size" expr ]
+             | [ident "."] "size" expr
+             | [ident "."] "target" expr
+             | [ident "."] "cap" number
 expr       ::= number
              | ident
+             | ident "." ident
              | ident "(" [ expr { "," expr } ] ")"
+             | ident "." ident "(" [ expr { "," expr } ] ")"
              | "(" expr ")"
              | "-" expr
              | "not" expr
@@ -90,21 +142,26 @@ Operator precedence, from low to high: `or`, `and`, `not`, comparisons,
 
 ## Statements
 
-- `stock "market/symbol"` selects the data for the strategy. Use market
-  `tw` or `us`. Each strategy file must contain exactly one `stock`
-  statement.
+- `stock "market/symbol" [as alias]` selects data for the strategy. Use
+  market `tw` or `us`. An unaliased file must contain exactly one `stock`
+  statement. An aliased file may contain one or more, all with aliases.
 - `param name = number` declares a parameter. The CLI flag
   `-p name=value` can override it.
 - `let name = expr` binds an expression result to a name.
-- `entry when expr` and `exit when expr` set boolean conditions. The
+- `entry when expr` and `exit when expr` set boolean conditions. Their
+  dotted forms are `alias.entry when expr` and `alias.exit when expr`. The
   expression must give a boolean series. Partial orders can repeat these
   statements and add an inline `size expr`.
-- `size expr` sets the exposure in legacy style. It is optional. The
-  default is 1.0. A value above 1.0 applies daily-reset leverage. A value
-  that is NaN or not positive falls back to 1.0.
-- `target expr` sets the target exposure. Use it once in target style.
-- `cap number` sets the maximum exposure for partial orders. It is
-  optional. The default is 1.0.
+- `size expr`, or `alias.size expr`, sets the exposure in legacy style. It
+  is optional. The default is 1.0. A value above 1.0 applies daily-reset
+  leverage. A value that is NaN or not positive falls back to 1.0.
+- `target expr`, or `alias.target expr`, sets the target exposure. Use it
+  once in target style.
+- `cap number`, or `alias.cap number`, sets the maximum exposure for
+  partial orders. It is optional. The default is 1.0.
+
+Trips are per stock. Entry and exit prices are the exposure-weighted fill
+VWAPs, and `net_ret = exit VWAP / entry VWAP - 1`. Costs are excluded.
 
 ## Values and types
 

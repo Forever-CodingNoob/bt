@@ -198,7 +198,7 @@ The command writes these files under `--out-dir`:
 | File | Content |
 | --- | --- |
 | `<stem>.csv` | All equity curves. The header is `date`, each strategy name in argument order, and `baseline` when requested. |
-| `<name>.trades.csv` | One fill log for each strategy. The header is `date,price,from_exposure,to_exposure`. Each row records one exposure change. The command does not write a baseline fill log. |
+| `<name>.trades.csv` | One fill log for each strategy. The header is `date,stock,price,from_exposure,to_exposure`. It has one row per fill per stock. The command does not write a baseline fill log. |
 | `<stem>.png` | The equity graph. The command does not create or update this file with `--no-plot`. |
 
 `--out-name` changes only `<stem>.csv` and `<stem>.png`. It does not change
