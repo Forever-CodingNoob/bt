@@ -620,6 +620,14 @@ let read_file path =
     (fun () -> really_input_string input (in_channel_length input))
 
 let test_event_transform () =
+  assert (
+    Data.event_sources =
+    [
+      ("TaiwanStockSplitPrice", "before_price", "after_price");
+      ("TaiwanStockCapitalReductionReferencePrice",
+       "ClosingPriceonTheLastTradingDay", "PostReductionReferencePrice");
+      ("TaiwanStockParValueChange", "before_close", "after_ref_close");
+    ]);
   List.iter
     (fun (_dataset, before, after) ->
       let json =
