@@ -4,7 +4,7 @@
 
 ```
 bin/bt.ml        CLI dispatch: fetch | run
-lib/data.ml      FinMind fetch, CSV cache, dividend and split adjustment
+lib/data.ml      FinMind fetch, CSV cache, dividend and corporate-action adjustment
 lib/series.ml    Indicators on float arrays
 lib/ast.ml       Strategy AST types
 lib/lexer.mll    Lexer (ocamllex)

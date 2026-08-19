@@ -157,9 +157,11 @@ styles, grammar, statements, types, and every builtin.
 
 - TW prices are cached raw. The loader adjusts them for dividends with
   factors from `TaiwanStockDividendResult`.
-- The loader detects TW splits and capital reductions. A close-to-close
-  change of more than 25% in one step is not possible under the TW price
-  bands, so the loader treats it as a corporate action.
+- The loader adjusts TW prices for splits, capital reductions, and par
+  value changes with factors from `TaiwanStockSplitPrice`,
+  `TaiwanStockCapitalReductionReferencePrice`, and
+  `TaiwanStockParValueChange`, cached per symbol in
+  `data/tw/<symbol>.events.csv`.
 - US prices are adjusted with the `Adj_Close` column. The US cache is
   downloaded again in full on each fetch, because `Adj_Close` changes
   for old rows after each dividend.
