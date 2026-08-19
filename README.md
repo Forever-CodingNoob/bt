@@ -14,6 +14,7 @@ compare all strategies with an optional buy-and-hold baseline.
 - [How the engine trades](#how-the-engine-trades)
 - [Data notes](#data-notes)
 - [Contributing](#contributing)
+- [License](#license)
 - [Acknowledgements](#acknowledgements)
 
 ## Requirements
@@ -168,9 +169,11 @@ styles, grammar, statements, types, and every builtin.
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
+
+## License
+The project is licensed under GPU LGPL v2.1. See [LICENSE](./LICENSE).
+
 ## Acknowledgements
 
 As you may have noticed, this project is vibe-coded in its entirety. A huge thanks to omp, Claude Fable 5, and OpenAI GPT-5.6 Sol.
 
-## LICENSE
-The project is licensed under GPU LGPL v2.1. See [LICENSE](./LICENSE).
