@@ -613,6 +613,42 @@ let test_detect_splits () =
       assert_close (4.1 /. 102.) factor
   | _ -> assert false
 
+let read_file path =
+  let input = open_in_bin path in
+  Fun.protect
+    ~finally:(fun () -> close_in input)
+    (fun () -> really_input_string input (in_channel_length input))
+
+let test_event_transform () =
+  List.iter
+    (fun (_dataset, before, after) ->
+      let json =
+        Printf.sprintf
+          {|{"msg":"success","status":200,"data":[
+             {"date":"2026-07-07","stock_id":"00685L","%s":306,"%s":12.75},
+             {"date":"2026-07-08","stock_id":"9999","%s":100,"%s":50},
+             {"date":"2026-07-09","stock_id":"00685L","%s":0,"%s":1},
+             {"date":"2026-07-10","stock_id":"00685L","%s":null,"%s":1}]}|}
+          before after before after before after before after
+      in
+      with_temp_strategy json (fun json_path ->
+        with_temp_strategy "" (fun rows_path ->
+          Data.transform_json ~args:["--arg"; "sym"; "00685L"]
+            ~expression:(Data.event_expression ~before ~after)
+            ~json_path ~rows_path;
+          match
+            String.split_on_char '\n' (String.trim (read_file rows_path))
+          with
+          | [row] ->
+              (match String.split_on_char ',' row with
+               | [date; factor] ->
+                   assert (date = "\"2026-07-07\"");
+                   assert_close (12.75 /. 306.) (float_of_string factor)
+               | _ -> assert false)
+          | _ -> assert false)))
+    Data.event_sources;
+  assert (List.length Data.event_sources = 3)
+
 let () =
   test_parser ();
   test_filter_dates ();
@@ -639,4 +675,5 @@ let () =
   test_head_probe_gate ();
   test_plot_script ();
   test_detect_splits ();
+  test_event_transform ();
   print_endline "ok"

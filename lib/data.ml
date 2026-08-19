@@ -356,8 +356,11 @@ let rewrite_rows ~header ~rows_path ~cache_path =
       Sys.rename temporary cache_path;
       completed := true)
 
-let transform_json ~expression ~json_path ~rows_path =
-  match run_to_file "/usr/bin/jq" ["-r"; expression; json_path] rows_path with
+let transform_json ~args ~expression ~json_path ~rows_path =
+  match
+    run_to_file "/usr/bin/jq" (("-r" :: args) @ [expression; json_path])
+      rows_path
+  with
   | Unix.WEXITED 0 -> ()
   | _ -> failwith "jq failed while converting the FinMind response"
 
@@ -367,7 +370,7 @@ let fetch_rows ~token ~dataset ~symbol ~from_ ~to_ ~expression ~consume =
     let process_status, http_code = curl_get ~token ~url ~output:json_path in
     require_price_response json_path process_status http_code;
     with_temp ".rows" (fun rows_path ->
-      transform_json ~expression ~json_path ~rows_path;
+      transform_json ~args:[] ~expression ~json_path ~rows_path;
       consume rows_path))
 
 let fetch_prices ~token ~market ~symbol ~from_ ~to_ ~cache_path =
@@ -450,13 +453,82 @@ let fetch_dividends ~token ~symbol ~to_ ~cache_path =
       | `Error message -> keep message
       | `Ok ->
           with_temp ".rows" (fun rows_path ->
-            transform_json
+            transform_json ~args:[]
               ~expression:(
                 ".data[] | select(.before_price != null and .after_price != null) " ^
                 "| select((.before_price | tonumber) != 0) " ^
                 "| [.date, ((.after_price | tonumber) / (.before_price | tonumber))] | @csv")
               ~json_path ~rows_path;
             rewrite_rows ~header:"date,factor" ~rows_path ~cache_path))
+
+(* factor = after / before; back_adjust applies it to bars strictly
+   before the event date, matching the ex-date convention *)
+let event_expression ~before ~after =
+  ".data[] | select(.stock_id == $sym) " ^
+  "| select(." ^ before ^ " != null and ." ^ after ^ " != null) " ^
+  "| select((." ^ before ^ " | tonumber) != 0) " ^
+  "| [.date, ((." ^ after ^ " | tonumber) / (." ^ before ^
+  " | tonumber))] | @csv"
+
+let event_sources = [
+  "TaiwanStockSplitPrice", "before_price", "after_price";
+  "TaiwanStockCapitalReductionReferencePrice",
+    "ClosingPriceonTheLastTradingDay", "PostReductionReferencePrice";
+  "TaiwanStockParValueChange", "before_close", "after_ref_close";
+]
+
+let non_empty_lines path =
+  List.filter
+    (fun line -> String.trim line <> "")
+    (String.split_on_char '\n' (read_text path))
+
+let fetch_events ~token ~symbol ~to_ ~cache_path =
+  (* a failed events fetch never destroys previously cached factors;
+     stale factors beat none, same policy as fetch_dividends *)
+  let keep reason =
+    Printf.eprintf "warning: events fetch failed (%s); %s\n" reason
+      (if Sys.file_exists cache_path then "keeping cached event data"
+       else "prices will be unadjusted for splits/reductions")
+  in
+  let fetch_one (dataset, before, after) =
+    with_temp ".json" (fun json_path ->
+      let url = api_url ~dataset ~symbol ~from_:"1900-01-01" ~to_ in
+      let process_status, http_code = curl_get ~token ~url ~output:json_path in
+      if not (process_ok process_status) || http_code <> "200" then begin
+        keep
+          (dataset ^ ": HTTP " ^
+           (if http_code = "" || http_code = "000" then "unavailable"
+            else http_code));
+        None
+      end
+      else
+        match check_api_response json_path with
+        | `Error message -> keep (dataset ^ ": " ^ message); None
+        | `Ok ->
+            with_temp ".rows" (fun rows_path ->
+              transform_json ~args:["--arg"; "sym"; symbol]
+                ~expression:(event_expression ~before ~after)
+                ~json_path ~rows_path;
+              Some (non_empty_lines rows_path)))
+  in
+  let rec collect acc = function
+    | [] -> Some (List.concat (List.rev acc))
+    | source :: rest ->
+        (match fetch_one source with
+         | None -> None
+         | Some rows -> collect (rows :: acc) rest)
+  in
+  match collect [] event_sources with
+  | None -> ()
+  | Some rows ->
+      let rows = List.sort String.compare rows in
+      with_temp ".rows" (fun rows_path ->
+        let output = open_out rows_path in
+        Fun.protect
+          ~finally:(fun () -> close_out output)
+          (fun () ->
+            List.iter (fun row -> output_string output (row ^ "\n")) rows);
+        rewrite_rows ~header:"date,factor" ~rows_path ~cache_path)
 
 let fetch ~market ~symbol ~from_ ~to_ ~data_dir =
   let market = market_name market in
@@ -473,9 +545,12 @@ let fetch ~market ~symbol ~from_ ~to_ ~data_dir =
   mkdir_p directory;
   let cache_path = Filename.concat directory (symbol ^ ".csv") in
   fetch_prices ~token ~market ~symbol ~from_ ~to_ ~cache_path;
-  if market = "tw" then
+  if market = "tw" then begin
     fetch_dividends ~token ~symbol ~to_
-      ~cache_path:(Filename.concat directory (symbol ^ ".div.csv"))
+      ~cache_path:(Filename.concat directory (symbol ^ ".div.csv"));
+    fetch_events ~token ~symbol ~to_
+      ~cache_path:(Filename.concat directory (symbol ^ ".events.csv"))
+  end
 
 let float_field path line_number name value =
   try float_of_string value with Failure _ ->
