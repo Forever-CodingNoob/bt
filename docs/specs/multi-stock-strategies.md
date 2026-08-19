@@ -60,14 +60,18 @@ that collides with a param, let, builtin, or predefined series name.
 
 ### Qualified statements
 
-The stock alias follows the keyword:
+Qualification reuses the dot: the alias prefixes the statement
+keyword, the same syntax that qualifies a series. The earlier
+keyword-first form (`target bull <expr>`) was rejected as grammatically
+ambiguous: in `target num(campaign) * k`, the parser cannot tell the
+alias-plus-expression reading from the call reading.
 
 ```
-target bull <expr>
-entry  bear when <cond> [size <expr>]
-exit   bear when <cond> [size <expr>]
-size   bull <expr>
-cap    bear 1.0
+bull.target 0.8 * num(x)
+bear.entry when <cond> [size <expr>]
+bear.exit  when <cond> [size <expr>]
+bull.size  <expr>
+bear.cap   1.0
 ```
 
 Statements group by alias. Each group independently follows the
@@ -91,18 +95,18 @@ this is the cross-asset mechanism:
 ```
 let bull_mid = sma(bull.close, 47)
 let crash = bull.close / lag(bull_mid, 7) - 1 < -0.012
-target bear 0.5 * num(crash)
+bear.target 0.5 * num(crash)
 ```
 
 ### Grammar additions
 
 ```
 statement  ::= "stock" string [ "as" ident ]
-             | "entry" [ident] "when" expr [ "size" expr ]
-             | "exit"  [ident] "when" expr [ "size" expr ]
-             | "size"  [ident] expr
-             | "target" [ident] expr
-             | "cap"   [ident] number
+             | [ident "."] "entry" "when" expr [ "size" expr ]
+             | [ident "."] "exit"  "when" expr [ "size" expr ]
+             | [ident "."] "size"  expr
+             | [ident "."] "target" expr
+             | [ident "."] "cap"   number
 expr       ::= ident "." ident
              | ident "." ident "(" [ expr { "," expr } ] ")"
 ```
