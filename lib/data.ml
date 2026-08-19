@@ -652,21 +652,6 @@ let back_adjust bars dividends =
         c = current.c *. !factor }
   done
 
-(* TW price bands cap daily moves at +/-10% (leveraged ETFs +/-20%), so a
-   close-to-close jump beyond 25% is a split or capital reduction that raw
-   TaiwanStockPrice does not adjust for and TaiwanStockDividendResult does
-   not report. The factor uses the post-event open against the prior close
-   so the event day's real open-to-close move is preserved.
-   ponytail: 25% gap heuristic; switch to TaiwanStockPriceAdj if the token
-   tier ever allows it *)
-let detect_splits bars =
-  let events = ref [] in
-  for index = 1 to Array.length bars - 1 do
-    let previous_close = bars.(index - 1).c in
-    if abs_float (bars.(index).c /. previous_close -. 1.) > 0.25 then
-      events := (bars.(index).date, bars.(index).o /. previous_close) :: !events
-  done;
-  Array.of_list (List.rev !events)
 
 let in_range ~from_ ~to_ date =
   (match from_ with None -> true | Some first -> String.compare date first >= 0) &&
@@ -704,12 +689,21 @@ let load ~market ~symbol ~from_ ~to_ ~data_dir =
   let bars = read_bars ~market cache_path in
   Array.sort (fun left right -> String.compare left.date right.date) bars;
   if market = "tw" then (
-    let dividend_path = Filename.concat directory (symbol ^ ".div.csv") in
-    let dividends =
-      if Sys.file_exists dividend_path then read_dividends dividend_path
-      else (prerr_endline "warning: prices unadjusted for dividends"; [||])
+    let read_factors path warning =
+      if Sys.file_exists path then read_dividends path
+      else (prerr_endline warning; [||])
     in
-    let factors = Array.append dividends (detect_splits bars) in
+    let dividends =
+      read_factors
+        (Filename.concat directory (symbol ^ ".div.csv"))
+        "warning: prices unadjusted for dividends"
+    in
+    let events =
+      read_factors
+        (Filename.concat directory (symbol ^ ".events.csv"))
+        "warning: prices unadjusted for splits/reductions"
+    in
+    let factors = Array.append dividends events in
     if Array.length factors > 0 then back_adjust bars factors);
   let selected = filter_range ~from_ ~to_ bars in
   if Array.length selected < 2 then

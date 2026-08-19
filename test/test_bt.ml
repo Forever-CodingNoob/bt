@@ -599,19 +599,6 @@ let test_plot_script () =
       Report.write_png ~out_dir ~stem:"equity";
       assert (not (Sys.file_exists (Filename.concat out_dir "plot.py"))))
 
-let test_detect_splits () =
-  (* 25:1 split between the second and third bar; normal moves elsewhere *)
-  let bars =
-    [| bar "2020-01-01" 100. 101.;
-       bar "2020-01-02" 101. 102.;
-       bar "2020-01-03" 4.1 4.2;
-       bar "2020-01-06" 4.2 4.3 |]
-  in
-  match Data.detect_splits bars with
-  | [| (date, factor) |] ->
-      assert (date = "2020-01-03");
-      assert_close (4.1 /. 102.) factor
-  | _ -> assert false
 
 let read_file path =
   let input = open_in_bin path in
@@ -657,6 +644,63 @@ let test_event_transform () =
     Data.event_sources;
   assert (List.length Data.event_sources = 3)
 
+let test_back_adjust_events () =
+  let bars =
+    [| bar "2026-06-30" 300. 306.;
+       bar "2026-07-07" 13.09 12.23 |]
+  in
+  Data.back_adjust bars [| ("2026-07-07", 12.75 /. 306.) |];
+  assert_close 12.75 bars.(0).c;
+  assert_close 12.23 bars.(1).c;
+  let reduction =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 90. 90. |]
+  in
+  Data.back_adjust reduction [| ("2020-01-02", 0.9) |];
+  assert_close 90. reduction.(0).c;
+  let combined =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 45. 45. |]
+  in
+  Data.back_adjust combined [| ("2020-01-02", 0.9); ("2020-01-02", 0.5) |];
+  assert_close 45. combined.(0).c
+
+let test_load_events () =
+  let root = Filename.temp_file "bt-test-data-" "" in
+  Sys.remove root;
+  Unix.mkdir root 0o700;
+  let tw = Filename.concat root "tw" in
+  Unix.mkdir tw 0o700;
+  Fun.protect
+    ~finally:(fun () ->
+      Array.iter
+        (fun name -> Sys.remove (Filename.concat tw name))
+        (Sys.readdir tw);
+      Unix.rmdir tw;
+      Unix.rmdir root)
+    (fun () ->
+      let write path contents =
+        let output = open_out path in
+        Fun.protect
+          ~finally:(fun () -> close_out output)
+          (fun () -> output_string output contents)
+      in
+      write (Filename.concat tw "SPLIT.csv")
+        "date,open,high,low,close,volume\n\
+         2026-06-29,300,307,299,306,1000\n\
+         2026-06-30,306,307,299,306,1000\n\
+         2026-07-07,13.09,13.2,12.0,12.23,1000\n";
+      write (Filename.concat tw "SPLIT.events.csv")
+        "date,factor\n2026-07-07,0.041666666666666664\n";
+      let bars =
+        Data.load ~market:"tw" ~symbol:"SPLIT" ~from_:None ~to_:None
+          ~data_dir:root
+      in
+      assert (Array.length bars = 3);
+      assert_close 12.75 bars.(0).Data.c;
+      assert_close 12.75 bars.(1).Data.c;
+      assert_close 12.23 bars.(2).Data.c)
+
 let () =
   test_parser ();
   test_filter_dates ();
@@ -682,6 +726,7 @@ let () =
   test_prepend_rows ();
   test_head_probe_gate ();
   test_plot_script ();
-  test_detect_splits ();
+  test_back_adjust_events ();
+  test_load_events ();
   test_event_transform ();
   print_endline "ok"
