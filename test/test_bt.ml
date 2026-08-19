@@ -350,6 +350,34 @@ let test_engine_bankruptcy () =
    | [trip] -> assert_close ~tolerance:1e-12 (-0.5) trip.net_ret
    | _ -> assert false)
 
+let test_engine_insolvent_gap () =
+  (* buy 2.0 at 100: v = 2, cash = -1. At 50, v = 1 and equity is
+     exactly 0, so the close-price solvency guard sells at 50, repays the
+     loan, and skips the target-0 fill with nothing left to hold. *)
+  let bars =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 50. 50. |]
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.; maintenance_ratio = 1.3; ratios = [| 0.6 |] }
+  in
+  let result =
+    Engine.run [| ("tw/TEST", bars) |]
+      { Engine.targets = [| [| 2.; 0. |] |] }
+      [| zero_costs |] ~margin ~capital:None ~fill:Engine.Close_same
+  in
+  let last = final_equity result in
+  assert (not (Float.is_nan last));
+  assert_close ~tolerance:1e-12 0. last;
+  assert (List.length result.fills = 2);
+  assert (result.margin_stats.Engine.margin_calls = 1);
+  (match result.margin_stats.Engine.min_maintenance with
+   | Some ratio -> assert_close ~tolerance:1e-12 1. ratio
+   | None -> assert false);
+  (match result.trips with
+   | [trip] -> assert_close ~tolerance:1e-12 (-0.5) trip.net_ret
+   | _ -> assert false)
+
 let test_engine_buyhold_costs () =
   (* all-in with fees: cash stays exactly 0, so the equity path equals
      the old engine's formula bit for bit *)
@@ -1332,6 +1360,7 @@ let () =
   test_engine_mixed_ratio_clamp ();
   test_engine_margin_call ();
   test_engine_bankruptcy ();
+  test_engine_insolvent_gap ();
   test_engine_buyhold_costs ();
   test_engine_no_borrow_stats ();
   test_engine ();

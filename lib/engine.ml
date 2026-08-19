@@ -247,6 +247,27 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
     done;
     Array.blit eff 0 prev_eff 0 asset_count
   in
+  let guard_solvency ~date price_at =
+    if not !bankrupt
+       && equity () <= 0.
+       && Array.exists (fun value -> value > 0.) values
+    then begin
+      if !cash < 0. then begin
+        let ratio =
+          Array.fold_left ( +. ) 0. values /. (-. !cash)
+        in
+        (match !min_maintenance with
+         | None -> min_maintenance := Some ratio
+         | Some best -> if ratio < best then min_maintenance := Some ratio)
+      end;
+      incr margin_calls;
+      for index = 0 to asset_count - 1 do
+        sell_out index ~date ~price:(price_at index)
+      done;
+      bankrupt := true;
+      pending_liquidation := false
+    end
+  in
   let liquidate ~date price_at =
     for index = 0 to asset_count - 1 do
       sell_out index ~date ~price:(price_at index)
@@ -271,6 +292,7 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
            else if t > 0 then
              scale_values (fun i -> close_at i t)
                (fun i -> close_at i (t - 1));
+           guard_solvency ~date (fun i -> close_at i t);
            if not !bankrupt then begin
              let eff, clamped = effective t in
              if differs eff then
@@ -280,20 +302,16 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
            if t > 0 then begin
              let eff, clamped = effective (t - 1) in
              let scheduled = differs eff in
-             if !pending_liquidation || scheduled then begin
-               scale_values (fun i -> open_at i t)
-                 (fun i -> close_at i (t - 1));
-               if !pending_liquidation then begin
-                 liquidate ~date (fun i -> open_at i t);
-                 pending_liquidation := false
-               end;
-               if not !bankrupt && scheduled then
-                 apply_fills ~date ~eff ~clamped (fun i -> open_at i t);
-               scale_values (fun i -> close_at i t) (fun i -> open_at i t)
-             end
-             else
-               scale_values (fun i -> close_at i t)
-                 (fun i -> close_at i (t - 1))
+             scale_values (fun i -> open_at i t)
+               (fun i -> close_at i (t - 1));
+             if !pending_liquidation then begin
+               liquidate ~date (fun i -> open_at i t);
+               pending_liquidation := false
+             end;
+             guard_solvency ~date (fun i -> open_at i t);
+             if not !bankrupt && scheduled then
+               apply_fills ~date ~eff ~clamped (fun i -> open_at i t);
+             scale_values (fun i -> close_at i t) (fun i -> open_at i t)
            end)
     end;
     if not !bankrupt && !cash < 0. then begin
