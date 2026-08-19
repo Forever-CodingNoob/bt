@@ -171,3 +171,6 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md).
 ## Acknowledgements
 
 As you may have noticed, this project is vibe-coded in its entirety. A huge thanks to omp, Claude Fable 5, and OpenAI GPT-5.6 Sol.
+
+## LICENSE
+The project is licensed under GPU LGPL v2.1. See [LICENSE](./LICENSE).
