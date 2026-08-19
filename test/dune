@@ -2,6 +2,7 @@
  (name test_bt)
  (libraries btlib)
  (deps
+  ../bin/bt.exe
   ../examples/sma_cross.strat
   ../examples/bb_macd.strat
   ../examples/00685L_bh.strat
