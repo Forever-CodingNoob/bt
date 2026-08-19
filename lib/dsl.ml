@@ -6,7 +6,7 @@ type value =
   | Bools of bool array
 
 type context = {
-  bars : Data.bar array;
+  bars_by : (string option * Data.bar array) list;
   length : int;
 }
 
@@ -231,10 +231,14 @@ let rec eval context environment expression =
         | "or" -> logical_binary expression ( || ) left right
         | _ -> fail_expr expression (Printf.sprintf "unknown operator %s" operator)
       end
-  | Call (Some qualifier, _, _) ->
-      fail_expr expression
-        (Printf.sprintf "unknown stock alias %s" qualifier)
-  | Call (None, name, arguments) ->
+  | Call (qualifier, name, arguments) ->
+      begin
+        match qualifier with
+        | Some _ when name <> "atr" ->
+            fail_expr expression
+              (Printf.sprintf "only atr takes a stock alias, not %s" name)
+        | _ -> ()
+      end;
       begin
         match builtin_arity name with
         | None -> fail_expr expression (Printf.sprintf "unknown builtin %s" name)
@@ -243,7 +247,7 @@ let rec eval context environment expression =
               fail_expr expression
                 (Printf.sprintf "%s expects %d argument(s)" name arity);
             let values = eval_arguments context environment [] arguments in
-            eval_call context expression name values
+            eval_call context expression qualifier name values
       end
 
 and eval_arguments context environment reversed = function
@@ -252,7 +256,7 @@ and eval_arguments context environment reversed = function
       let value = eval context environment expression in
       eval_arguments context environment (value :: reversed) rest
 
-and eval_call context expression name arguments =
+and eval_call context expression qualifier name arguments =
   match name, arguments with
   | "sma", [series; period] ->
       Series (Series.sma (expect_series expression series)
@@ -276,7 +280,16 @@ and eval_call context expression name arguments =
       Series (Series.lag (expect_series expression series)
                 (expect_period expression period))
   | "atr", [period] ->
-      Series (Series.atr context.bars (expect_period expression period))
+      let bars =
+        match List.assoc_opt qualifier context.bars_by with
+        | Some bars -> bars
+        | None ->
+            fail_expr expression
+              (match qualifier with
+               | None -> "atr requires a stock alias in aliased files"
+               | Some q -> Printf.sprintf "unknown stock alias %s" q)
+      in
+      Series (Series.atr bars (expect_period expression period))
   | "abs", [number] -> numeric_unary expression abs_float number
   | "max", [left; right] -> numeric_binary expression nan_max left right
   | "min", [left; right] -> numeric_binary expression nan_min left right
@@ -337,7 +350,7 @@ and eval_call context expression name arguments =
                 (expect_period expression signal))
   | _ -> fail_expr expression "invalid builtin argument types"
 
-let series_environment (bars : Data.bar array) =
+let series_environment ?alias (bars : Data.bar array) =
   let length = Array.length bars in
   let open_ = Array.make length Float.nan in
   let high = Array.make length Float.nan in
@@ -352,11 +365,14 @@ let series_environment (bars : Data.bar array) =
     close.(i) <- bar.Data.c;
     volume.(i) <- bar.Data.v
   done;
-  [ "open", Series open_;
-    "high", Series high;
-    "low", Series low;
-    "close", Series close;
-    "volume", Series volume ]
+  let key name =
+    match alias with None -> name | Some a -> a ^ "." ^ name
+  in
+  [ key "open", Series open_;
+    key "high", Series high;
+    key "low", Series low;
+    key "close", Series close;
+    key "volume", Series volume ]
 
 let declared_params_ast statements =
   let reversed =
@@ -389,23 +405,130 @@ let bool_signal kind expression = function
   | Bools signal -> signal
   | _ -> fail_expr expression (Printf.sprintf "%s must be a boolean series" kind)
 
-let compile_ast statements ~params bars =
+let split_spec ~filename spec =
+  match String.index_opt spec '/' with
+  | Some i when i > 0 && i < String.length spec - 1 &&
+                not (String.contains_from spec (i + 1) '/') ->
+      let market = String.sub spec 0 i in
+      let symbol =
+        String.sub spec (i + 1) (String.length spec - i - 1)
+      in
+      if market <> "tw" && market <> "us" then
+        failwith (Printf.sprintf
+          "%s: market must be tw or us in stock \"%s\"" filename spec)
+      else market, symbol
+  | _ ->
+      failwith (Printf.sprintf
+        "%s: stock expects \"market/symbol\", got \"%s\"" filename spec)
+
+let stocks_of ~filename statements =
+  let declared =
+    List.filter_map
+      (function Stock (spec, alias) -> Some (spec, alias) | _ -> None)
+      statements
+  in
+  if declared = [] then
+    failwith (Printf.sprintf
+      "%s: add a stock statement, e.g. stock \"tw/00685L\"" filename);
+  let aliased = List.exists (fun (_, alias) -> alias <> None) declared in
+  if List.length declared > 1 && not aliased then
+    failwith (Printf.sprintf
+      "%s: multiple stocks require as aliases" filename);
+  if aliased && List.exists (fun (_, alias) -> alias = None) declared then
+    failwith (Printf.sprintf
+      "%s: mix of aliased and unaliased stock statements" filename);
+  let seen_alias = Hashtbl.create 4 in
+  let seen_spec = Hashtbl.create 4 in
+  List.map
+    (fun (spec, alias) ->
+      if Hashtbl.mem seen_spec spec then
+        failwith (Printf.sprintf "%s: duplicate stock %s" filename spec);
+      Hashtbl.replace seen_spec spec ();
+      (match alias with
+       | None -> ()
+       | Some name ->
+           if Hashtbl.mem seen_alias name then
+             failwith (Printf.sprintf "%s: duplicate alias %s" filename name);
+           Hashtbl.replace seen_alias name ();
+           if builtin_arity name <> None then
+             failwith (Printf.sprintf
+               "%s: alias %s collides with a builtin" filename name);
+           if List.mem name ["open"; "high"; "low"; "close"; "volume"] then
+             failwith (Printf.sprintf
+               "%s: alias %s collides with a series name" filename name);
+           List.iter
+             (function
+               | Param (p, _) when p = name ->
+                   failwith (Printf.sprintf
+                     "%s: alias %s collides with a param" filename name)
+               | Let (l, _) when l = name ->
+                   failwith (Printf.sprintf
+                     "%s: alias %s collides with a let" filename name)
+               | _ -> ())
+             statements);
+      let market, symbol = split_spec ~filename spec in
+      alias, market, symbol)
+    declared
+
+let compile_ast statements ~params ~assets =
   let declarations = declared_params_ast statements in
   validate_overrides declarations params;
-  let context = { bars; length = Array.length bars } in
-  let initial_environment = series_environment bars in
-  let environment, entries, exits, size, targets, cap =
+  let length =
+    match assets with
+    | [] -> invalid_arg "Dsl.compile_ast: no assets"
+    | (_, first) :: rest ->
+        let length = Array.length first in
+        List.iter
+          (fun (_, bars) ->
+            if Array.length bars <> length then
+              invalid_arg "Dsl.compile_ast: bar length mismatch")
+          rest;
+        length
+  in
+  let context = { bars_by = assets; length } in
+  let initial_environment =
+    List.concat_map
+      (fun (alias, bars) -> series_environment ?alias bars)
+      assets
+  in
+  let module Group = struct
+    type t = {
+      mutable entries : (bool array * (Ast.expr * value) option) list;
+      mutable exits : (bool array * (Ast.expr * value) option) list;
+      mutable size : (Ast.expr * value) option;
+      mutable targets : (Ast.expr * value) list;
+      mutable cap : float option;
+    }
+
+    let make () =
+      { entries = []; exits = []; size = None; targets = []; cap = None }
+  end in
+  let groups : (string option, Group.t) Hashtbl.t = Hashtbl.create 4 in
+  let declared_aliases = List.map fst assets in
+  let group alias =
+    if not (List.mem alias declared_aliases) then
+      (match alias with
+       | Some name -> failwith (Printf.sprintf "unknown stock alias %s" name)
+       | None -> failwith "statements must name a stock alias in aliased files");
+    match Hashtbl.find_opt groups alias with
+    | Some g -> g
+    | None ->
+        let g = Group.make () in
+        Hashtbl.replace groups alias g;
+        g
+  in
+  let environment =
     List.fold_left
-      (fun (environment, entries, exits, size, targets, cap) statement ->
+      (fun environment statement ->
         match statement with
         | Param (name, default) ->
             let value = overridden_value params name default in
-            ((name, Scalar value) :: environment,
-             entries, exits, size, targets, cap)
+            (name, Scalar value) :: environment
         | Let (name, expression) ->
             let value = eval context environment expression in
-            ((name, value) :: environment, entries, exits, size, targets, cap)
-        | Entry (None, expression, inline_size_expression) ->
+            (name, value) :: environment
+        | Entry (alias, expression, inline_size_expression) ->
+            let g = group alias in
             let signal =
               bool_signal "entry" expression
                 (eval context environment expression)
@@ -417,9 +540,10 @@ let compile_ast statements ~params bars =
                   Some (size_expression,
                         eval context environment size_expression)
             in
-            (environment, (signal, inline_size) :: entries,
-             exits, size, targets, cap)
-        | Exit (None, expression, inline_size_expression) ->
+            g.entries <- (signal, inline_size) :: g.entries;
+            environment
+        | Exit (alias, expression, inline_size_expression) ->
+            let g = group alias in
             let signal =
               bool_signal "exit" expression
                 (eval context environment expression)
@@ -431,60 +555,62 @@ let compile_ast statements ~params bars =
                   Some (size_expression,
                         eval context environment size_expression)
             in
-            (environment, entries, (signal, inline_size) :: exits,
-             size, targets, cap)
-        | Size (None, expression) ->
+            g.exits <- (signal, inline_size) :: g.exits;
+            environment
+        | Size (alias, expression) ->
+            let g = group alias in
             begin
-              match size with
+              match g.size with
               | Some _ -> failwith "strategy may contain at most one size statement"
               | None ->
                   let value = eval context environment expression in
-                  (environment, entries, exits, Some (expression, value),
-                   targets, cap)
+                  g.size <- Some (expression, value);
+                  environment
             end
-        | Target (None, expression) ->
+        | Target (alias, expression) ->
+            let g = group alias in
             let value = eval context environment expression in
-            (environment, entries, exits, size,
-             (expression, value) :: targets, cap)
-        | Cap (None, value) ->
+            g.targets <- (expression, value) :: g.targets;
+            environment
+        | Cap (alias, value) ->
+            let g = group alias in
             begin
-              match cap with
+              match g.cap with
               | Some _ -> failwith "strategy may contain at most one cap statement"
               | None ->
-                  (environment, entries, exits, size, targets, Some value)
+                  g.cap <- Some value;
+                  environment
             end
-        | Entry (Some alias, _, _)
-        | Exit (Some alias, _, _)
-        | Size (Some alias, _)
-        | Target (Some alias, _)
-        | Cap (Some alias, _) ->
-            failwith (Printf.sprintf "unknown stock alias %s" alias)
-        | Stock _ ->
-            (environment, entries, exits, size, targets, cap))
-      (initial_environment, [], [], None, [], None) statements
+        | Stock _ -> environment)
+      initial_environment statements
   in
   ignore environment;
-  let has_target = targets <> [] in
-  let has_inline =
-    List.exists (fun (_, inline_size) -> inline_size <> None) entries
-    || List.exists (fun (_, inline_size) -> inline_size <> None) exits
-  in
-  let style_2 =
-    not has_target
-    && (has_inline || cap <> None
-        || List.length entries > 1 || List.length exits > 1)
-  in
-  let size_at = function
-    | None -> (fun _ -> 1.)
-    | Some (_, Scalar number) -> (fun _ -> number)
-    | Some (expression, Series series) ->
-        if Array.length series <> context.length then
-          fail_expr expression "size series length mismatch";
-        (fun t -> series.(t))
-    | Some (expression, Bools _) ->
-        fail_expr expression "size must be a scalar or numeric series"
-  in
-  let target =
+  let compile_group context (group : Group.t) =
+    let entries = group.entries in
+    let exits = group.exits in
+    let size = group.size in
+    let targets = group.targets in
+    let cap = group.cap in
+    let has_target = targets <> [] in
+    let has_inline =
+      List.exists (fun (_, inline_size) -> inline_size <> None) entries
+      || List.exists (fun (_, inline_size) -> inline_size <> None) exits
+    in
+    let style_2 =
+      not has_target
+      && (has_inline || cap <> None
+          || List.length entries > 1 || List.length exits > 1)
+    in
+    let size_at = function
+      | None -> (fun _ -> 1.)
+      | Some (_, Scalar number) -> (fun _ -> number)
+      | Some (expression, Series series) ->
+          if Array.length series <> context.length then
+            fail_expr expression "size series length mismatch";
+          (fun t -> series.(t))
+      | Some (expression, Bools _) ->
+          fail_expr expression "size must be a scalar or numeric series"
+    in
     if has_target then begin
       if List.length targets > 1 then
         failwith "only one target statement is allowed";
@@ -579,36 +705,30 @@ let compile_ast statements ~params bars =
       target
     end
   in
-  let strategy : Engine.strategy = { targets = [| target |] } in
+  let strategy : Engine.strategy =
+    { targets =
+        Array.of_list
+          (List.map
+             (fun (alias, _) ->
+               match Hashtbl.find_opt groups alias with
+               | Some g -> compile_group context g
+               | None ->
+                   failwith
+                     (match alias with
+                      | Some name ->
+                          Printf.sprintf "stock alias %s has no statements" name
+                      | None -> "strategy has no statements"))
+             assets) }
+  in
   strategy
 
 let compile source ~params bars =
-  compile_ast (parse_file source) ~params bars
-
-let stock_of ~filename statements =
-  let stocks =
-    List.fold_left
-      (fun acc -> function Stock (s, _) -> s :: acc | _ -> acc) [] statements
-  in
-  match stocks with
-  | [] ->
-      failwith (Printf.sprintf
-        "%s: add a stock statement, e.g. stock \"tw/00685L\"" filename)
-  | _ :: _ :: _ ->
-      failwith (Printf.sprintf
-        "%s: multiple stocks per strat are not supported yet" filename)
-  | [spec] ->
-      (match String.index_opt spec '/' with
-       | Some i when i > 0 && i < String.length spec - 1 &&
-                     not (String.contains_from spec (i + 1) '/') ->
-           let market = String.sub spec 0 i in
-           let symbol =
-             String.sub spec (i + 1) (String.length spec - i - 1)
-           in
-           if market <> "tw" && market <> "us" then
-             failwith (Printf.sprintf
-               "%s: market must be tw or us in stock \"%s\"" filename spec)
-           else (market, symbol)
-       | _ ->
-           failwith (Printf.sprintf
-             "%s: stock expects \"market/symbol\", got \"%s\"" filename spec))
+  let ast = parse_file source in
+  if not (List.exists (function Stock _ -> true | _ -> false) ast) then
+    compile_ast ast ~params ~assets:[ (None, bars) ]
+  else
+    match stocks_of ~filename:source ast with
+    | [ (None, _, _) ] ->
+        compile_ast ast ~params ~assets:[ (None, bars) ]
+    | _ ->
+        failwith "Dsl.compile supports single unaliased stocks; use compile_ast"

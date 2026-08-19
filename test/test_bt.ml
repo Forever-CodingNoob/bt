@@ -436,14 +436,16 @@ let test_stock_statement () =
     "stock \"tw/00685L\"\ntarget 1.0\n"
     (fun path ->
       let parsed = Dsl.parse_file path in
-      assert (Dsl.stock_of ~filename:path parsed = ("tw", "00685L"));
+      assert
+        (Dsl.stocks_of ~filename:path parsed =
+         [ (None, "tw", "00685L") ]);
       (* stock is ignored by compilation *)
       let strategy = Dsl.compile path ~params:[] dsl_bars in
       assert (Array.length strategy.Engine.targets.(0) = Array.length dsl_bars));
   let rejects source =
     with_temp_strategy source (fun path ->
       assert_failure (fun () ->
-        ignore (Dsl.stock_of ~filename:path (Dsl.parse_file path))))
+        ignore (Dsl.stocks_of ~filename:path (Dsl.parse_file path))))
   in
   rejects "target 1.0\n";
   rejects "stock \"tw/1\"\nstock \"tw/2\"\ntarget 1.0\n";
@@ -822,11 +824,94 @@ let test_load_events () =
       assert_close 12.75 bars.(1).Data.c;
       assert_close 12.23 bars.(2).Data.c)
 
+let test_multi_stock_compile () =
+  let bull_bars =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 100. 90.;
+       bar "2020-01-03" 90. 80.;
+       bar "2020-01-04" 80. 85. |]
+  in
+  let bear_bars =
+    [| bar "2020-01-01" 20. 20.;
+       bar "2020-01-02" 20. 22.;
+       bar "2020-01-03" 22. 24.;
+       bar "2020-01-04" 24. 23. |]
+  in
+  with_temp_strategy
+    "stock \"tw/00685L\" as bull\n\
+     stock \"tw/00632R\" as bear\n\
+     let falling = bull.close < lag(bull.close, 1)\n\
+     bull.target num(not falling)\n\
+     bear.entry when falling size 0.5\n\
+     bear.exit when not falling\n"
+    (fun path ->
+      let ast = Dsl.parse_file path in
+      (match Dsl.stocks_of ~filename:path ast with
+       | [ (Some "bull", "tw", "00685L"); (Some "bear", "tw", "00632R") ] -> ()
+       | _ -> assert false);
+      let strategy =
+        Dsl.compile_ast ast ~params:[]
+          ~assets:[ (Some "bull", bull_bars); (Some "bear", bear_bars) ]
+      in
+      (* falling = [false; true; true; false] (first lag is NaN -> false).
+         bull target: [1; 0; 0; 1]. bear orders: entry 0.5 on bars 2-3,
+         clamped at 0.5 by cap 1.0 default... entries sum, so bar 2: 0.5,
+         bar 3: 1.0 capped to 1.0? No: 0.5 + 0.5 = 1.0 <= cap. exit on
+         bars 1 and 4. bear target: [0; 0.5; 1.0; 0]. *)
+      assert (strategy.Engine.targets = [| [| 1.; 0.; 0.; 1. |];
+                                           [| 0.; 0.5; 1.0; 0. |] |]))
+
+let test_multi_stock_errors () =
+  let expect source =
+    with_temp_strategy source
+      (fun path ->
+        assert_failure (fun () ->
+          let ast = Dsl.parse_file path in
+          let stocks = Dsl.stocks_of ~filename:path ast in
+          let assets =
+            List.map
+              (fun (alias, _, _) ->
+                (alias, [| bar "2020-01-01" 1. 1.; bar "2020-01-02" 1. 1. |]))
+              stocks
+          in
+          ignore (Dsl.compile_ast ast ~params:[] ~assets)))
+  in
+  (* mixed aliased and unaliased stocks *)
+  expect "stock \"tw/A\" as a\nstock \"tw/B\"\na.target 1.0\n";
+  (* two unaliased stocks *)
+  expect "stock \"tw/A\"\nstock \"tw/B\"\ntarget 1.0\n";
+  (* duplicate alias *)
+  expect "stock \"tw/A\" as a\nstock \"tw/B\" as a\na.target 1.0\n";
+  (* duplicate symbol *)
+  expect "stock \"tw/A\" as a\nstock \"tw/A\" as b\na.target 1.0\nb.target 1.0\n";
+  (* alias collides with a builtin *)
+  expect "stock \"tw/A\" as sma\nsma.target 1.0\n";
+  (* alias collides with a predefined series *)
+  expect "stock \"tw/A\" as close\nclose.target 1.0\n";
+  (* alias collides with a param *)
+  expect "stock \"tw/A\" as n\nparam n = 5\nn.target 1.0\n";
+  (* unknown alias in a statement *)
+  expect "stock \"tw/A\" as a\nb.target 1.0\n";
+  (* bare statement in an aliased file *)
+  expect "stock \"tw/A\" as a\ntarget 1.0\n";
+  (* bare series in an aliased file *)
+  expect "stock \"tw/A\" as a\na.target close\n";
+  (* bare atr in an aliased file *)
+  expect "stock \"tw/A\" as a\na.target atr(3)\n";
+  (* qualified non-atr builtin *)
+  expect "stock \"tw/A\" as a\na.target a.sma(a.close, 3)\n";
+  (* declared stock without statements *)
+  expect "stock \"tw/A\" as a\nstock \"tw/B\" as b\na.target 1.0\n";
+  (* alias qualification in an unaliased file *)
+  expect "stock \"tw/A\"\na.target 1.0\n"
+
 let () =
   test_parser ();
   test_parser_aliases ();
   test_filter_dates ();
   test_stock_statement ();
+  test_multi_stock_compile ();
+  test_multi_stock_errors ();
   test_indicators ();
   test_target_style ();
   test_hold_tie_break ();

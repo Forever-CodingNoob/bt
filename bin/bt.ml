@@ -123,11 +123,10 @@ let load_bars ~market ~symbol ~from_ ~to_ ~data_dir =
 
 type strategy_input = {
   name : string;
-  market : string;
-  symbol : string;
+  stocks : (string option * string * string) list;
   ast : Btlib.Ast.file;
   declarations : (string * float) list;
-  bars : Btlib.Data.bar array;
+  bars : Btlib.Data.bar array list;
 }
 
 let strategy_name path =
@@ -234,14 +233,16 @@ let run argv =
     List.map2
       (fun path name ->
         let ast = Btlib.Dsl.parse_file path in
-        let market, symbol = Btlib.Dsl.stock_of ~filename:path ast in
+        let stocks = Btlib.Dsl.stocks_of ~filename:path ast in
         let bars =
-          load_bars ~market ~symbol
-            ~from_:!from_ ~to_:!to_ ~data_dir:!data_dir
+          List.map
+            (fun (_, market, symbol) ->
+              load_bars ~market ~symbol
+                ~from_:!from_ ~to_:!to_ ~data_dir:!data_dir)
+            stocks
         in
         { name;
-          market;
-          symbol;
+          stocks;
           ast;
           declarations = Btlib.Dsl.declared_params_ast ast;
           bars })
@@ -256,7 +257,7 @@ let run argv =
            load_bars ~market ~symbol
              ~from_:!from_ ~to_:!to_ ~data_dir:!data_dir)
   in
-  let arrays = List.map (fun input -> input.bars) inputs in
+  let arrays = List.concat_map (fun input -> input.bars) inputs in
   let arrays =
     match baseline_bars with
     | None -> arrays
@@ -271,7 +272,9 @@ let run argv =
     Btlib.Data.filter_dates ~keep:(fun date -> Hashtbl.mem keep date) bars
   in
   let inputs =
-    List.map (fun input -> { input with bars = filter input.bars }) inputs
+    List.map
+      (fun input -> { input with bars = List.map filter input.bars })
+      inputs
   in
   let baseline_bars =
     match baseline_bars with
@@ -294,23 +297,45 @@ let run argv =
             (fun (name, _) -> List.mem_assoc name input.declarations)
             !parameters
         in
-        let strategy =
-          Btlib.Dsl.compile_ast input.ast ~params input.bars
+        let assets_for_compile =
+          List.map2
+            (fun (alias, _, _) bars -> alias, bars)
+            input.stocks input.bars
         in
-        let defaults =
-          Btlib.Engine.default_costs
-            ~market:input.market ~symbol:input.symbol
+        let strategy =
+          Btlib.Dsl.compile_ast input.ast ~params ~assets:assets_for_compile
+        in
+        let labels =
+          List.map
+            (fun (_, market, symbol) -> market ^ "/" ^ symbol)
+            input.stocks
+        in
+        let engine_assets =
+          Array.of_list
+            (List.map2 (fun label bars -> label, bars) labels input.bars)
         in
         let costs =
-          apply_cost_overrides defaults !fee_bps !tax_bps !slip_bps !min_fee
+          Array.of_list
+            (List.map
+               (fun (_, market, symbol) ->
+                 apply_cost_overrides
+                   (Btlib.Engine.default_costs ~market ~symbol)
+                   !fee_bps !tax_bps !slip_bps !min_fee)
+               input.stocks)
         in
         let result =
-          Btlib.Engine.run
-            [| (input.market ^ "/" ^ input.symbol, input.bars) |]
-            strategy [| costs |] ~capital:!capital ~fill:!fill
+          Btlib.Engine.run engine_assets strategy costs
+            ~capital:!capital ~fill:!fill
         in
-        (input.name, input.market ^ "/" ^ input.symbol,
-         strategy.targets.(0), result))
+        let gross = Array.make (Array.length (snd engine_assets.(0))) 0. in
+        Array.iter
+          (fun target ->
+            Array.iteri
+              (fun t value ->
+                gross.(t) <- gross.(t) +. Btlib.Engine.clamp_target value)
+              target)
+          strategy.targets;
+        (input.name, String.concat "+" labels, gross, result))
       inputs
   in
   let baseline_result =
