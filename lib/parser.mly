@@ -6,6 +6,7 @@ open Ast
 %token NEWLINE TARGET CAP STOCK
 %token ASSIGN EQEQ NEQ LE GE LT GT PLUS MINUS STAR SLASH
 %token LPAREN RPAREN COMMA
+%token DOT AS
 %token <string> IDENT STRING
 %token <float> NUMBER
 %token EOF UMINUS
@@ -37,20 +38,30 @@ lines:
 stmt:
   PARAM IDENT ASSIGN NUMBER { Param ($2, $4) }
 | LET IDENT ASSIGN expr { Let ($2, $4) }
-| ENTRY WHEN expr { Entry ($3, None) }
-| ENTRY WHEN expr SIZE expr { Entry ($3, Some $5) }
-| EXIT WHEN expr { Exit ($3, None) }
-| EXIT WHEN expr SIZE expr { Exit ($3, Some $5) }
-| SIZE expr { Size $2 }
-| TARGET expr { Target $2 }
-| CAP NUMBER { Cap $2 }
-| STOCK STRING { Stock $2 }
+| ENTRY WHEN expr { Entry (None, $3, None) }
+| ENTRY WHEN expr SIZE expr { Entry (None, $3, Some $5) }
+| IDENT DOT ENTRY WHEN expr { Entry (Some $1, $5, None) }
+| IDENT DOT ENTRY WHEN expr SIZE expr { Entry (Some $1, $5, Some $7) }
+| EXIT WHEN expr { Exit (None, $3, None) }
+| EXIT WHEN expr SIZE expr { Exit (None, $3, Some $5) }
+| IDENT DOT EXIT WHEN expr { Exit (Some $1, $5, None) }
+| IDENT DOT EXIT WHEN expr SIZE expr { Exit (Some $1, $5, Some $7) }
+| SIZE expr { Size (None, $2) }
+| IDENT DOT SIZE expr { Size (Some $1, $4) }
+| TARGET expr { Target (None, $2) }
+| IDENT DOT TARGET expr { Target (Some $1, $4) }
+| CAP NUMBER { Cap (None, $2) }
+| IDENT DOT CAP NUMBER { Cap (Some $1, $4) }
+| STOCK STRING { Stock ($2, None) }
+| STOCK STRING AS IDENT { Stock ($2, Some $4) }
 ;
 
 expr:
   NUMBER { Num $1 }
-| IDENT { Var $1 }
-| IDENT LPAREN arg_list RPAREN { Call ($1, $3) }
+| IDENT { Var (None, $1) }
+| IDENT DOT IDENT { Var (Some $1, $3) }
+| IDENT LPAREN arg_list RPAREN { Call (None, $1, $3) }
+| IDENT DOT IDENT LPAREN arg_list RPAREN { Call (Some $1, $3, $5) }
 | LPAREN expr RPAREN { $2 }
 | MINUS expr %prec UMINUS { Unop ("-", $2) }
 | NOT expr { Unop ("not", $2) }

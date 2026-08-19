@@ -100,6 +100,49 @@ let test_parser () =
     | [Ast.Let ("result", expression)] -> assert_close 7. (scalar_value expression)
     | _ -> assert false)
 
+let test_parser_aliases () =
+  with_temp_strategy
+    "stock \"tw/00685L\" as bull\n\
+     stock \"tw/00632R\" as bear\n\
+     let crash = bull.close / lag(bull.close, 7) - 1 < -0.01\n\
+     bull.target 2.0 * num(not crash)\n\
+     bear.entry when crash size 0.5\n\
+     bear.exit when not crash\n\
+     bear.cap 1.0\n\
+     bull.size 1.0\n"
+    (fun path ->
+      match Dsl.parse_file path with
+      | [ Ast.Stock ("tw/00685L", Some "bull");
+          Ast.Stock ("tw/00632R", Some "bear");
+          Ast.Let ("crash", _);
+          Ast.Target (Some "bull", _);
+          Ast.Entry (Some "bear", Ast.Var (None, "crash"), Some (Ast.Num 0.5));
+          Ast.Exit (Some "bear", Ast.Unop ("not", Ast.Var (None, "crash")), None);
+          Ast.Cap (Some "bear", 1.0);
+          Ast.Size (Some "bull", Ast.Num 1.0) ] -> ()
+      | _ -> assert false);
+  with_temp_strategy
+    "stock \"tw/0050\"\n\
+     entry when cross_above(close, sma(close, 5))\n\
+     exit when cross_below(close, sma(close, 5))\n"
+    (fun path ->
+      match Dsl.parse_file path with
+      | [ Ast.Stock ("tw/0050", None);
+          Ast.Entry (None, _, None);
+          Ast.Exit (None, _, None) ] -> ()
+      | _ -> assert false);
+  with_temp_strategy
+    "stock \"tw/0050\" as etf\n\
+     etf.target etf.atr(14) / etf.close\n"
+    (fun path ->
+      match Dsl.parse_file path with
+      | [ Ast.Stock (_, Some "etf");
+          Ast.Target (Some "etf",
+            Ast.Binop ("/",
+              Ast.Call (Some "etf", "atr", [Ast.Num 14.]),
+              Ast.Var (Some "etf", "close"))) ] -> ()
+      | _ -> assert false)
+
 let test_indicators () =
   let source = [|1.; 2.; 3.; 4.; 5.|] in
   assert_float_array
@@ -703,6 +746,7 @@ let test_load_events () =
 
 let () =
   test_parser ();
+  test_parser_aliases ();
   test_filter_dates ();
   test_stock_statement ();
   test_indicators ();

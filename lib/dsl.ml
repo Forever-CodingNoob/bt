@@ -37,10 +37,16 @@ let parse_file filename =
 
 let rec string_of_expr = function
   | Num number -> Printf.sprintf "%g" number
-  | Var name -> name
-  | Call (name, arguments) ->
+  | Var (None, name) -> name
+  | Var (Some qualifier, name) -> qualifier ^ "." ^ name
+  | Call (qualifier, name, arguments) ->
       let rendered = List.rev (List.rev_map string_of_expr arguments) in
-      Printf.sprintf "%s(%s)" name (String.concat ", " rendered)
+      let callee =
+        match qualifier with
+        | None -> name
+        | Some q -> q ^ "." ^ name
+      in
+      Printf.sprintf "%s(%s)" callee (String.concat ", " rendered)
   | Unop (operator, expression) ->
       Printf.sprintf "(%s %s)" operator (string_of_expr expression)
   | Binop (operator, left, right) ->
@@ -189,11 +195,15 @@ let builtin_arity = function
 let rec eval context environment expression =
   match expression with
   | Num number -> Scalar number
-  | Var name ->
+  | Var (qualifier, name) ->
+      let key =
+        match qualifier with None -> name | Some q -> q ^ "." ^ name
+      in
       begin
-        match List.assoc_opt name environment with
+        match List.assoc_opt key environment with
         | Some value -> value
-        | None -> fail_expr expression (Printf.sprintf "unknown identifier %s" name)
+        | None ->
+            fail_expr expression (Printf.sprintf "unknown identifier %s" key)
       end
   | Unop ("-", operand) ->
       numeric_unary expression (fun number -> -.number)
@@ -221,7 +231,10 @@ let rec eval context environment expression =
         | "or" -> logical_binary expression ( || ) left right
         | _ -> fail_expr expression (Printf.sprintf "unknown operator %s" operator)
       end
-  | Call (name, arguments) ->
+  | Call (Some qualifier, _, _) ->
+      fail_expr expression
+        (Printf.sprintf "unknown stock alias %s" qualifier)
+  | Call (None, name, arguments) ->
       begin
         match builtin_arity name with
         | None -> fail_expr expression (Printf.sprintf "unknown builtin %s" name)
@@ -392,7 +405,7 @@ let compile_ast statements ~params bars =
         | Let (name, expression) ->
             let value = eval context environment expression in
             ((name, value) :: environment, entries, exits, size, targets, cap)
-        | Entry (expression, inline_size_expression) ->
+        | Entry (None, expression, inline_size_expression) ->
             let signal =
               bool_signal "entry" expression
                 (eval context environment expression)
@@ -406,7 +419,7 @@ let compile_ast statements ~params bars =
             in
             (environment, (signal, inline_size) :: entries,
              exits, size, targets, cap)
-        | Exit (expression, inline_size_expression) ->
+        | Exit (None, expression, inline_size_expression) ->
             let signal =
               bool_signal "exit" expression
                 (eval context environment expression)
@@ -420,7 +433,7 @@ let compile_ast statements ~params bars =
             in
             (environment, entries, (signal, inline_size) :: exits,
              size, targets, cap)
-        | Size expression ->
+        | Size (None, expression) ->
             begin
               match size with
               | Some _ -> failwith "strategy may contain at most one size statement"
@@ -429,17 +442,23 @@ let compile_ast statements ~params bars =
                   (environment, entries, exits, Some (expression, value),
                    targets, cap)
             end
-        | Target expression ->
+        | Target (None, expression) ->
             let value = eval context environment expression in
             (environment, entries, exits, size,
              (expression, value) :: targets, cap)
-        | Cap value ->
+        | Cap (None, value) ->
             begin
               match cap with
               | Some _ -> failwith "strategy may contain at most one cap statement"
               | None ->
                   (environment, entries, exits, size, targets, Some value)
             end
+        | Entry (Some alias, _, _)
+        | Exit (Some alias, _, _)
+        | Size (Some alias, _)
+        | Target (Some alias, _)
+        | Cap (Some alias, _) ->
+            failwith (Printf.sprintf "unknown stock alias %s" alias)
         | Stock _ ->
             (environment, entries, exits, size, targets, cap))
       (initial_environment, [], [], None, [], None) statements
@@ -569,7 +588,7 @@ let compile source ~params bars =
 let stock_of ~filename statements =
   let stocks =
     List.fold_left
-      (fun acc -> function Stock s -> s :: acc | _ -> acc) [] statements
+      (fun acc -> function Stock (s, _) -> s :: acc | _ -> acc) [] statements
   in
   match stocks with
   | [] ->

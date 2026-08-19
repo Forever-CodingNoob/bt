@@ -8,6 +8,7 @@ let keyword = function
   | "exit" -> EXIT
   | "size" -> SIZE
   | "stock" -> STOCK
+  | "as" -> AS
   | "target" -> TARGET
   | "cap" -> CAP
   | "when" -> WHEN
@@ -43,6 +44,7 @@ rule token = parse
   | ')' { RPAREN }
   | ',' { COMMA }
   | number as value { NUMBER (float_of_string value) }
+  | '.' { DOT }
   | ident_start ident_char* as name { keyword name }
   | '"' [^ '"' '\n']* '"' as s
       { STRING (String.sub s 1 (String.length s - 2)) }
