@@ -53,13 +53,14 @@ dune test      # all asserts must pass
 Do not change these types or formats:
 
 - `Data.bar` = `{ date; o; h; l; c; v }`
-- `Engine.strategy` = `{ target : float array }`
+- `Engine.strategy` = `{ targets : float array array }` (per-asset target
+  arrays in stock declaration order)
 - Engine fill modes: `Close_same` fills at the decision close. `Open_next`
   fills at the next open.
 - TW cache header: `date,open,high,low,close,volume`
 - Dividend cache header: `date,factor`
 - US cache header: `date,open,high,low,close,adj_close,volume`
-- Fill log header: `date,price,from_exposure,to_exposure`
+- Fill log header: `date,stock,price,from_exposure,to_exposure`
 
 ## How to add an indicator
 

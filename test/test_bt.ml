@@ -377,6 +377,65 @@ let test_engine_portfolio_close () =
    | first :: _ -> assert (first.Engine.stock = "tw/A")
    | [] -> assert false)
 
+let test_engine_portfolio_costs () =
+  let a =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 100. 110.;
+       bar "2020-01-03" 110. 121. |]
+  in
+  let b =
+    [| bar "2020-01-01" 50. 50.;
+       bar "2020-01-02" 50. 45.;
+       bar "2020-01-03" 45. 54. |]
+  in
+  let a_costs : Engine.costs =
+    { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0. }
+  in
+  let b_costs : Engine.costs =
+    { fee_bps = 0.; tax_bps = 100.; slip_bps = 0.; min_fee = 0. }
+  in
+  let result =
+    Engine.run [| ("tw/A", a); ("tw/B", b) |]
+      { Engine.targets =
+          [| [| 0.5; 0.5; 0. |]; [| 0.; 0.4; 0. |] |] }
+      [| a_costs; b_costs |] ~capital:None ~fill:Engine.Close_same
+  in
+  let expected =
+    (1. -. 0.005) *. 1.05 *. 1.13
+    *. (1. -. 0.005) *. (1. -. 0.004)
+  in
+  assert_close ~tolerance:1e-12 expected (final_equity result)
+
+let test_engine_portfolio_min_fee () =
+  let a =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 100. 100. |]
+  in
+  let b =
+    [| bar "2020-01-01" 50. 50.;
+       bar "2020-01-02" 50. 50. |]
+  in
+  let costs : Engine.costs =
+    { fee_bps = 3.99; tax_bps = 0.; slip_bps = 0.; min_fee = 20. }
+  in
+  let result =
+    Engine.run [| ("tw/A", a); ("tw/B", b) |]
+      { Engine.targets =
+          [| [| 0.5; 0. |]; [| 0.5; 0. |] |] }
+      [| costs; costs |] ~capital:(Some 10000.) ~fill:Engine.Close_same
+  in
+  let after_a_buy = 1. -. 0.002 in
+  let after_b_buy =
+    after_a_buy *. (1. -. 20. /. (after_a_buy *. 10000.))
+  in
+  let after_a_sell =
+    after_b_buy *. (1. -. 20. /. (after_b_buy *. 10000.))
+  in
+  let expected =
+    after_a_sell *. (1. -. 20. /. (after_a_sell *. 10000.))
+  in
+  assert_close ~tolerance:1e-12 expected (final_equity result)
+
 let test_engine_portfolio_open () =
   let a =
     [| bar "2020-01-01" 100. 100.;
@@ -422,6 +481,22 @@ let test_engine_vwap_trip () =
   (match result.trips with
    | [trip] -> assert_close ~tolerance:1e-12 (126. /. 105. -. 1.) trip.net_ret
    | _ -> assert false)
+
+let test_engine_vwap_multi_exit () =
+  let bars =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 110. 110.;
+       bar "2020-01-03" 126. 126. |]
+  in
+  let result =
+    run_single bars [| 1.0; 0.5; 0.0 |] zero_costs
+      ~capital:None ~fill:Engine.Close_same
+  in
+  (* Exit VWAP = (0.5 * 110 + 0.5 * 126) / 1.0 = 118. *)
+  match result.trips with
+  | [trip] ->
+      assert_close ~tolerance:1e-12 (118. /. 100. -. 1.) trip.net_ret
+  | _ -> assert false
 
 let dsl_bars =
   (* closes 100 105 110 100 90; open = previous close *)
@@ -729,6 +804,117 @@ let read_file path =
     ~finally:(fun () -> close_in input)
     (fun () -> really_input_string input (in_channel_length input))
 
+let test_multi_stock_cli () =
+  let root = Filename.temp_file "bt-test-multi-" "" in
+  Sys.remove root;
+  Unix.mkdir root 0o700;
+  let tw_dir = Filename.concat root "tw" in
+  let out_dir = Filename.concat root "out" in
+  let remove_flat_dir path =
+    if Sys.file_exists path then begin
+      Array.iter
+        (fun name -> Sys.remove (Filename.concat path name))
+        (Sys.readdir path);
+      Unix.rmdir path
+    end
+  in
+  Fun.protect
+    ~finally:(fun () ->
+      remove_flat_dir out_dir;
+      remove_flat_dir tw_dir;
+      Array.iter
+        (fun name -> Sys.remove (Filename.concat root name))
+        (Sys.readdir root);
+      Unix.rmdir root)
+    (fun () ->
+      Unix.mkdir tw_dir 0o700;
+      let write path contents =
+        let output = open_out path in
+        Fun.protect
+          ~finally:(fun () -> close_out output)
+          (fun () -> output_string output contents)
+      in
+      write (Filename.concat tw_dir "AA.csv")
+        "date,open,high,low,close,volume\n\
+         2020-01-01,100,101,99,100,1000\n\
+         2020-01-02,110,111,109,110,1000\n\
+         2020-01-03,121,122,120,121,1000\n\
+         2020-01-06,130,131,129,130,1000\n";
+      write (Filename.concat tw_dir "BB.csv")
+        "date,open,high,low,close,volume\n\
+         2020-01-01,50,51,49,50,1000\n\
+         2020-01-02,55,56,54,55,1000\n\
+         2020-01-03,66,67,65,66,1000\n";
+      let strategy_path = Filename.concat root "mm.strat" in
+      write strategy_path
+        "stock \"tw/AA\" as a\n\
+         stock \"tw/BB\" as b\n\
+         a.target 1.0\n\
+         b.target 0.5\n";
+      let stdout_path = Filename.concat root "stdout.txt" in
+      let binary =
+        locate ["_build/default/bin/bt.exe"; "../bin/bt.exe"]
+      in
+      let command =
+        String.concat " "
+          [ Filename.quote binary;
+            "run";
+            Filename.quote strategy_path;
+            "--data-dir";
+            Filename.quote root;
+            "--out-dir";
+            Filename.quote out_dir;
+            "--out-name";
+            "mm";
+            "--no-plot";
+            "--fee-bps";
+            "0";
+            "--tax-bps";
+            "0";
+            "--slip-bps";
+            "0";
+            "--min-fee";
+            "0";
+            ">";
+            Filename.quote stdout_path;
+            "2>&1" ]
+      in
+      assert (Sys.command command = 0);
+      let read_lines path =
+        let input = open_in path in
+        Fun.protect
+          ~finally:(fun () -> close_in input)
+          (fun () ->
+            let rec loop reversed =
+              match input_line input with
+              | line -> loop (line :: reversed)
+              | exception End_of_file -> List.rev reversed
+            in
+            loop [])
+      in
+      let curve_path = Filename.concat out_dir "mm.csv" in
+      (match read_lines curve_path with
+       | [header; _; _; last] ->
+           assert (header = "date,mm");
+           begin
+             match String.split_on_char ',' last with
+             | ["2020-01-03"; equity] ->
+                 assert_close ~tolerance:1e-9 1.38 (float_of_string equity)
+             | _ -> assert false
+           end
+       | _ -> assert false);
+      let trades =
+        read_file (Filename.concat out_dir "mm.trades.csv")
+      in
+      match String.split_on_char '\n' trades with
+      | header :: rows ->
+          assert
+            (header = "date,stock,price,from_exposure,to_exposure");
+          let body = String.concat "\n" rows in
+          assert (contains body "tw/AA");
+          assert (contains body "tw/BB")
+      | [] -> assert false)
+
 let test_event_transform () =
   assert (
     Data.event_sources =
@@ -929,12 +1115,16 @@ let () =
   test_engine_partial_open ();
   test_engine_partial_open_costs ();
   test_engine_portfolio_close ();
+  test_engine_portfolio_costs ();
+  test_engine_portfolio_min_fee ();
   test_engine_portfolio_open ();
   test_engine_vwap_trip ();
+  test_engine_vwap_multi_exit ();
   test_golden ();
   test_report_stem ();
   test_multi_strat_fixture ();
   test_baseline_output_header ();
+  test_multi_stock_cli ();
   test_prepend_rows ();
   test_head_probe_gate ();
   test_plot_script ();

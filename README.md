@@ -74,7 +74,7 @@ The default output stem joins the strategy basenames with `_vs_`. This
 example writes `out/sma_cross_vs_00685L_bh.csv` and
 `out/sma_cross_vs_00685L_bh.png`. It also writes the fill logs
 `out/sma_cross.trades.csv` and `out/00685L_bh.trades.csv`. A fill log has
-the header `date,price,from_exposure,to_exposure`.
+the header `date,stock,price,from_exposure,to_exposure`.
 
 ## Commands
 
@@ -91,8 +91,8 @@ See [docs/cli.md](./docs/cli.md) for the complete reference.
 - Use a value such as `tw/0050` for `MARKET/SYMBOL`. For `bt fetch` you
   can use `--market tw|us --symbol SYM` instead.
 - The default fetch range starts on `1994-10-01` and ends today.
-- Each strategy file contains exactly one `stock "market/symbol"`
-  statement.
+- A strategy file holds one stock, or several stocks declared with `as`
+  aliases and dotted statements; see [docs/strategy.md](./docs/strategy.md).
 - `--baseline M/SYM` adds an optional buy-and-hold baseline.
 - `-p name=value` overrides a matching `param` in the strategy files.
 - `--fill` selects the fill point. `close` fills at the decision close
