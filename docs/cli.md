@@ -26,6 +26,8 @@ bt fetch --market tw|us --symbol SYM [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--da
 bt run STRAT... [--baseline M/SYM] [--from D] [--to D]
        [-p name=value ...] [--fill open|close]
        [--fee-bps F] [--tax-bps F] [--slip-bps F] [--min-fee F]
+       [--financing-rate PERCENT] [--maintenance-ratio PERCENT]
+       [--financing-ratio PERCENT]
        [--capital TWD] [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]
 ```
 
@@ -65,6 +67,7 @@ The default cache has these files:
 | --- | --- | --- |
 | Taiwan | `data/tw/SYM.csv` | `date,open,high,low,close,volume` |
 | Taiwan | `data/tw/SYM.div.csv` | `date,factor` |
+| Taiwan | `data/tw/stockinfo.csv` | `stock_id,type,date` |
 | US | `data/us/SYM.csv` | `date,open,high,low,close,adj_close,volume` |
 
 Replace `data/` with the value of `--data-dir` when you set that option.
@@ -80,6 +83,12 @@ idempotent. The command fetches the full Taiwan dividend history and
 rewrites `SYM.div.csv` on each run. If this fetch fails, the command keeps the
 existing dividend file. If no file exists, the command warns that prices
 will be unadjusted for dividends.
+
+For every Taiwan fetch, the command also downloads the `TaiwanStockInfo`
+table and rewrites `data/tw/stockinfo.csv`. It keeps only `twse` and `tpex`
+rows. If this fetch fails, the command keeps the existing stock-info cache.
+An unknown symbol or a missing cache makes `bt run` warn and use the TWSE
+financing ratio of 60%.
 
 For US prices, `bt fetch` rewrites `SYM.csv` on each run. If a cache exists,
 the request starts at the earlier of its first date and `--from`. This full
@@ -119,11 +128,16 @@ strategy file selects its data with exactly one
 | `--tax-bps F` | Override the sell tax in basis points for all strategies and the baseline. |
 | `--slip-bps F` | Override slippage in basis points for all strategies and the baseline. |
 | `--min-fee F` | Override the minimum commission per order in TWD for all strategies and the baseline. The minimum applies only with `--capital`. |
+| `--financing-rate PERCENT` | Set the annual financing rate. The default is 6.35%. |
+| `--maintenance-ratio PERCENT` | Set the maintenance threshold. The default is 130%. The engine force-liquidates at the next open when maintenance falls below it. |
+| `--financing-ratio PERCENT` | Set one initial financing ratio for every asset and skip stock-info classification. By default, the cache resolves TWSE to 60% and TPEX to 50%. |
 | `--data-dir DIR` | Set the cache directory. The default is `data/`. |
 | `--out-dir DIR` | Set the output directory. The default is `out/`. |
 | `--out-name NAME` | Set the equity CSV and PNG stem. The default joins the strategy names with `_vs_`. |
 | `--no-plot` | Do not run `scripts/plot.py` or create or update the equity PNG. The command still writes the equity CSV and all strategy fill logs. |
 | `-h`, `-help`, `--help` | Print the run options to standard output and exit with code 0. |
+
+The three margin options apply to every strategy and the baseline.
 
 Do not pass `--market`, `--symbol`, or `--benchmark-market` to `bt run`.
 `--benchmark` was renamed to `--baseline`.
@@ -187,6 +201,15 @@ for each strategy and, when requested, one baseline column. It shows Total
 return, CAGR, Sharpe, MaxDD, and Calmar. The lines below the table show each
 strategy's trade count and win rate, the common date range, and the fill
 mode.
+
+If a strategy had a loan on at least one bar, `bt run` also prints a margin
+line with the run's financing rate and margin statistics:
+
+```text
+channel_ladder: margin — financing 6.35%/yr, min maintenance 145.2%, margin calls 1, clamps 0
+```
+
+A strategy that never had a loan has no margin line.
 
 The default stem joins strategy names in argument order with `_vs_`. For
 example, `bt run a.strat b.strat` uses the stem `a_vs_b`. A single strategy

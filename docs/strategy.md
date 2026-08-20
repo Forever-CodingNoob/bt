@@ -25,8 +25,12 @@ target 0.5 * num(base) + 0.5 * num(base and boost)
 ```
 
 `target` sets the desired exposure for each bar. The expression must give
-a scalar or a numeric series. A scalar applies to all bars. A value above
-1.0 applies daily-reset leverage.
+a scalar or a numeric series. A scalar applies to all bars. The engine fills
+when the target value changes. Positions drift between fills. An exposure
+above 1.0 borrows cash at the financing rate. Taiwan initial-margin limits
+cap exposure at 2.5x for TWSE and 2.0x for TPEX. If maintenance falls below
+the configured threshold, the engine liquidates at the next open. The
+strategy stays flat until the target changes.
 
 ### Partial orders
 
@@ -153,8 +157,9 @@ Operator precedence, from low to high: `or`, `and`, `not`, comparisons,
   expression must give a boolean series. Partial orders can repeat these
   statements and add an inline `size expr`.
 - `size expr`, or `alias.size expr`, sets the exposure in legacy style. It
-  is optional. The default is 1.0. A value above 1.0 applies daily-reset
-  leverage. A value that is NaN or not positive falls back to 1.0.
+  is optional. The default is 1.0. A value above 1.0 requests financed
+  exposure under the same drift and margin rules as a target. A value that
+  is NaN or not positive falls back to 1.0.
 - `target expr`, or `alias.target expr`, sets the target exposure. Use it
   once in target style.
 - `cap number`, or `alias.cap number`, sets the maximum exposure for
