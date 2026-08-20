@@ -27,8 +27,9 @@ target 0.5 * num(base) + 0.5 * num(base and boost)
 `target` sets the desired exposure for each bar. The expression must give
 a scalar or a numeric series. A scalar applies to all bars. The engine fills
 when the target value changes. Positions drift between fills. An exposure
-above 1.0 borrows cash at the financing rate. Taiwan initial-margin limits
-cap exposure at 2.5x for TWSE and 2.0x for TPEX. If maintenance falls below
+above 1.0 borrows cash at the financing rate. Standard TW margin purchases
+finance 60% for TWSE stocks (2.5x leverage) and 50% for TPEX (2.0x). If
+maintenance falls below
 the configured threshold, the engine liquidates at the next open. A target
 change on the breach bar re-enters at that liquidation fill; otherwise the
 strategy stays flat until a later target change.

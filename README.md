@@ -155,9 +155,10 @@ styles, grammar, statements, types, and every builtin.
 - An open position at the end of the data is closed at the last close.
 
 Targets fill only when they change, so positions drift between fills. Exposure
-above 1.0 uses margin financing at 6.35% per year by default. TWSE and TPEX
-financing ratios cap initial exposure at 2.5x and 2.0x, and the default
-maintenance threshold is 130%.
+above 1.0 uses margin financing at 6.35% per year by default. Standard TW
+margin purchases finance 60% of the purchase for TWSE stocks (2.5x leverage)
+and 50% for TPEX stocks (2.0x leverage). The default maintenance threshold
+is 130%.
 
 ## Data notes
 

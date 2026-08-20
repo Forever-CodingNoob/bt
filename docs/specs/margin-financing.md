@@ -79,16 +79,17 @@ With this sequence a buy-and-hold strategy keeps `c = 0` exactly and
 `e = 1` forever, so all-in/all-out results are unchanged to the last
 bit.
 
-### Initial margin cap
+### Initial margin
 
-At fill time the TW self-funding rule binds:
-`sum_i v_i * (1 - ratio_i) <= equity`, with `ratio_i` the financing
-ratio (0.6 TWSE, 0.5 TPEX). Single-stock corollary: max exposure
-2.5x TWSE, 2.0x TPEX. When the requested targets violate the bound,
-all requested targets scale down uniformly by the largest feasible
-factor, and the run counts the clamp. The engine also treats the
-scaled targets as the effective targets for the change-detection of
-later bars.
+Standard TW margin purchases have a fixed regulatory leverage limit:
+the broker finances 60% for TWSE stocks (the buyer puts down 40%,
+giving 2.5x leverage) and 50% for TPEX stocks (50% down, 2.0x).
+At fill time the self-funding constraint
+`sum_i v_i * (1 - ratio_i) <= equity` must hold. When the requested
+targets exceed what the financing ratio allows, all targets scale
+down uniformly by the largest feasible factor, and the run counts the
+event. The engine treats the scaled targets as the effective targets
+for the change-detection of later bars.
 
 ### Trips and fills log
 

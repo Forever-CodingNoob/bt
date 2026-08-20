@@ -218,7 +218,7 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
         need := !need +. (value *. (1. -. margin.ratios.(index))))
       raw;
     (* ponytail: sequential fill costs can nudge weights a few bps past the
-       joint cap; brokers block pre-cost, refine if it ever matters *)
+       regulatory limit; brokers block pre-cost, refine if it ever matters *)
     let scale = if !need > 1. then 1. /. !need else 1. in
     (Array.map (fun value -> value *. scale) raw, scale < 1.)
   in
