@@ -1259,6 +1259,37 @@ let test_load_events () =
       assert_close 12.75 bars.(1).Data.c;
       assert_close 12.23 bars.(2).Data.c)
 
+let test_financing_ratio () =
+  let root = Filename.temp_file "bt-test-info-" "" in
+  Sys.remove root;
+  Unix.mkdir root 0o700;
+  let tw = Filename.concat root "tw" in
+  Unix.mkdir tw 0o700;
+  Fun.protect
+    ~finally:(fun () ->
+      Array.iter
+        (fun name -> Sys.remove (Filename.concat tw name))
+        (Sys.readdir tw);
+      Unix.rmdir tw;
+      Unix.rmdir root)
+    (fun () ->
+      let output = open_out (Filename.concat tw "stockinfo.csv") in
+      Fun.protect
+        ~finally:(fun () -> close_out output)
+        (fun () ->
+          output_string output
+            "stock_id,type,date\n\
+             00685L,\"twse\",\"2024-01-01\"\n\
+             5483,\"tpex\",\"2024-01-01\"\n\
+             8069,\"tpex\",\"2020-01-01\"\n\
+             8069,\"twse\",\"2024-01-01\"\n");
+      assert (Data.financing_ratio ~data_dir:root ~symbol:"00685L" = 0.6);
+      assert (Data.financing_ratio ~data_dir:root ~symbol:"5483" = 0.5);
+      (* the row with the latest date wins *)
+      assert (Data.financing_ratio ~data_dir:root ~symbol:"8069" = 0.6);
+      (* unknown symbol warns and defaults *)
+      assert (Data.financing_ratio ~data_dir:root ~symbol:"9999" = 0.6))
+
 let test_multi_stock_compile () =
   let bull_bars =
     [| bar "2020-01-01" 100. 100.;
@@ -1388,5 +1419,6 @@ let () =
   test_plot_script ();
   test_back_adjust_events ();
   test_load_events ();
+  test_financing_ratio ();
   test_event_transform ();
   print_endline "ok"

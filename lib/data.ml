@@ -530,6 +530,34 @@ let fetch_events ~token ~symbol ~to_ ~cache_path =
             List.iter (fun row -> output_string output (row ^ "\n")) rows);
         rewrite_rows ~header:"date,factor" ~rows_path ~cache_path)
 
+let fetch_stockinfo ~token ~cache_path =
+  with_temp ".json" (fun json_path ->
+    let url =
+      "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo"
+    in
+    let process_status, http_code = curl_get ~token ~url ~output:json_path in
+    let keep reason =
+      Printf.eprintf "warning: stockinfo fetch failed (%s); %s\n" reason
+        (if Sys.file_exists cache_path then "keeping cached stock info"
+         else "financing ratios will default to TWSE 60%")
+    in
+    if not (process_ok process_status) || http_code <> "200" then
+      keep
+        ("HTTP " ^
+         (if http_code = "" || http_code = "000" then "unavailable"
+          else http_code))
+    else
+      match check_api_response json_path with
+      | `Error message -> keep message
+      | `Ok ->
+          with_temp ".rows" (fun rows_path ->
+            transform_json ~args:[]
+              ~expression:(
+                ".data[] | select(.type == \"twse\" or .type == \"tpex\") " ^
+                "| [.stock_id, .type, .date] | @csv")
+              ~json_path ~rows_path;
+            rewrite_rows ~header:"stock_id,type,date" ~rows_path ~cache_path))
+
 let fetch ~market ~symbol ~from_ ~to_ ~data_dir =
   let market = market_name market in
   check_symbol symbol;
@@ -549,7 +577,9 @@ let fetch ~market ~symbol ~from_ ~to_ ~data_dir =
     fetch_dividends ~token ~symbol ~to_
       ~cache_path:(Filename.concat directory (symbol ^ ".div.csv"));
     fetch_events ~token ~symbol ~to_
-      ~cache_path:(Filename.concat directory (symbol ^ ".events.csv"))
+      ~cache_path:(Filename.concat directory (symbol ^ ".events.csv"));
+    fetch_stockinfo ~token
+      ~cache_path:(Filename.concat directory "stockinfo.csv")
   end
 
 let float_field path line_number name value =
@@ -631,6 +661,41 @@ let read_dividends path =
         | exception End_of_file -> Array.of_list (List.rev acc)
       in
       loop 2 [])
+
+let financing_ratio ~data_dir ~symbol =
+  let path =
+    Filename.concat (Filename.concat data_dir "tw") "stockinfo.csv"
+  in
+  let fallback () =
+    Printf.eprintf
+      "warning: financing ratio unknown for %s; assuming TWSE 60%%\n" symbol;
+    0.6
+  in
+  if not (Sys.file_exists path) then fallback ()
+  else begin
+    let input = open_in path in
+    Fun.protect
+      ~finally:(fun () -> close_in input)
+      (fun () ->
+        let best = ref None in
+        (try
+           ignore (input_line input);
+           while true do
+             match String.split_on_char ',' (input_line input) with
+             | [stock_id; kind; date] when unquote stock_id = symbol ->
+                 let date = unquote date in
+                 (match !best with
+                  | Some (previous, _) when String.compare previous date >= 0 ->
+                      ()
+                  | _ -> best := Some (date, unquote kind))
+             | _ -> ()
+           done
+         with End_of_file -> ());
+        match !best with
+        | Some (_, "twse") -> 0.6
+        | Some (_, "tpex") -> 0.5
+        | _ -> fallback ())
+  end
 
 let back_adjust bars dividends =
   Array.sort (fun left right -> String.compare left.date right.date) bars;
