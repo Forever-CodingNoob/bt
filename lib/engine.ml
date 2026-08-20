@@ -25,7 +25,7 @@ type margin = {
 
 type margin_stats = {
   min_maintenance : float option;
-  margin_calls : int;
+  margin_call_dates : string list;
   clamps : int;
 }
 
@@ -96,7 +96,7 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
   let pending_liquidation = ref false in
   let bankrupt = ref false in
   let min_maintenance = ref None in
-  let margin_calls = ref 0 in
+  let margin_call_dates = ref [] in
   let clamps = ref 0 in
   let entry_dates = Array.make asset_count "" in
   let buy_value = Array.make asset_count 0. in
@@ -145,11 +145,9 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
         sell_exposure.(index) <- sell_exposure.(index) -. delta
       end;
       let cost = charge index ~equity_before:equity_now ~delta in
-      cash := !cash -. (cost *. equity_now);
       let equity_after = equity_now *. (1. -. cost) in
-      let new_value = desired *. equity_after in
-      cash := !cash -. (new_value -. values.(index));
-      values.(index) <- new_value;
+      values.(index) <- desired *. equity_after;
+      cash := equity_after -. Array.fold_left ( +. ) 0. values;
       fills :=
         { date; stock = fst assets.(index); price;
           from_e; to_e = desired } :: !fills;
@@ -172,26 +170,36 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
       let weight = if weight <= 0. then 1. else weight in
       sell_value.(index) <- sell_value.(index) +. weight *. price;
       sell_exposure.(index) <- sell_exposure.(index) +. weight;
-      let asset_costs = costs.(index) in
-      let commission =
-        values.(index) *. asset_costs.fee_bps /. 10000.
-      in
-      let commission =
-        match capital with
-        | Some cap when asset_costs.min_fee > 0. && equity_now > 0. ->
-            Float.max commission (asset_costs.min_fee /. cap)
-        | _ -> commission
-      in
-      let cost_value =
-        commission
-        +. values.(index)
-           *. (asset_costs.tax_bps +. asset_costs.slip_bps) /. 10000.
-      in
-      cash := !cash +. values.(index) -. cost_value;
+      if equity_now > 0. then begin
+        let fraction =
+          charge index ~equity_before:equity_now ~delta:(-. weight)
+        in
+        let equity_after = equity_now *. (1. -. fraction) in
+        values.(index) <- 0.;
+        cash := equity_after -. Array.fold_left ( +. ) 0. values
+      end
+      else begin
+        let asset_costs = costs.(index) in
+        let commission =
+          values.(index) *. asset_costs.fee_bps /. 10000.
+        in
+        let commission =
+          match capital with
+          | Some cap when asset_costs.min_fee > 0. ->
+              Float.max commission (asset_costs.min_fee /. cap)
+          | _ -> commission
+        in
+        let cost_value =
+          commission
+          +. values.(index)
+             *. (asset_costs.tax_bps +. asset_costs.slip_bps) /. 10000.
+        in
+        cash := !cash +. values.(index) -. cost_value;
+        values.(index) <- 0.
+      end;
       fills :=
         { date; stock = fst assets.(index); price;
           from_e = weight; to_e = 0. } :: !fills;
-      values.(index) <- 0.;
       let entry_price = buy_value.(index) /. buy_exposure.(index) in
       let exit_price = sell_value.(index) /. sell_exposure.(index) in
       trips :=
@@ -260,7 +268,7 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
          | None -> min_maintenance := Some ratio
          | Some best -> if ratio < best then min_maintenance := Some ratio)
       end;
-      incr margin_calls;
+      margin_call_dates := date :: !margin_call_dates;
       for index = 0 to asset_count - 1 do
         sell_out index ~date ~price:(price_at index)
       done;
@@ -322,7 +330,7 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
        | None -> min_maintenance := Some ratio
        | Some best -> if ratio < best then min_maintenance := Some ratio);
       if ratio < margin.maintenance_ratio then begin
-        incr margin_calls;
+        margin_call_dates := date :: !margin_call_dates;
         pending_liquidation := true
       end
     end;
@@ -348,5 +356,5 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
     trips = List.rev !trips;
     margin_stats =
       { min_maintenance = !min_maintenance;
-        margin_calls = !margin_calls;
+        margin_call_dates = List.rev !margin_call_dates;
         clamps = !clamps } }

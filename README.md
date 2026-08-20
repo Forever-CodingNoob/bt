@@ -83,6 +83,7 @@ bt fetch MARKET/SYMBOL [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--data-dir DIR]
 bt run STRAT... [--baseline M/SYM] [--from D] [--to D]
        [-p name=value ...] [--fill open|close]
        [--fee-bps F] [--tax-bps F] [--slip-bps F] [--min-fee F]
+       [--financing-rate PCT] [--maintenance-ratio PCT] [--financing-ratio PCT]
        [--capital TWD] [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]
 ```
 

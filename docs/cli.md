@@ -206,7 +206,7 @@ If a strategy had a loan on at least one bar, `bt run` also prints a margin
 line with the run's financing rate and margin statistics:
 
 ```text
-channel_ladder: margin — financing 6.35%/yr, min maintenance 145.2%, margin calls 1, clamps 0
+channel_ladder: margin — financing 6.35%/yr, min maintenance 145.20%, margin calls 1, clamps 0
 ```
 
 A strategy that never had a loan has no margin line.

@@ -242,7 +242,8 @@ let test_engine_interest () =
   let expected =
     2. -. (1. +. 0.0635 *. 3. /. 365.) *. (1. +. 0.0635 /. 365.)
   in
-  assert_close ~tolerance:1e-12 expected (final_equity result)
+  assert_close ~tolerance:1e-12 expected (final_equity result);
+  assert (result.margin_stats.Engine.margin_call_dates = [])
 
 let test_engine_initial_margin_clamp () =
   (* requested 3x on a 60% ratio scales to 2.5x once *)
@@ -259,6 +260,7 @@ let test_engine_initial_margin_clamp () =
       [| zero_costs |] ~margin ~capital:None ~fill:Engine.Close_same
   in
   assert (result.margin_stats.Engine.clamps = 1);
+  assert (result.margin_stats.Engine.margin_call_dates = []);
   (match result.fills with
    | first :: _ -> assert_close ~tolerance:1e-12 2.5 first.Engine.to_e
    | [] -> assert false);
@@ -279,6 +281,7 @@ let test_engine_mixed_ratio_clamp () =
       ~fill:Engine.Close_same
   in
   assert (result.margin_stats.Engine.clamps = 1);
+  assert (result.margin_stats.Engine.margin_call_dates = []);
   (match result.fills with
    | a :: b :: _ ->
        assert_close ~tolerance:1e-12 (1.5 /. 1.1) a.Engine.to_e;
@@ -311,7 +314,8 @@ let test_engine_margin_call () =
      close sells it back at 90 (zero cost, zero return). *)
   assert_close ~tolerance:1e-12 0.4 (final_equity result);
   assert (List.length result.fills = 4);
-  assert (result.margin_stats.Engine.margin_calls = 1);
+  assert
+    (result.margin_stats.Engine.margin_call_dates = ["2020-01-03"]);
   (match result.margin_stats.Engine.min_maintenance with
    | Some ratio -> assert_close ~tolerance:1e-12 (1.9 /. 1.5) ratio
    | None -> assert false);
@@ -342,7 +346,8 @@ let test_engine_bankruptcy () =
   assert (not (Float.is_nan last));
   assert_close ~tolerance:1e-12 (-0.25) last;
   assert (List.length result.fills = 2);
-  assert (result.margin_stats.Engine.margin_calls = 1);
+  assert
+    (result.margin_stats.Engine.margin_call_dates = ["2020-01-02"]);
   (match result.margin_stats.Engine.min_maintenance with
    | Some ratio -> assert_close ~tolerance:1e-12 (1.25 /. 1.5) ratio
    | None -> assert false);
@@ -370,13 +375,44 @@ let test_engine_insolvent_gap () =
   assert (not (Float.is_nan last));
   assert_close ~tolerance:1e-12 0. last;
   assert (List.length result.fills = 2);
-  assert (result.margin_stats.Engine.margin_calls = 1);
+  assert
+    (result.margin_stats.Engine.margin_call_dates = ["2020-01-02"]);
   (match result.margin_stats.Engine.min_maintenance with
    | Some ratio -> assert_close ~tolerance:1e-12 1. ratio
    | None -> assert false);
   (match result.trips with
    | [trip] -> assert_close ~tolerance:1e-12 (-0.5) trip.net_ret
    | _ -> assert false)
+
+let test_engine_insolvent_min_fee () =
+  let bars =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 50. 50. |]
+  in
+  let costs : Engine.costs =
+    { fee_bps = 3.99; tax_bps = 0.; slip_bps = 0.; min_fee = 20. }
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.; maintenance_ratio = 1.3; ratios = [| 0.6 |] }
+  in
+  let result =
+    Engine.run [| ("tw/TEST", bars) |]
+      { Engine.targets = [| [| 2.; 0. |] |] }
+      [| costs |] ~margin ~capital:(Some 10000.) ~fill:Engine.Close_same
+  in
+  (* The 0.002 minimum dominates both the 0.000798 entry commission and
+     the roughly 0.000398 exit commission. *)
+  let e0 = 1. -. 0.002 in
+  let v1 = 2. *. e0 in
+  let c0 = e0 -. v1 in
+  let v2 = v1 /. 2. in
+  let cost_value = Float.max (v2 *. 0.000399) (20. /. 10000.) in
+  let expected = c0 +. v2 -. cost_value in
+  let last = final_equity result in
+  assert (not (Float.is_nan last));
+  assert_close ~tolerance:1e-12 expected last;
+  assert
+    (result.margin_stats.Engine.margin_call_dates = ["2020-01-02"])
 
 let test_engine_buyhold_costs () =
   (* all-in with fees: cash stays exactly 0, so the equity path equals
@@ -402,7 +438,7 @@ let test_engine_no_borrow_stats () =
       ~capital:None ~fill:Engine.Close_same
   in
   assert (result.margin_stats.Engine.min_maintenance = None);
-  assert (result.margin_stats.Engine.margin_calls = 0);
+  assert (result.margin_stats.Engine.margin_call_dates = []);
   assert (result.margin_stats.Engine.clamps = 0)
 
 let test_engine () =
@@ -933,7 +969,7 @@ let test_baseline_output_header () =
           fills = [];
           trips = [];
           margin_stats =
-            { min_maintenance = None; margin_calls = 0; clamps = 0 } }
+            { min_maintenance = None; margin_call_dates = []; clamps = 0 } }
       in
       Report.write_outputs
         ~out_dir ~stem:"pair" ~columns:["a", result]
@@ -1238,15 +1274,16 @@ let test_margin_cli () =
             "--min-fee";
             "0";
             "--financing-ratio";
-            "60";
+            "40";
             ">";
             Filename.quote stdout_path;
             "2>&1" ]
       in
       assert (Sys.command command = 0);
       let stdout = read_file stdout_path in
-      assert (contains stdout "margin — financing 6.35%/yr");
-      assert (contains stdout "margin calls 0");
+      assert
+        (contains stdout
+           "margin: margin — financing 6.35%/yr, min maintenance 250.00%, margin calls 0, clamps 1");
       assert (not (contains stdout "daily-reset")))
 
 let test_event_transform () =
@@ -1477,6 +1514,7 @@ let () =
   test_engine_margin_call ();
   test_engine_bankruptcy ();
   test_engine_insolvent_gap ();
+  test_engine_insolvent_min_fee ();
   test_engine_buyhold_costs ();
   test_engine_no_borrow_stats ();
   test_engine ();

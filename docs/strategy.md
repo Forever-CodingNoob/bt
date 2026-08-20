@@ -29,8 +29,9 @@ a scalar or a numeric series. A scalar applies to all bars. The engine fills
 when the target value changes. Positions drift between fills. An exposure
 above 1.0 borrows cash at the financing rate. Taiwan initial-margin limits
 cap exposure at 2.5x for TWSE and 2.0x for TPEX. If maintenance falls below
-the configured threshold, the engine liquidates at the next open. The
-strategy stays flat until the target changes.
+the configured threshold, the engine liquidates at the next open. A target
+change on the breach bar re-enters at that liquidation fill; otherwise the
+strategy stays flat until a later target change.
 
 ### Partial orders
 

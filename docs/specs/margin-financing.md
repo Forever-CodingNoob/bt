@@ -105,8 +105,11 @@ ratio (default 130%), the account is force-liquidated at the next
 bar's opens: every position sells with sell costs, cash absorbs the
 proceeds, and the run records one margin call with its date. After
 liquidation the strategy stays flat until an asset's target series
-next changes value; it does not re-lever on an unchanged target. A
-breach on the last bar coincides with the existing final force-close.
+next changes value; it does not re-lever on an unchanged target. A target
+change that lands on the breach bar itself re-enters at the same fill slot
+as the liquidation; staying flat applies only while the effective target
+series remains unchanged after the call. A breach on the last bar coincides
+with the existing final force-close.
 
 The engine tracks the minimum maintenance ratio observed while a loan
 exists.
@@ -137,7 +140,7 @@ Flags apply to strategies and baseline alike; the baseline at target
 Remove the footer `Exposure above 1.0 uses daily-reset leverage.`
 (now false). When a loan existed at any bar of any strategy column,
 print one line per affected strategy:
-`<name>: margin — financing 6.35%/yr, min maintenance 145.2%, margin calls 1, clamps 0`
+`<name>: margin — financing 6.35%/yr, min maintenance 145.20%, margin calls 1, clamps 0`
 with the run's actual values. No table changes.
 
 ## Result changes
