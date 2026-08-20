@@ -27,13 +27,6 @@ let date_range = function
       let last = List.fold_left (fun _ point -> point) first rest in
       Some (fst first, fst last)
 
-let maximum_target target =
-  let maximum = ref 0. in
-  for index = 0 to Array.length target - 1 do
-    if not (Float.is_nan target.(index)) && target.(index) > !maximum then
-      maximum := target.(index)
-  done;
-  !maximum
 
 let marker ~lower value baseline =
   if (if lower then value <= baseline else value >= baseline) then
@@ -41,7 +34,7 @@ let marker ~lower value baseline =
   else
     " L"
 
-let print_many ~columns ~baseline ~fill ~stocks ~targets =
+let print_many ~columns ~baseline ~fill ~stocks ~financing_rate =
   let column_metrics =
     List.map
       (fun (name, result) -> name, Metrics.of_result result)
@@ -120,7 +113,15 @@ let print_many ~columns ~baseline ~fill ~stocks ~targets =
         | Some rate -> format_percent rate
       in
       Printf.printf "%s: %s — trades %d (win rate %s);\n"
-        name stock (List.length result.Engine.trips) win_rate)
+        name stock (List.length result.Engine.trips) win_rate;
+      let stats = result.Engine.margin_stats in
+      match stats.Engine.min_maintenance with
+      | None -> ()
+      | Some ratio ->
+          Printf.printf
+            "%s: margin — financing %.2f%%/yr, min maintenance %s, margin calls %d, clamps %d\n"
+            name financing_rate (format_percent ratio)
+            stats.Engine.margin_calls stats.Engine.clamps)
     columns column_metrics;
   let curve =
     match columns with
@@ -135,9 +136,7 @@ let print_many ~columns ~baseline ~fill ~stocks ~targets =
   Printf.printf "Date range: %s; fill: %s\n" range
     (match fill with
      | Engine.Close_same -> "close"
-     | Engine.Open_next -> "open");
-  if List.exists (fun target -> maximum_target target > 1.) targets then
-    print_endline "Exposure above 1.0 uses daily-reset leverage."
+     | Engine.Open_next -> "open")
 
 let write_equity ~out_dir ~stem ~columns ~baseline =
   if columns = [] then invalid_arg "Report.write_outputs: no columns";

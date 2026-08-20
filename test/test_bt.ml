@@ -1114,6 +1114,8 @@ let test_multi_stock_cli () =
             "--out-name";
             "mm";
             "--no-plot";
+            "--financing-rate";
+            "0";
             "--fee-bps";
             "0";
             "--tax-bps";
@@ -1163,6 +1165,89 @@ let test_multi_stock_cli () =
           assert (contains body "tw/AA");
           assert (contains body "tw/BB")
       | [] -> assert false)
+
+let test_margin_cli () =
+  let root = Filename.temp_file "bt-test-margin-" "" in
+  Sys.remove root;
+  Unix.mkdir root 0o700;
+  let tw_dir = Filename.concat root "tw" in
+  let out_dir = Filename.concat root "out" in
+  let remove_flat_dir path =
+    if Sys.file_exists path then begin
+      Array.iter
+        (fun name -> Sys.remove (Filename.concat path name))
+        (Sys.readdir path);
+      Unix.rmdir path
+    end
+  in
+  Fun.protect
+    ~finally:(fun () ->
+      remove_flat_dir out_dir;
+      remove_flat_dir tw_dir;
+      Array.iter
+        (fun name -> Sys.remove (Filename.concat root name))
+        (Sys.readdir root);
+      Unix.rmdir root)
+    (fun () ->
+      Unix.mkdir tw_dir 0o700;
+      let write path contents =
+        let output = open_out path in
+        Fun.protect
+          ~finally:(fun () -> close_out output)
+          (fun () -> output_string output contents)
+      in
+      write (Filename.concat tw_dir "AA.csv")
+        "date,open,high,low,close,volume\n\
+         2020-01-01,100,101,99,100,1000\n\
+         2020-01-02,110,111,109,110,1000\n\
+         2020-01-03,121,122,120,121,1000\n\
+         2020-01-06,130,131,129,130,1000\n";
+      write (Filename.concat tw_dir "BB.csv")
+        "date,open,high,low,close,volume\n\
+         2020-01-01,50,51,49,50,1000\n\
+         2020-01-02,55,56,54,55,1000\n\
+         2020-01-03,66,67,65,66,1000\n";
+      let strategy_path = Filename.concat root "margin.strat" in
+      write strategy_path
+        "stock \"tw/AA\" as a\n\
+         stock \"tw/BB\" as b\n\
+         a.target 2.0\n\
+         b.target 0.0\n";
+      let stdout_path = Filename.concat root "stdout.txt" in
+      let binary =
+        locate ["_build/default/bin/bt.exe"; "../bin/bt.exe"]
+      in
+      let command =
+        String.concat " "
+          [ Filename.quote binary;
+            "run";
+            Filename.quote strategy_path;
+            "--data-dir";
+            Filename.quote root;
+            "--out-dir";
+            Filename.quote out_dir;
+            "--out-name";
+            "margin";
+            "--no-plot";
+            "--fee-bps";
+            "0";
+            "--tax-bps";
+            "0";
+            "--slip-bps";
+            "0";
+            "--min-fee";
+            "0";
+            "--financing-ratio";
+            "60";
+            ">";
+            Filename.quote stdout_path;
+            "2>&1" ]
+      in
+      assert (Sys.command command = 0);
+      let stdout = read_file stdout_path in
+      assert (contains stdout "margin — financing 6.35%/yr");
+      assert (contains stdout "margin calls 0");
+      assert (not (contains stdout "daily-reset")))
 
 let test_event_transform () =
   assert (
@@ -1414,6 +1499,7 @@ let () =
   test_multi_strat_fixture ();
   test_baseline_output_header ();
   test_multi_stock_cli ();
+  test_margin_cli ();
   test_prepend_rows ();
   test_head_probe_gate ();
   test_plot_script ();

@@ -166,6 +166,9 @@ let run argv =
   let tax_bps = ref None in
   let slip_bps = ref None in
   let min_fee = ref None in
+  let financing_rate = ref 6.35 in
+  let maintenance_ratio = ref 130. in
+  let financing_ratio = ref None in
   let data_dir = ref "data" in
   let out_dir = ref "out" in
   let out_name = ref None in
@@ -196,6 +199,15 @@ let run argv =
       ("--slip-bps", Arg.Float (fun value -> slip_bps := Some value), "slippage basis points");
       ("--min-fee", Arg.Float (fun value -> min_fee := Some value),
        "minimum fee per order in TWD");
+      ("--financing-rate",
+       Arg.Float (fun value -> financing_rate := value),
+       "annual financing rate percent");
+      ("--maintenance-ratio",
+       Arg.Float (fun value -> maintenance_ratio := value),
+       "maintenance ratio percent");
+      ("--financing-ratio",
+       Arg.Float (fun value -> financing_ratio := Some value),
+       "uniform financing ratio percent");
       ("--data-dir", Arg.Set_string data_dir, "cache directory");
       ("--out-dir", Arg.Set_string out_dir, "output directory");
       ("--out-name", Arg.String (fun value -> out_name := Some value), "output stem");
@@ -289,6 +301,11 @@ let run argv =
              inputs)
       then failwith (Printf.sprintf "unknown parameter %s" name))
     !parameters;
+  let ratio_for symbol =
+    match !financing_ratio with
+    | Some percent -> percent /. 100.
+    | None -> Btlib.Data.financing_ratio ~data_dir:!data_dir ~symbol
+  in
   let runs =
     List.map
       (fun input ->
@@ -323,21 +340,20 @@ let run argv =
                    !fee_bps !tax_bps !slip_bps !min_fee)
                input.stocks)
         in
+        let ratios =
+          Array.of_list
+            (List.map (fun (_, _, symbol) -> ratio_for symbol) input.stocks)
+        in
+        let margin_config : Btlib.Engine.margin =
+          { financing_rate = !financing_rate /. 100.;
+            maintenance_ratio = !maintenance_ratio /. 100.;
+            ratios }
+        in
         let result =
           Btlib.Engine.run engine_assets strategy costs
-            ~margin:{ Btlib.Engine.financing_rate = 0.; maintenance_ratio = 0.;
-                      ratios = Array.make (Array.length engine_assets) 1. }
-            ~capital:!capital ~fill:!fill
+            ~margin:margin_config ~capital:!capital ~fill:!fill
         in
-        let gross = Array.make (Array.length (snd engine_assets.(0))) 0. in
-        Array.iter
-          (fun target ->
-            Array.iteri
-              (fun t value ->
-                gross.(t) <- gross.(t) +. Btlib.Engine.clamp_target value)
-              target)
-          strategy.targets;
-        (input.name, String.concat "+" labels, gross, result))
+        (input.name, String.concat "+" labels, result))
       inputs
   in
   let baseline_result =
@@ -348,25 +364,27 @@ let run argv =
         let costs =
           apply_cost_overrides defaults !fee_bps !tax_bps !slip_bps !min_fee
         in
+        let margin_config : Btlib.Engine.margin =
+          { financing_rate = !financing_rate /. 100.;
+            maintenance_ratio = !maintenance_ratio /. 100.;
+            ratios = [| ratio_for symbol |] }
+        in
         Some
           (Btlib.Engine.run [| (market ^ "/" ^ symbol, bars) |]
              (baseline_strategy (Array.length bars)) [| costs |]
-             ~margin:{ Btlib.Engine.financing_rate = 0.; maintenance_ratio = 0.;
-                       ratios = Array.make 1 1. }
+             ~margin:margin_config
              ~capital:!capital ~fill:!fill)
   in
   let columns =
-    List.map (fun (name, _, _, result) -> name, result) runs
+    List.map (fun (name, _, result) -> name, result) runs
   in
   let stocks =
-    List.map (fun (name, stock, _, _) -> name, stock) runs
-  in
-  let targets =
-    List.map (fun (_, _, target, _) -> target) runs
+    List.map (fun (name, stock, _) -> name, stock) runs
   in
   let output_stem = Btlib.Report.stem ~names ~out_name:!out_name in
   Btlib.Report.print_many
-    ~columns ~baseline:baseline_result ~fill:!fill ~stocks ~targets;
+    ~columns ~baseline:baseline_result ~fill:!fill ~stocks
+    ~financing_rate:!financing_rate;
   Btlib.Report.write_outputs
     ~out_dir:!out_dir ~stem:output_stem
     ~columns ~baseline:baseline_result;
