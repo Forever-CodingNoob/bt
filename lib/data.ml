@@ -530,10 +530,12 @@ let fetch_events ~token ~symbol ~to_ ~cache_path =
             List.iter (fun row -> output_string output (row ^ "\n")) rows);
         rewrite_rows ~header:"date,factor" ~rows_path ~cache_path)
 
-let fetch_stockinfo ~token ~cache_path =
+let fetch_stockinfo ~token ~symbol ~cache_path =
   with_temp ".json" (fun json_path ->
     let url =
-      "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo"
+      Printf.sprintf
+        "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo&data_id=%s"
+        (url_encode symbol)
     in
     let process_status, http_code = curl_get ~token ~url ~output:json_path in
     let keep reason =
@@ -556,7 +558,29 @@ let fetch_stockinfo ~token ~cache_path =
                 ".data[] | select(.type == \"twse\" or .type == \"tpex\") " ^
                 "| [.stock_id, .type, .date] | @csv")
               ~json_path ~rows_path;
-            rewrite_rows ~header:"stock_id,type,date" ~rows_path ~cache_path))
+            let new_rows = non_empty_lines rows_path in
+            let old_rows =
+              if Sys.file_exists cache_path then
+                List.filter
+                  (fun line ->
+                    match String.split_on_char ',' line with
+                    | stock_id :: _ -> unquote stock_id <> symbol
+                    | _ -> false)
+                  (List.tl (String.split_on_char '\n' (read_text cache_path)))
+              else []
+            in
+            with_temp ".merged" (fun merged_path ->
+              let output = open_out merged_path in
+              Fun.protect
+                ~finally:(fun () -> close_out output)
+                (fun () ->
+                  List.iter
+                    (fun row ->
+                      if String.trim row <> "" then
+                        output_string output (normalize_row row ^ "\n"))
+                    (old_rows @ new_rows));
+              rewrite_rows ~header:"stock_id,type,date"
+                ~rows_path:merged_path ~cache_path)))
 
 let fetch ~market ~symbol ~from_ ~to_ ~data_dir =
   let market = market_name market in
@@ -578,7 +602,7 @@ let fetch ~market ~symbol ~from_ ~to_ ~data_dir =
       ~cache_path:(Filename.concat directory (symbol ^ ".div.csv"));
     fetch_events ~token ~symbol ~to_
       ~cache_path:(Filename.concat directory (symbol ^ ".events.csv"));
-    fetch_stockinfo ~token
+    fetch_stockinfo ~token ~symbol
       ~cache_path:(Filename.concat directory "stockinfo.csv")
   end
 
