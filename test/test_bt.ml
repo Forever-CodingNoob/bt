@@ -1290,13 +1290,13 @@ let test_event_transform () =
   assert (
     Data.event_sources =
     [
-      ("TaiwanStockSplitPrice", "before_price", "after_price");
+      ("TaiwanStockSplitPrice", "before_price", "after_price", true);
       ("TaiwanStockCapitalReductionReferencePrice",
-       "ClosingPriceonTheLastTradingDay", "PostReductionReferencePrice");
-      ("TaiwanStockParValueChange", "before_close", "after_ref_close");
+       "ClosingPriceonTheLastTradingDay", "PostReductionReferencePrice", true);
+      ("TaiwanStockParValueChange", "before_close", "after_ref_close", false);
     ]);
   List.iter
-    (fun (_dataset, before, after) ->
+    (fun (_dataset, before, after, _use_data_id) ->
       let json =
         Printf.sprintf
           {|{"msg":"success","status":200,"data":[

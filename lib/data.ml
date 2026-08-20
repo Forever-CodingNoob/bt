@@ -159,6 +159,11 @@ let api_url ~dataset ~symbol ~from_ ~to_ =
     "https://api.finmindtrade.com/api/v4/data?dataset=%s&data_id=%s&start_date=%s&end_date=%s"
     (url_encode dataset) (url_encode symbol) (url_encode from_) (url_encode to_)
 
+let api_url_no_id ~dataset ~from_ ~to_ =
+  Printf.sprintf
+    "https://api.finmindtrade.com/api/v4/data?dataset=%s&start_date=%s&end_date=%s"
+    (url_encode dataset) (url_encode from_) (url_encode to_)
+
 (* ponytail: curl+jq pipeline; native HTTP+JSON client if fetch ever needs to be self-contained *)
 let curl_get ~token ~url ~output =
   (* the header travels in a 0600 temp file so the token never shows in argv *)
@@ -471,10 +476,10 @@ let event_expression ~before ~after =
   " | tonumber))] | @csv"
 
 let event_sources = [
-  "TaiwanStockSplitPrice", "before_price", "after_price";
+  "TaiwanStockSplitPrice", "before_price", "after_price", true;
   "TaiwanStockCapitalReductionReferencePrice",
-    "ClosingPriceonTheLastTradingDay", "PostReductionReferencePrice";
-  "TaiwanStockParValueChange", "before_close", "after_ref_close";
+    "ClosingPriceonTheLastTradingDay", "PostReductionReferencePrice", true;
+  "TaiwanStockParValueChange", "before_close", "after_ref_close", false;
 ]
 
 let non_empty_lines path =
@@ -490,9 +495,12 @@ let fetch_events ~token ~symbol ~to_ ~cache_path =
       (if Sys.file_exists cache_path then "keeping cached event data"
        else "prices will be unadjusted for splits/reductions")
   in
-  let fetch_one (dataset, before, after) =
+  let fetch_one (dataset, before, after, use_data_id) =
     with_temp ".json" (fun json_path ->
-      let url = api_url ~dataset ~symbol ~from_:"1900-01-01" ~to_ in
+      let url =
+        if use_data_id then api_url ~dataset ~symbol ~from_:"1900-01-01" ~to_
+        else api_url_no_id ~dataset ~from_:"1900-01-01" ~to_
+      in
       let process_status, http_code = curl_get ~token ~url ~output:json_path in
       if not (process_ok process_status) || http_code <> "200" then begin
         keep
