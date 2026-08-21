@@ -542,7 +542,8 @@ let test_engine_zero_value_exit_clears_loan () =
    | None -> assert false)
 
 let test_engine_buyhold_costs () =
-  (* The entry uses the five-pass E1 solve; the last close force-closes. *)
+  (* Entry solves E1 = E0 - fee * E1, so E1 = E0 / (1 + fee).
+     The last close force-closes the position. *)
   let bars =
     [| bar "2020-01-01" 100. 100.; bar "2020-01-02" 100. 110. |]
   in
@@ -554,11 +555,7 @@ let test_engine_buyhold_costs () =
   in
   let fee = 0.01 in
   let entry_e0 = 1. in
-  let e1_1 = entry_e0 -. fee *. entry_e0 in
-  let e1_2 = entry_e0 -. fee *. e1_1 in
-  let e1_3 = entry_e0 -. fee *. e1_2 in
-  let e1_4 = entry_e0 -. fee *. e1_3 in
-  let entry_e1 = entry_e0 -. fee *. e1_4 in
+  let entry_e1 = entry_e0 /. (1. +. fee) in
   let entry_cost = fee *. entry_e1 in
   let entry_equity = entry_e0 -. entry_cost in
   let entry_cash = entry_equity -. entry_e1 in
@@ -621,6 +618,10 @@ let test_engine_close_costs () =
   let result =
     run_single fill_bars target costs ~capital:None ~fill:Engine.Close_same
   in
+  (match result.fills with
+   | entry :: _ ->
+       assert_close ~tolerance:1e-12 1. entry.Engine.to_e
+   | [] -> assert false);
   (* Entry solves E1 = 1 - fee * E1. The position then drifts to
      112/104 of its entry value, and liquidation costs 1% of that value. *)
   let fee = 0.01 in
@@ -1731,61 +1732,12 @@ let test_e1_scale_in () =
       { Engine.targets = [| [| 1.5; 2.0; 2.0 |] |] }
       [| zero_costs |] ~margin ~capital:None ~fill:Engine.Close_same
   in
-  (* Bar 0: E1=1, v=1.5, cash=-0.5, loan=0.5.
-     Bar 1: E1=1, trade=0.5 (buy), shortfall = 0.5 - (-0.5) = 1.0?
-     No: cash is -0.5 from prior bar, total buy = 0.5.
-     shortfall = max(0, 0.5 - (-0.5)) = 1.0, capacity = 0.5*0.6 = 0.3.
-     But shortfall > capacity violates the invariant...
-     Actually: cash_available after sells = -0.5 (no sells on this bar).
-     total_buy = 2.0*1.0 - 1.5 = 0.5 (the value increase).
-     shortfall = max(0, 0.5 - (-0.5)) = 1.0.
-     The initial-margin cap should have prevented this...
-     effective at t=1: target 2.0, need = 2.0*0.4 = 0.8 < 1, no clamp.
-     But the shortfall exceeds capacity. This means the shortfall formula
-     must account for existing loans being repaid through the total
-     cash position. The spec says shortfall = max(0, total_buy - cash).
-     With cash = -0.5, shortfall = 1.0, but only 0.5 of new value needs
-     financing. The existing -0.5 cash IS the prior loan.
-
-     The correct approach: the E1 solve handles this naturally. After the
-     solve, final_value = 2.0 * E1 = 2.0, trade = 0.5 (buy). The buy
-     pass sees cash_after_sells = -0.5 (no sells), shortfall = 0.5-(-0.5)
-     = 1.0. But this shortfall includes the pre-existing deficit. The
-     NEW loan delta should only be for the new borrowing: 0.5 * 0.6 = 0.3.
-     Total loan after: 0.5 + 0.3 = 0.8.
-
-     Hmm, this is the same double-counting bug. The shortfall formula
-     doesn't work when cash is already negative.
-
-     The fix: shortfall = max(0, total_buy + total_cost - cash_freed_by_sells).
-     cash_freed_by_sells is only the sell proceeds, NOT the pre-existing cash.
-     Or: new_cash_needed = sum(buy costs + buy values) - sell_proceeds.
-     loan_delta_total = max(0, new_cash_needed).
-
-     Actually, the E1 solve already determines the final cash:
-     cash_after = E1 * (1 - T). At T=2.0: cash_after = -E1.
-     The total loan at the end should cover the deficit:
-     total_loan = max(0, -cash_after) = E1.
-     But the existing loan from bar 0 is 0.5. So the new loan delta
-     is E1 - 0.5 = 0.5. That's the incremental borrowing.
-
-     The correct shortfall for loan allocation is:
-     needed_total_loan = max(0, -(E1 * (1 - T)))
-     loan_delta = needed_total_loan - sum(existing_loans)
-     Distribute loan_delta across buying assets by capacity.
-
-     At bar 1: needed = E1 = 1.0. existing = 0.5. delta = 0.5.
-     capacity = 0.5 * 0.6 = 0.3. loan_allocated = 0.5 * 0.3/0.3 = 0.5.
-     Wait, that gives 0.5 not 0.3. The capacity formula gives the
-     proportion, not the amount. If only one buy: loan_delta = 0.5.
-     loan = 0.5 + 0.5 = 1.0.
-     Maintenance = 2.0 / 1.0 = 2.0. *)
+  (* Bar 0: trade = 1.5, needed loan = 0.5, capacity = 0.9, so loan = 0.5.
+     Bar 1: trade = 0.5, needed delta = 0.5, capacity = 0.3, so the clamp
+     lends 0.3. Total loan = 0.8 and maintenance = 2.0 / 0.8 = 2.5. *)
   assert_close ~tolerance:1e-12 1.0 (final_equity result);
-  (* total loan should be 1.0 (not the double-counted 1.5 from the
-     old code, and not the 0.8 from a capacity-weighted formula).
-     The correct amount: E1*(T-1) = 1.0. *)
   (match result.margin_stats.Engine.min_maintenance with
-   | Some ratio -> assert_close ~tolerance:1e-12 2.0 ratio
+   | Some ratio -> assert_close ~tolerance:1e-12 2.5 ratio
    | None -> assert false)
 
 let test_e1_drift_reversal () =

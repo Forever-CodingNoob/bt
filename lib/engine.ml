@@ -239,7 +239,11 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
     if e0 <= 0. then () else begin
       (* E1 iterative solve *)
       let e1 = ref e0 in
-      for _ = 1 to 5 do
+      let converged = ref false in
+      let iteration = ref 0 in
+      while not !converged && !iteration < 20 do
+        incr iteration;
+        let e1_prev = !e1 in
         let total_cost = ref 0. in
         for index = 0 to asset_count - 1 do
           if eff.(index) <> prev_eff.(index) then begin
@@ -256,7 +260,9 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
             end
           end
         done;
-        e1 := e0 -. !total_cost
+        e1 := e0 -. !total_cost;
+        if abs_float (!e1 -. e1_prev) <= 1e-15 *. abs_float e0 then
+          converged := true
       done;
       let e1 = !e1 in
       let equity_basis = abs_float e1 in
@@ -269,7 +275,7 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
           in
           let trade = final_v -. values.(index) in
           let from_e = values.(index) /. e0 in
-          let to_e = if changed then eff.(index) *. e1 /. e0 else from_e in
+          let to_e = if changed then eff.(index) else from_e in
           let cost =
             if not changed || trade = 0. then 0.
             else begin
@@ -351,6 +357,9 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
               if !total_capacity > 0. && loan_delta_total > 0. then
                 loan_delta_total *. (trade *. margin.ratios.(index)) /. !total_capacity
               else 0.
+            in
+            let loan_delta =
+              Float.min loan_delta (trade *. margin.ratios.(index))
             in
             loans.(index) <- loans.(index) +. loan_delta;
             values.(index) <- final_v;
