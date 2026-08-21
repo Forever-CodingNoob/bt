@@ -125,7 +125,7 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
   let equity () =
     !cash +. Array.fold_left ( +. ) 0. values
   in
-  let trade index ~date ~price ~desired =
+  let trade index ~date ~price ~desired ?(loan_delta = 0.) () =
     let equity_now = equity () in
     let old_value = values.(index) in
     let from_e = values.(index) /. equity_now in
@@ -153,14 +153,10 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
       values.(index) <- new_value;
       cash := equity_after -. Array.fold_left ( +. ) 0. values;
       if new_value = 0. then loans.(index) <- 0.
-      else if new_value > old_value then begin
-        if !cash < 0. || loans.(index) > 0. then
-          loans.(index) <-
-            loans.(index)
-            +. (new_value -. old_value) *. margin.ratios.(index)
-      end
       else if new_value < old_value && old_value > 0. then
-        loans.(index) <- loans.(index) *. new_value /. old_value;
+        loans.(index) <- loans.(index) *. new_value /. old_value
+      else
+        loans.(index) <- loans.(index) +. loan_delta;
       fills :=
         { date; stock = fst assets.(index); price;
           from_e; to_e = desired } :: !fills;
@@ -264,10 +260,60 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
   in
   let apply_fills ~date ~eff ~clamped price_at =
     if clamped then incr clamps;
+    (* pass 1: sells *)
     for index = 0 to asset_count - 1 do
-      if eff.(index) <> prev_eff.(index) then
-        trade index ~date ~price:(price_at index) ~desired:eff.(index)
+      if eff.(index) < prev_eff.(index) then
+        trade index ~date ~price:(price_at index) ~desired:eff.(index) ()
     done;
+    (* pass 2: buys with joint loan allocation *)
+    let buys = ref [] in
+    for index = asset_count - 1 downto 0 do
+      if eff.(index) > prev_eff.(index) then
+        buys := index :: !buys
+    done;
+    if !buys <> [] then begin
+      (* Pre-buy equity estimates cost-adjusted buy values. Sequential
+         fills can differ slightly with costs, but loan shares are stable. *)
+      let equity_before = equity () in
+      let buy_values =
+        List.map
+          (fun index ->
+            let from_e = values.(index) /. equity_before in
+            let delta = eff.(index) -. from_e in
+            let cost = charge index ~equity_before ~delta in
+            let equity_after = equity_before *. (1. -. cost) in
+            let new_value = eff.(index) *. equity_after in
+            let increase = new_value -. values.(index) in
+            (index, Float.max 0. increase))
+          !buys
+      in
+      let total_buy =
+        List.fold_left (fun acc (_, v) -> acc +. v) 0. buy_values
+      in
+      let cash_available = !cash in
+      let shortfall = Float.max 0. (total_buy -. cash_available) in
+      let loan_deltas =
+        if shortfall <= 0. then
+          List.map (fun (index, _) -> (index, 0.)) buy_values
+        else begin
+          let total_capacity =
+            List.fold_left
+              (fun acc (index, v) -> acc +. v *. margin.ratios.(index))
+              0. buy_values
+          in
+          List.map
+            (fun (index, v) ->
+              let capacity = v *. margin.ratios.(index) in
+              (index, shortfall *. capacity /. total_capacity))
+            buy_values
+        end
+      in
+      List.iter
+        (fun (index, loan_delta) ->
+          trade index ~date ~price:(price_at index)
+            ~desired:eff.(index) ~loan_delta ())
+        loan_deltas
+    end;
     Array.blit eff 0 prev_eff 0 asset_count;
     if equity () <= 0.
        && not (Array.exists (fun value -> value > 0.) values)
