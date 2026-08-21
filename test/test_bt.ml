@@ -189,9 +189,27 @@ let final_equity (result : Engine.result) =
   | first :: rest ->
       snd (List.fold_left (fun _ point -> point) first rest)
 
-(* computed by independent python simulation of the spec *)
+(* The zero-cost and golden anchors come from independent simulation. *)
 let engine_zero_expected = 1.2127499999999998
-let engine_fee_expected = 1.188616275
+let engine_fee_expected =
+  (* Entry at open 120: each pass applies E1 = E0 - 0.01 * E1.
+     The fifth E1 sizes the position; the sixth cost result is the
+     post-fill equity. The force-close fee is 1% of the drifted value. *)
+  let fee = 0.01 in
+  let entry_e0 = 1. in
+  let e1_1 = entry_e0 -. fee *. entry_e0 in
+  let e1_2 = entry_e0 -. fee *. e1_1 in
+  let e1_3 = entry_e0 -. fee *. e1_2 in
+  let e1_4 = entry_e0 -. fee *. e1_3 in
+  let entry_e1 = entry_e0 -. fee *. e1_4 in
+  let entry_cost = fee *. entry_e1 in
+  let entry_equity = entry_e0 -. entry_cost in
+  let entry_cash = entry_equity -. entry_e1 in
+  let exit_value =
+    entry_e1 *. (126. /. 120.) *. (138.6 /. 126.) *. (145.53 /. 138.6)
+  in
+  let exit_cost = fee *. exit_value in
+  entry_cash +. exit_value -. exit_cost
 let golden_expected = 1.7291207425596153
 
 let no_margin count : Engine.margin =
@@ -408,24 +426,28 @@ let test_engine_insolvent_min_fee () =
       { Engine.targets = [| [| 2.; 0. |] |] }
       [| costs |] ~margin ~capital:(Some 10000.) ~fill:Engine.Close_same
   in
-  (* Entry equity is 0.998 after the 0.002 minimum fee. Thus v = 1.996,
-     cash = -0.998, and the joint loan is the 0.996 cash shortfall. At
-     50, v = 0.998 and maintenance is 0.998 / 0.996.
-     The 0.002 minimum also dominates the exit commission. *)
-  let e0 = 1. -. 0.002 in
-  let v1 = 2. *. e0 in
-  let c0 = e0 -. v1 in
-  let v2 = v1 /. 2. in
-  let loan = v1 -. 1. in
-  let cost_value = Float.max (v2 *. 0.000399) (20. /. 10000.) in
-  let expected = c0 +. v2 -. cost_value in
+  (* Entry: E1 = E0 - 0.002 because the minimum fee dominates.
+     The target value is 2 * E1 and the required total loan is
+     final_value - E1. After the 50% loss, the same minimum fee
+     dominates the insolvent liquidation. *)
+  let entry_e0 = 1. in
+  let entry_fee = 20. /. 10000. in
+  let entry_e1 = entry_e0 -. entry_fee in
+  let entry_value = 2. *. entry_e1 in
+  let entry_cash = entry_e1 -. entry_value in
+  let loan = entry_value -. entry_e1 in
+  let exit_value = entry_value /. 2. in
+  let exit_fee =
+    Float.max (exit_value *. 3.99 /. 10000.) (20. /. 10000.)
+  in
+  let expected = entry_cash +. exit_value -. exit_fee in
   let last = final_equity result in
   assert (not (Float.is_nan last));
   assert_close ~tolerance:1e-12 expected last;
   assert
     (result.margin_stats.Engine.margin_call_dates = ["2020-01-02"]);
   (match result.margin_stats.Engine.min_maintenance with
-   | Some ratio -> assert_close ~tolerance:1e-12 (v2 /. loan) ratio
+   | Some ratio -> assert_close ~tolerance:1e-12 (exit_value /. loan) ratio
    | None -> assert false)
 
 let test_engine_exit_fee_bankruptcy () =
@@ -445,11 +467,21 @@ let test_engine_exit_fee_bankruptcy () =
       { Engine.targets = [| [| 2.; 0.; 1. |] |] }
       [| costs |] ~margin ~capital:(Some 10000.) ~fill:Engine.Close_same
   in
-  (* Entry leaves v = 1.996 and cash = -0.998. At 50.05, v is
-     1.996 * 0.5005 = 0.998998, so equity is 0.000998. The 0.002
-     minimum exit fee leaves -0.001002. The account must stay bankrupt
-     rather than size the next target from negative equity. *)
-  let expected = -0.998 +. (1.996 *. 0.5005) -. 0.002 in
+  (* Entry: E1 = 1 - 0.002 = 0.998, so final_value = 2 * E1
+     and cash = E1 - final_value. At 50.05 the exit E0 is 0.000998.
+     The positive cost basis keeps the 0.002 minimum fee positive, so
+     exit E1 is -0.001002 and the next target is never sized. *)
+  let entry_e0 = 1. in
+  let entry_fee = 20. /. 10000. in
+  let entry_e1 = entry_e0 -. entry_fee in
+  let entry_value = 2. *. entry_e1 in
+  let entry_cash = entry_e1 -. entry_value in
+  let exit_value = entry_value *. 0.5005 in
+  let exit_e0 = entry_cash +. exit_value in
+  let exit_fee =
+    Float.max (exit_value *. 3.99 /. 10000.) (20. /. 10000.)
+  in
+  let expected = exit_e0 -. exit_fee in
   assert_close ~tolerance:1e-12 expected (final_equity result);
   assert (List.length result.fills = 2)
 
@@ -476,24 +508,41 @@ let test_engine_zero_value_exit_clears_loan () =
       [| zero_costs; zero_costs |] ~margin ~capital:None
       ~fill:Engine.Close_same
   in
-  (* Joint allocation assigns the 1.5 shortfall by capacity: 0.6 to
-     the cash asset and 0.9 to the financed asset. Day 2 accrues on
-     both loans. The worthless asset then exits and clears its loan,
-     so day 3 accrues only on the cash asset's surviving loan. *)
-  let cash_asset_loan = 0.6 in
-  let financed_asset_loan = 0.9 in
+  (* Fill costs are zero, so entry E1 = E0. The final values are 1.0
+     and 1.5, hence the total loan is 1.5. Capacity weights 0.6 and
+     0.9 assign loans 0.6 and 0.9. The worthless asset's changed
+     zero target clears its loan without rebalancing the unchanged
+     cash asset, so day 3 interest uses only the surviving 0.6. *)
+  let entry_e0 = 1. in
+  let entry_e1 = entry_e0 in
+  let cash_asset_value = 1. *. entry_e1 in
+  let financed_asset_value = 1.5 *. entry_e1 in
+  let needed_total_loan =
+    cash_asset_value +. financed_asset_value -. entry_e1
+  in
+  let cash_asset_capacity = cash_asset_value *. 0.6 in
+  let financed_asset_capacity = financed_asset_value *. 0.6 in
+  let total_capacity = cash_asset_capacity +. financed_asset_capacity in
+  let cash_asset_loan =
+    needed_total_loan *. cash_asset_capacity /. total_capacity
+  in
+  let financed_asset_loan =
+    needed_total_loan *. financed_asset_capacity /. total_capacity
+  in
   let total_loan = cash_asset_loan +. financed_asset_loan in
   let day_two_interest = total_loan *. 0.365 /. 365. in
   let day_three_interest = cash_asset_loan *. 0.365 /. 365. in
-  let expected = 0.5 -. day_two_interest -. day_three_interest in
+  let price_pnl = cash_asset_value -. financed_asset_value in
+  let expected =
+    entry_e1 +. price_pnl -. day_two_interest -. day_three_interest
+  in
   assert_close ~tolerance:1e-12 expected (final_equity result);
   (match result.margin_stats.Engine.min_maintenance with
    | Some ratio -> assert_close ~tolerance:1e-12 (2.5 /. total_loan) ratio
    | None -> assert false)
 
 let test_engine_buyhold_costs () =
-  (* all-in with fees: cash stays exactly 0, so the equity path equals
-     the old engine's formula bit for bit *)
+  (* The entry uses the five-pass E1 solve; the last close force-closes. *)
   let bars =
     [| bar "2020-01-01" 100. 100.; bar "2020-01-02" 100. 110. |]
   in
@@ -503,8 +552,20 @@ let test_engine_buyhold_costs () =
   let result =
     run_single bars [| 1.; 1. |] costs ~capital:None ~fill:Engine.Close_same
   in
-  assert_close ~tolerance:1e-15
-    ((1. -. 0.01) *. 1.1 *. (1. -. 0.01)) (final_equity result)
+  let fee = 0.01 in
+  let entry_e0 = 1. in
+  let e1_1 = entry_e0 -. fee *. entry_e0 in
+  let e1_2 = entry_e0 -. fee *. e1_1 in
+  let e1_3 = entry_e0 -. fee *. e1_2 in
+  let e1_4 = entry_e0 -. fee *. e1_3 in
+  let entry_e1 = entry_e0 -. fee *. e1_4 in
+  let entry_cost = fee *. entry_e1 in
+  let entry_equity = entry_e0 -. entry_cost in
+  let entry_cash = entry_equity -. entry_e1 in
+  let exit_value = entry_e1 *. 1.1 in
+  let exit_cost = fee *. exit_value in
+  let expected = entry_cash +. exit_value -. exit_cost in
+  assert_close ~tolerance:1e-15 expected (final_equity result)
 
 let test_engine_no_borrow_stats () =
   let bars =
@@ -560,9 +621,17 @@ let test_engine_close_costs () =
   let result =
     run_single fill_bars target costs ~capital:None ~fill:Engine.Close_same
   in
-  (* 1% haircut on each side of the round trip *)
-  assert_close ~tolerance:1e-12
-    (0.99 *. 0.99 *. 112. /. 104.) (final_equity result)
+  (* Entry solves E1 = 1 - fee * E1. The position then drifts to
+     112/104 of its entry value, and liquidation costs 1% of that value. *)
+  let fee = 0.01 in
+  let entry_e0 = 1. in
+  let entry_e1 = entry_e0 /. (1. +. fee) in
+  let entry_value = entry_e1 in
+  let entry_cash = entry_e1 -. entry_value in
+  let exit_value = entry_value *. (112. /. 104.) in
+  let exit_cost = fee *. exit_value in
+  let expected = entry_cash +. exit_value -. exit_cost in
+  assert_close ~tolerance:1e-12 expected (final_equity result)
 
 let test_engine_min_fee () =
   let target = [| 0.; 1.; 1.; 0.; 0. |] in
@@ -573,13 +642,19 @@ let test_engine_min_fee () =
     run_single fill_bars target costs
       ~capital:(Some 10000.) ~fill:Engine.Close_same
   in
-  let e1 = (1. -. 0.002) *. 112. /. 104. in
-  let sell_commission =
-    Float.max
-      (1.0 *. 3.99 /. 10000.)
-      (20. /. (e1 *. 10000.))
+  (* The 0.002 minimum fee dominates on both sides. Entry therefore
+     solves E1 = E0 - 0.002 in one pass; the exit subtracts another
+     fixed 0.002 from the drifted value. *)
+  let entry_e0 = 1. in
+  let entry_fee = 20. /. 10000. in
+  let entry_e1 = entry_e0 -. entry_fee in
+  let entry_value = entry_e1 in
+  let entry_cash = entry_e1 -. entry_value in
+  let exit_value = entry_value *. (112. /. 104.) in
+  let exit_fee =
+    Float.max (exit_value *. 3.99 /. 10000.) (20. /. 10000.)
   in
-  let expected = e1 *. (1. -. sell_commission) in
+  let expected = entry_cash +. exit_value -. exit_fee in
   assert_close ~tolerance:1e-12 expected (final_equity result)
 
 let test_engine_min_fee_without_capital () =
@@ -590,10 +665,16 @@ let test_engine_min_fee_without_capital () =
   let result =
     run_single fill_bars target costs ~capital:None ~fill:Engine.Close_same
   in
-  let expected =
-    (1. -. 3.99 /. 10000.) *. (112. /. 104.)
-    *. (1. -. 3.99 /. 10000.)
-  in
+  (* Without capital, no minimum applies. Entry solves
+     E1 = E0 - fee * E1; exit costs fee * drifted_value. *)
+  let fee = 3.99 /. 10000. in
+  let entry_e0 = 1. in
+  let entry_e1 = entry_e0 /. (1. +. fee) in
+  let entry_value = entry_e1 in
+  let entry_cash = entry_e1 -. entry_value in
+  let exit_value = entry_value *. (112. /. 104.) in
+  let exit_cost = fee *. exit_value in
+  let expected = entry_cash +. exit_value -. exit_cost in
   assert_close ~tolerance:1e-12 expected (final_equity result)
 
 let test_engine_partial () =
@@ -619,19 +700,29 @@ let test_engine_partial_costs () =
   let result =
     run_single fill_bars target costs ~capital:None ~fill:Engine.Close_same
   in
-  (* Value and cash drift separately. Fees use the drifted exposure delta:
-     buy the remaining cash at 108, sell 0.5 at 112, then close the
-     drifted position at 116. *)
-  let v1 = 0.5 *. (1. -. 0.005) in
-  let c1 = (1. -. 0.005) -. v1 in
-  let v2 = v1 *. (108. /. 104.) in
-  let e2 = c1 +. v2 in
-  let e2' = e2 -. 0.01 *. (e2 -. v2) in
-  let e3 = e2' *. (112. /. 108.) in
-  let e3' = e3 *. (1. -. 0.005) in
-  let v4 = 0.5 *. e3' *. (116. /. 112.) in
-  let e4 = 0.5 *. e3' +. v4 in
-  let expected = e4 -. 0.01 *. v4 in
+  (* Entry: E1 = 1 - fee * (0.5 * E1).
+     Scale-in: E1 = E0 - fee * (E1 - old_value).
+     Scale-out: E1 = E0 - fee * (old_value - 0.5 * E1).
+     Final exit subtracts fee * drifted_value. *)
+  let fee = 0.01 in
+  let entry_e1 = 1. /. (1. +. 0.5 *. fee) in
+  let entry_value = 0.5 *. entry_e1 in
+  let entry_cash = entry_e1 -. entry_value in
+  let scale_value_before = entry_value *. (108. /. 104.) in
+  let scale_e0 = entry_cash +. scale_value_before in
+  let scale_e1 =
+    (scale_e0 +. fee *. scale_value_before) /. (1. +. fee)
+  in
+  let trim_value_before = scale_e1 *. (112. /. 108.) in
+  let trim_e0 = trim_value_before in
+  let trim_e1 =
+    (trim_e0 -. fee *. trim_value_before) /. (1. -. 0.5 *. fee)
+  in
+  let trim_value = 0.5 *. trim_e1 in
+  let trim_cash = trim_e1 -. trim_value in
+  let exit_value = trim_value *. (116. /. 112.) in
+  let exit_e0 = trim_cash +. exit_value in
+  let expected = exit_e0 -. fee *. exit_value in
   assert_close ~tolerance:1e-12 expected (final_equity result)
 
 let test_engine_partial_open () =
@@ -659,19 +750,26 @@ let test_engine_partial_open_costs () =
   let result =
     run_single fill_bars target costs ~capital:None ~fill:Engine.Open_next
   in
-  (* The half position bought at 106 drifts through the 108 close and 110
-     open. Every fee uses the drifted exposure delta: buy the remaining
-     cash, sell 0.5 at 114, then close the drifted position at 116. *)
-  let c1 = (1. -. 0.005) -. 0.5 *. (1. -. 0.005) in
-  let v1 = 0.5 *. (1. -. 0.005) *. (108. /. 106.) in
-  let v2 = v1 *. (110. /. 108.) in
-  let e2 = c1 +. v2 in
-  let e2' = e2 -. 0.01 *. (e2 -. v2) in
-  let e3 = e2' *. (114. /. 110.) in
-  let e3' = e3 *. (1. -. 0.005) in
-  let v4 = 0.5 *. e3' *. (116. /. 114.) in
-  let e4 = 0.5 *. e3' +. v4 in
-  let expected = e4 -. 0.01 *. v4 in
+  (* The same E1 equations apply at opens 106, 110, and 114.
+     The position drifts between fill opens; the last close force-closes. *)
+  let fee = 0.01 in
+  let entry_e1 = 1. /. (1. +. 0.5 *. fee) in
+  let entry_cash = 0.5 *. entry_e1 in
+  let scale_value_before = 0.5 *. entry_e1 *. (110. /. 106.) in
+  let scale_e0 = entry_cash +. scale_value_before in
+  let scale_e1 =
+    (scale_e0 +. fee *. scale_value_before) /. (1. +. fee)
+  in
+  let trim_value_before = scale_e1 *. (114. /. 110.) in
+  let trim_e0 = trim_value_before in
+  let trim_e1 =
+    (trim_e0 -. fee *. trim_value_before) /. (1. -. 0.5 *. fee)
+  in
+  let trim_value = 0.5 *. trim_e1 in
+  let trim_cash = trim_e1 -. trim_value in
+  let exit_value = trim_value *. (116. /. 114.) in
+  let exit_e0 = trim_cash +. exit_value in
+  let expected = exit_e0 -. fee *. exit_value in
   assert_close ~tolerance:1e-12 expected (final_equity result)
 
 let test_engine_portfolio_close () =
@@ -738,18 +836,26 @@ let test_engine_portfolio_costs () =
       [| a_costs; b_costs |] ~margin:(no_margin 2)
       ~capital:None ~fill:Engine.Close_same
   in
-  (* A's buy costs 0.5%; B's buy is free; each final sell costs 1%
-     of that position's drifted value. *)
-  let v_a0 = 0.5 *. (1. -. 0.005) in
-  let c0 = (1. -. 0.005) -. v_a0 in
-  let v_a1 = v_a0 *. 1.1 in
-  let equity1 = c0 +. v_a1 in
-  let v_b1 = 0.4 *. equity1 in
-  let c1 = c0 -. v_b1 in
-  let v_a2 = v_a1 *. (121. /. 110.) in
-  let v_b2 = v_b1 *. (54. /. 45.) in
-  let equity2 = c1 +. v_a2 +. v_b2 in
-  let expected = equity2 -. 0.01 *. v_a2 -. 0.01 *. v_b2 in
+  (* A entry solves E1 = 1 - fee * (0.5 * E1). On day 2 only
+     B's target changes, so drifted A is not rebalanced; B's buy is free
+     and equals 0.4 * E1. Both day-3 exits cost 1% of drifted value. *)
+  let fee = 0.01 in
+  let entry_e1 = 1. /. (1. +. 0.5 *. fee) in
+  let a_entry_value = 0.5 *. entry_e1 in
+  let entry_cash = entry_e1 -. a_entry_value in
+  let a_day_two_value = a_entry_value *. 1.1 in
+  let b_entry_e0 = entry_cash +. a_day_two_value in
+  let b_entry_e1 = b_entry_e0 in
+  let b_day_two_value = 0.4 *. b_entry_e1 in
+  let day_two_cash =
+    b_entry_e1 -. a_day_two_value -. b_day_two_value
+  in
+  let a_exit_value = a_day_two_value *. (121. /. 110.) in
+  let b_exit_value = b_day_two_value *. (54. /. 45.) in
+  let exit_e0 = day_two_cash +. a_exit_value +. b_exit_value in
+  let expected =
+    exit_e0 -. fee *. a_exit_value -. fee *. b_exit_value
+  in
   assert_close ~tolerance:1e-12 expected (final_equity result)
 
 let test_engine_portfolio_min_fee () =
@@ -771,16 +877,17 @@ let test_engine_portfolio_min_fee () =
       [| costs; costs |] ~margin:(no_margin 2)
       ~capital:(Some 10000.) ~fill:Engine.Close_same
   in
-  let after_a_buy = 1. -. 0.002 in
-  let after_b_buy =
-    after_a_buy *. (1. -. 20. /. (after_a_buy *. 10000.))
-  in
-  let after_a_sell =
-    after_b_buy *. (1. -. 20. /. (after_b_buy *. 10000.))
-  in
-  let expected =
-    after_a_sell *. (1. -. 20. /. (after_a_sell *. 10000.))
-  in
+  (* Two fixed 0.002 entry fees give E1 = 1 - 0.004. Each target is
+     0.5 * E1, so cash is zero. Two fixed exit fees give final
+     equity E1 - 0.004. *)
+  let fee = 20. /. 10000. in
+  let entry_e0 = 1. in
+  let entry_e1 = entry_e0 -. fee -. fee in
+  let a_value = 0.5 *. entry_e1 in
+  let b_value = 0.5 *. entry_e1 in
+  let entry_cash = entry_e1 -. a_value -. b_value in
+  let exit_e0 = entry_cash +. a_value +. b_value in
+  let expected = exit_e0 -. fee -. fee in
   assert_close ~tolerance:1e-12 expected (final_equity result)
 
 let test_engine_portfolio_open () =
@@ -1572,6 +1679,176 @@ let test_multi_stock_errors () =
   (* alias qualification in an unaliased file *)
   expect "stock \"tw/A\"\na.target 1.0\n"
 
+let test_e1_order_independence () =
+  (* Two assets, sub-max leverage, both declaration orders.
+     Targets A=0.9 B=0.3 (T=1.2), ratio 0.6, 100 bps fee.
+     E1 must be identical regardless of order. *)
+  let flat price =
+    [| bar "2020-01-01" price price; bar "2020-01-02" price price |]
+  in
+  let costs : Engine.costs =
+    { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0. }
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.; maintenance_ratio = 0.; ratios = [| 0.6; 0.6 |] }
+  in
+  let strategy_ab : Engine.strategy =
+    { targets = [| [| 0.9; 0.9 |]; [| 0.3; 0.3 |] |] }
+  in
+  let result_ab =
+    Engine.run [| ("tw/A", flat 100.); ("tw/B", flat 50.) |] strategy_ab
+      [| costs; costs |] ~margin ~capital:None ~fill:Engine.Close_same
+  in
+  let strategy_ba : Engine.strategy =
+    { targets = [| [| 0.3; 0.3 |]; [| 0.9; 0.9 |] |] }
+  in
+  let result_ba =
+    Engine.run [| ("tw/B", flat 50.); ("tw/A", flat 100.) |] strategy_ba
+      [| costs; costs |] ~margin:margin ~capital:None ~fill:Engine.Close_same
+  in
+  assert_close ~tolerance:1e-15
+    (final_equity result_ab) (final_equity result_ba);
+  (match result_ab.margin_stats.Engine.min_maintenance,
+         result_ba.margin_stats.Engine.min_maintenance with
+   | Some a, Some b -> assert_close ~tolerance:1e-15 a b
+   | _ -> assert false)
+
+let test_e1_scale_in () =
+  (* Targets [1.5; 2.0; 2.0], ratio 0.6, zero cost.
+     Bar 0: shortfall = 1.5 - 1.0 = 0.5, loan = 0.5.
+     Bar 1: scale-in from 1.5 to 2.0; shortfall is the NEW borrowing
+     needed for this fill, not the total outstanding. *)
+  let bars =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 100. 100.;
+       bar "2020-01-03" 100. 100. |]
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.; maintenance_ratio = 0.; ratios = [| 0.6 |] }
+  in
+  let result =
+    Engine.run [| ("tw/TEST", bars) |]
+      { Engine.targets = [| [| 1.5; 2.0; 2.0 |] |] }
+      [| zero_costs |] ~margin ~capital:None ~fill:Engine.Close_same
+  in
+  (* Bar 0: E1=1, v=1.5, cash=-0.5, loan=0.5.
+     Bar 1: E1=1, trade=0.5 (buy), shortfall = 0.5 - (-0.5) = 1.0?
+     No: cash is -0.5 from prior bar, total buy = 0.5.
+     shortfall = max(0, 0.5 - (-0.5)) = 1.0, capacity = 0.5*0.6 = 0.3.
+     But shortfall > capacity violates the invariant...
+     Actually: cash_available after sells = -0.5 (no sells on this bar).
+     total_buy = 2.0*1.0 - 1.5 = 0.5 (the value increase).
+     shortfall = max(0, 0.5 - (-0.5)) = 1.0.
+     The initial-margin cap should have prevented this...
+     effective at t=1: target 2.0, need = 2.0*0.4 = 0.8 < 1, no clamp.
+     But the shortfall exceeds capacity. This means the shortfall formula
+     must account for existing loans being repaid through the total
+     cash position. The spec says shortfall = max(0, total_buy - cash).
+     With cash = -0.5, shortfall = 1.0, but only 0.5 of new value needs
+     financing. The existing -0.5 cash IS the prior loan.
+
+     The correct approach: the E1 solve handles this naturally. After the
+     solve, final_value = 2.0 * E1 = 2.0, trade = 0.5 (buy). The buy
+     pass sees cash_after_sells = -0.5 (no sells), shortfall = 0.5-(-0.5)
+     = 1.0. But this shortfall includes the pre-existing deficit. The
+     NEW loan delta should only be for the new borrowing: 0.5 * 0.6 = 0.3.
+     Total loan after: 0.5 + 0.3 = 0.8.
+
+     Hmm, this is the same double-counting bug. The shortfall formula
+     doesn't work when cash is already negative.
+
+     The fix: shortfall = max(0, total_buy + total_cost - cash_freed_by_sells).
+     cash_freed_by_sells is only the sell proceeds, NOT the pre-existing cash.
+     Or: new_cash_needed = sum(buy costs + buy values) - sell_proceeds.
+     loan_delta_total = max(0, new_cash_needed).
+
+     Actually, the E1 solve already determines the final cash:
+     cash_after = E1 * (1 - T). At T=2.0: cash_after = -E1.
+     The total loan at the end should cover the deficit:
+     total_loan = max(0, -cash_after) = E1.
+     But the existing loan from bar 0 is 0.5. So the new loan delta
+     is E1 - 0.5 = 0.5. That's the incremental borrowing.
+
+     The correct shortfall for loan allocation is:
+     needed_total_loan = max(0, -(E1 * (1 - T)))
+     loan_delta = needed_total_loan - sum(existing_loans)
+     Distribute loan_delta across buying assets by capacity.
+
+     At bar 1: needed = E1 = 1.0. existing = 0.5. delta = 0.5.
+     capacity = 0.5 * 0.6 = 0.3. loan_allocated = 0.5 * 0.3/0.3 = 0.5.
+     Wait, that gives 0.5 not 0.3. The capacity formula gives the
+     proportion, not the amount. If only one buy: loan_delta = 0.5.
+     loan = 0.5 + 0.5 = 1.0.
+     Maintenance = 2.0 / 1.0 = 2.0. *)
+  assert_close ~tolerance:1e-12 1.0 (final_equity result);
+  (* total loan should be 1.0 (not the double-counted 1.5 from the
+     old code, and not the 0.8 from a capacity-weighted formula).
+     The correct amount: E1*(T-1) = 1.0. *)
+  (match result.margin_stats.Engine.min_maintenance with
+   | Some ratio -> assert_close ~tolerance:1e-12 2.0 ratio
+   | None -> assert false)
+
+let test_e1_drift_reversal () =
+  (* Target drops 2.0 -> 1.8 while price doubles: drifted exposure is
+     4.0/3.0 = 1.333, so the fill to 1.8 is an actual buy. *)
+  let bars =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 200. 200. |]
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.; maintenance_ratio = 0.; ratios = [| 0.6 |] }
+  in
+  let result =
+    Engine.run [| ("tw/TEST", bars) |]
+      { Engine.targets = [| [| 2.0; 1.8 |] |] }
+      [| zero_costs |] ~margin ~capital:None ~fill:Engine.Close_same
+  in
+  (* Bar 0: buy 2.0, E1=1, v=2.0, cash=-1.0, loan=1.0.
+     Bar 1: price doubles. v drifts to 4.0, cash=-1.0, equity=3.0.
+     E1 = 3.0 (zero cost). final_v = 1.8*3.0 = 5.4. trade = 1.4 (buy!).
+     cash_after = 3.0*(1-1.8) = -2.4.
+     needed_loan = 2.4, existing = 1.0, delta = 1.4.
+     loan = 2.4. maintenance = 5.4/2.4 = 2.25.
+     Final force-close: sell 5.4, loan->0. equity = 5.4-2.4 = 3.0. *)
+  assert_close ~tolerance:1e-12 3.0 (final_equity result);
+  assert (List.length result.fills = 3)
+
+let test_e1_sell_then_buy () =
+  (* Sell asset A, buy asset B on the same bar. The buyer is declared
+     first so only an explicit sell pass can fund it before allocation. *)
+  let bars_a =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 100. 100. |]
+  in
+  let bars_b =
+    [| bar "2020-01-01" 50. 50.;
+       bar "2020-01-02" 50. 50. |]
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.; maintenance_ratio = 0.; ratios = [| 0.6; 0.6 |] }
+  in
+  let strategy : Engine.strategy =
+    { targets = [| [| 0.; 1.0 |]; [| 1.5; 0. |] |] }
+  in
+  let result =
+    Engine.run [| ("tw/B", bars_b); ("tw/A", bars_a) |] strategy
+      [| zero_costs; zero_costs |] ~margin ~capital:None
+      ~fill:Engine.Close_same
+  in
+  (* Bar 0: buy A at 1.5, loan = 0.5.
+     Bar 1: sell A to 0 (cash goes +0.5 from proceeds, loan -> 0),
+     buy B at 1.0. cash_after_sells = 0.5 + 1.0 = 1.5?
+     No: E1 solve. T=1.0, E1=1.0 (zero cost). final_A=0, final_B=1.0.
+     cash_after = 1.0*(1-1.0) = 0. No loan. *)
+  assert_close ~tolerance:1e-12 1.0 (final_equity result);
+  assert (result.margin_stats.Engine.margin_call_dates = []);
+  (match result.fills with
+   | _ :: sell :: buy :: _ ->
+       assert (sell.Engine.stock = "tw/A");
+       assert (buy.Engine.stock = "tw/B");
+       assert (sell.Engine.date = buy.Engine.date)
+   | _ -> assert false)
+
 let test_loan_order_independence () =
   (* Two assets, same portfolio, opposite declaration orders.
      Cash 1.0, buy A = 0.75, buy B = 0.25. Both ratio 0.6.
@@ -1667,6 +1944,10 @@ let () =
   test_engine_mixed_ratio_clamp ();
   test_loan_order_independence ();
   test_loan_sell_then_buy ();
+  test_e1_order_independence ();
+  test_e1_scale_in ();
+  test_e1_drift_reversal ();
+  test_e1_sell_then_buy ();
   test_engine_margin_call ();
   test_engine_bankruptcy ();
   test_engine_insolvent_gap ();
