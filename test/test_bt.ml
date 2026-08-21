@@ -239,11 +239,18 @@ let test_engine_interest () =
       { Engine.targets = [| [| 2.; 2.; 2. |] |] }
       [| zero_costs |] ~margin ~capital:None ~fill:Engine.Close_same
   in
-  let expected =
-    2. -. (1. +. 0.0635 *. 3. /. 365.) *. (1. +. 0.0635 /. 365.)
-  in
+  (* The fixed loan is 2.0 * 0.6 = 1.2. Interest reduces cash from -1:
+     3-day interest = 1.2 * 0.0635 * 3 / 365, then one more day on
+     the same 1.2 principal. The flat position remains worth 2.0. *)
+  let loan = 2. *. 0.6 in
+  let weekend_interest = loan *. 0.0635 *. 3. /. 365. in
+  let one_day_interest = loan *. 0.0635 /. 365. in
+  let expected = 2. +. (-1. -. weekend_interest -. one_day_interest) in
   assert_close ~tolerance:1e-12 expected (final_equity result);
-  assert (result.margin_stats.Engine.margin_call_dates = [])
+  assert (result.margin_stats.Engine.margin_call_dates = []);
+  (match result.margin_stats.Engine.min_maintenance with
+   | Some ratio -> assert_close ~tolerance:1e-12 (1. /. 0.6) ratio
+   | None -> assert false)
 
 let test_engine_initial_margin_clamp () =
   (* requested 3x on a 60% ratio scales to 2.5x once *)
@@ -356,9 +363,10 @@ let test_engine_bankruptcy () =
    | _ -> assert false)
 
 let test_engine_insolvent_gap () =
-  (* buy 2.0 at 100: v = 2, cash = -1. At 50, v = 1 and equity is
-     exactly 0, so the close-price solvency guard sells at 50, repays the
-     loan, and skips the target-0 fill with nothing left to hold. *)
+  (* buy 2.0 at 100: v = 2, cash = -1, loan = 2 * 0.6 = 1.2.
+     At 50, v = 1 and equity is exactly 0. Maintenance is 1 / 1.2,
+     so the close-price solvency guard sells at 50 and skips the target-0
+     fill with nothing left to hold. *)
   let bars =
     [| bar "2020-01-01" 100. 100.;
        bar "2020-01-02" 50. 50. |]
@@ -378,7 +386,7 @@ let test_engine_insolvent_gap () =
   assert
     (result.margin_stats.Engine.margin_call_dates = ["2020-01-02"]);
   (match result.margin_stats.Engine.min_maintenance with
-   | Some ratio -> assert_close ~tolerance:1e-12 1. ratio
+   | Some ratio -> assert_close ~tolerance:1e-12 (1. /. 1.2) ratio
    | None -> assert false);
   (match result.trips with
    | [trip] -> assert_close ~tolerance:1e-12 (-0.5) trip.net_ret
@@ -400,19 +408,83 @@ let test_engine_insolvent_min_fee () =
       { Engine.targets = [| [| 2.; 0. |] |] }
       [| costs |] ~margin ~capital:(Some 10000.) ~fill:Engine.Close_same
   in
-  (* The 0.002 minimum dominates both the 0.000798 entry commission and
-     the roughly 0.000398 exit commission. *)
+  (* Entry equity is 0.998 after the 0.002 minimum fee. Thus v = 1.996,
+     cash = -0.998, and the fixed loan is 1.996 * 0.6 = 1.1976. At
+     50, v = 0.998 and maintenance is 0.998 / 1.1976 = 5 / 6.
+     The 0.002 minimum also dominates the exit commission. *)
   let e0 = 1. -. 0.002 in
   let v1 = 2. *. e0 in
   let c0 = e0 -. v1 in
   let v2 = v1 /. 2. in
+  let loan = v1 *. 0.6 in
   let cost_value = Float.max (v2 *. 0.000399) (20. /. 10000.) in
   let expected = c0 +. v2 -. cost_value in
   let last = final_equity result in
   assert (not (Float.is_nan last));
   assert_close ~tolerance:1e-12 expected last;
   assert
-    (result.margin_stats.Engine.margin_call_dates = ["2020-01-02"])
+    (result.margin_stats.Engine.margin_call_dates = ["2020-01-02"]);
+  (match result.margin_stats.Engine.min_maintenance with
+   | Some ratio -> assert_close ~tolerance:1e-12 (v2 /. loan) ratio
+   | None -> assert false)
+
+let test_engine_exit_fee_bankruptcy () =
+  let bars =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 50.05 50.05;
+       bar "2020-01-03" 50.05 50.05 |]
+  in
+  let costs : Engine.costs =
+    { fee_bps = 3.99; tax_bps = 0.; slip_bps = 0.; min_fee = 20. }
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.; maintenance_ratio = 0.; ratios = [| 0.6 |] }
+  in
+  let result =
+    Engine.run [| ("tw/TEST", bars) |]
+      { Engine.targets = [| [| 2.; 0.; 1. |] |] }
+      [| costs |] ~margin ~capital:(Some 10000.) ~fill:Engine.Close_same
+  in
+  (* Entry leaves v = 1.996 and cash = -0.998. At 50.05, v is
+     1.996 * 0.5005 = 0.998998, so equity is 0.000998. The 0.002
+     minimum exit fee leaves -0.001002. The account must stay bankrupt
+     rather than size the next target from negative equity. *)
+  let expected = -0.998 +. (1.996 *. 0.5005) -. 0.002 in
+  assert_close ~tolerance:1e-12 expected (final_equity result);
+  assert (List.length result.fills = 2)
+
+let test_engine_zero_value_exit_clears_loan () =
+  let cash_asset =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 200. 200.;
+       bar "2020-01-03" 200. 200. |]
+  in
+  let financed_asset =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 0. 0.;
+       bar "2020-01-03" 0. 0. |]
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.365; maintenance_ratio = 0.;
+      ratios = [| 0.6; 0.6 |] }
+  in
+  let result =
+    Engine.run
+      [| ("tw/CASH", cash_asset); ("tw/MARGIN", financed_asset) |]
+      { Engine.targets =
+          [| [| 1.; 1.; 1. |]; [| 1.5; 0.; 0. |] |] }
+      [| zero_costs; zero_costs |] ~margin ~capital:None
+      ~fill:Engine.Close_same
+  in
+  (* The first asset uses cash. Buying the second creates a fixed
+     1.5 * 0.6 = 0.9 loan. One day of interest is 0.0009. When the
+     worthless asset exits, its loan clears, so day 3 accrues nothing. *)
+  let loan = 1.5 *. 0.6 in
+  let expected = 0.5 -. (loan *. 0.365 /. 365.) in
+  assert_close ~tolerance:1e-12 expected (final_equity result);
+  (match result.margin_stats.Engine.min_maintenance with
+   | Some ratio -> assert_close ~tolerance:1e-12 (2.5 /. loan) ratio
+   | None -> assert false)
 
 let test_engine_buyhold_costs () =
   (* all-in with fees: cash stays exactly 0, so the equity path equals
@@ -1515,6 +1587,8 @@ let () =
   test_engine_bankruptcy ();
   test_engine_insolvent_gap ();
   test_engine_insolvent_min_fee ();
+  test_engine_exit_fee_bankruptcy ();
+  test_engine_zero_value_exit_clears_loan ();
   test_engine_buyhold_costs ();
   test_engine_no_borrow_stats ();
   test_engine ();

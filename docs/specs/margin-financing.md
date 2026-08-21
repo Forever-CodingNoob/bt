@@ -42,10 +42,11 @@ override.
 
 ### State
 
-Per run: cash `c` and per-asset position values `v_i >= 0`, all in
-equity units. Start: `c = 1.0`, every `v_i = 0`. Equity
-`= c + sum_i v_i`. Negative cash is the loan. Exposure
-`e_i = v_i / equity` is derived and drifts.
+Per run: cash `c`, per-asset position values `v_i >= 0`, and
+per-asset margin loan balances `loan_i >= 0`, all in equity units.
+Start: `c = 1.0`, every `v_i = 0`, and every `loan_i = 0`. Equity
+`= c + sum_i v_i`. Exposure `e_i = v_i / equity` is derived and
+drifts.
 
 ### Accrual, every bar
 
@@ -53,10 +54,13 @@ equity units. Start: `c = 1.0`, every `v_i = 0`. Equity
   bar without fills; in `Open_next` on a fill bar, the two joint legs
   (close-to-open, fills, open-to-close) exactly as sub-project B
   defined them, applied to `v_i` values.
-- Interest before fills: if `c < 0`, then
-  `c -= (-c) * rate * days / 365`, where `days` is the calendar-day
-  difference between the previous bar's date and this bar's date.
-  Weekends and holidays accrue. No interest on bar 0.
+- Interest before fills: if `sum_i loan_i > 0`, then
+  `c -= sum_i loan_i * rate * days / 365`, where `days` is the
+  calendar-day difference between the previous bar's date and this
+  bar's date. Weekends and holidays accrue. No interest on bar 0.
+  Interest reduces cash (and therefore equity) but does not change any
+  `loan_i`. The TWSE maintenance formula uses the original loan amount
+  as denominator, not principal plus accumulated interest.
 
 ### Fills
 
@@ -74,10 +78,15 @@ engine's sequence:
 3. Size to the post-cost equity: `v_i' = target_i * equity'`, and the
    value difference moves through cash:
    `c -= (v_i' - v_i)`.
+4. Update the margin loan for asset i. On a buy (`v_i' > v_i`), if
+   the fill leaves `c < 0` or `loan_i` was already positive before the
+   fill, `loan_i += (v_i' - v_i) * ratio_i`; a pure cash buy leaves it
+   unchanged. On a sell (`v_i' < v_i`), repay proportionally:
+   `loan_i -= loan_i * (v_i - v_i') / v_i`. On full exit
+   (`v_i' = 0`), `loan_i = 0`.
 
-With this sequence a buy-and-hold strategy keeps `c = 0` exactly and
-`e = 1` forever, so all-in/all-out results are unchanged to the last
-bit.
+With this sequence a buy-and-hold strategy keeps `c = 0` and
+`loan_i = 0` exactly (`e = 1` never borrows).
 
 ### Initial margin
 
@@ -100,10 +109,10 @@ happens only through fills or forced liquidation.
 
 ## Margin call
 
-After the close of any bar where `c < 0`:
-`maintenance = sum_i v_i / (-c)`. If it is below the maintenance
-ratio (default 130%), the account is force-liquidated at the next
-bar's opens: every position sells with sell costs, cash absorbs the
+After the close of any bar where `sum_i loan_i > 0`:
+`maintenance = sum_i v_i / sum_i loan_i`. If it is below the
+maintenance ratio (default 130%), the account is force-liquidated at
+the next bar's opens: every position sells with sell costs, cash absorbs the
 proceeds, and the run records one margin call with its date. After
 liquidation the strategy stays flat until an asset's target series
 next changes value; it does not re-lever on an unchanged target. A target

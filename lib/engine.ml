@@ -92,6 +92,7 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
     strategy.targets;
   let cash = ref 1. in
   let values = Array.make asset_count 0. in
+  let loans = Array.make asset_count 0. in
   let prev_eff = Array.make asset_count 0. in
   let pending_liquidation = ref false in
   let bankrupt = ref false in
@@ -126,8 +127,10 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
   in
   let trade index ~date ~price ~desired =
     let equity_now = equity () in
+    let old_value = values.(index) in
     let from_e = values.(index) /. equity_now in
     let delta = desired -. from_e in
+    if desired = 0. then loans.(index) <- 0.;
     if delta <> 0. then begin
       if from_e = 0. then begin
         entry_dates.(index) <- date;
@@ -146,8 +149,18 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
       end;
       let cost = charge index ~equity_before:equity_now ~delta in
       let equity_after = equity_now *. (1. -. cost) in
-      values.(index) <- desired *. equity_after;
+      let new_value = desired *. equity_after in
+      values.(index) <- new_value;
       cash := equity_after -. Array.fold_left ( +. ) 0. values;
+      if new_value = 0. then loans.(index) <- 0.
+      else if new_value > old_value then begin
+        if !cash < 0. || loans.(index) > 0. then
+          loans.(index) <-
+            loans.(index)
+            +. (new_value -. old_value) *. margin.ratios.(index)
+      end
+      else if new_value < old_value && old_value > 0. then
+        loans.(index) <- loans.(index) *. new_value /. old_value;
       fills :=
         { date; stock = fst assets.(index); price;
           from_e; to_e = desired } :: !fills;
@@ -161,6 +174,7 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
     end
   in
   let sell_out index ~date ~price =
+    loans.(index) <- 0.;
     if values.(index) > 0. then begin
       let equity_now = equity () in
       let weight =
@@ -240,11 +254,12 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
     done
   in
   let accrue_interest ~date ~prev_date =
-    if !cash < 0. then begin
+    let total_loan = Array.fold_left ( +. ) 0. loans in
+    if total_loan > 0. then begin
       let days = day_number date - day_number prev_date in
       cash :=
         !cash
-        +. (!cash *. margin.financing_rate *. float_of_int days /. 365.)
+        -. (total_loan *. margin.financing_rate *. float_of_int days /. 365.)
     end
   in
   let apply_fills ~date ~eff ~clamped price_at =
@@ -253,16 +268,20 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
       if eff.(index) <> prev_eff.(index) then
         trade index ~date ~price:(price_at index) ~desired:eff.(index)
     done;
-    Array.blit eff 0 prev_eff 0 asset_count
+    Array.blit eff 0 prev_eff 0 asset_count;
+    if equity () <= 0.
+       && not (Array.exists (fun value -> value > 0.) values)
+    then bankrupt := true
   in
   let guard_solvency ~date price_at =
     if not !bankrupt
        && equity () <= 0.
        && Array.exists (fun value -> value > 0.) values
     then begin
-      if !cash < 0. then begin
+      let total_loan = Array.fold_left ( +. ) 0. loans in
+      if total_loan > 0. then begin
         let ratio =
-          Array.fold_left ( +. ) 0. values /. (-. !cash)
+          Array.fold_left ( +. ) 0. values /. total_loan
         in
         (match !min_maintenance with
          | None -> min_maintenance := Some ratio
@@ -322,9 +341,10 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
              scale_values (fun i -> close_at i t) (fun i -> open_at i t)
            end)
     end;
-    if not !bankrupt && !cash < 0. then begin
+    let total_loan = Array.fold_left ( +. ) 0. loans in
+    if not !bankrupt && total_loan > 0. then begin
       let ratio =
-        Array.fold_left ( +. ) 0. values /. (-. !cash)
+        Array.fold_left ( +. ) 0. values /. total_loan
       in
       (match !min_maintenance with
        | None -> min_maintenance := Some ratio
