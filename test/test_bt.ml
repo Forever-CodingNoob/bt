@@ -1934,6 +1934,121 @@ let test_e1_order_independence () =
        assert_close ~tolerance:1e-12 (5. /. 3.) a
    | _ -> assert false)
 
+let test_sell_deficit_waits_for_refinancing () =
+  let a =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 40. 40. |]
+  in
+  let b =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 200. 200. |]
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.; maintenance_ratio = 0.;
+      ratios = [| 0.6; 0.6 |] }
+  in
+  let result =
+    Engine.run [| ("tw/A", a); ("tw/B", b) |]
+      { Engine.targets =
+          [| [| 1.5; 0. |]; [| 0.5; 2. |] |] }
+      [| zero_costs; zero_costs |] ~margin ~capital:None
+      ~fill:Engine.Close_same
+  in
+  (* Bar 0 has A cv = 1/4, mv = 5/4, L = 3/4 and B cv = 1/12,
+     mv = 5/12, L = 1/4. After A falls 60% and B doubles, equity is
+     3/5. Selling A realizes 3/5 but repays 3/4, temporarily taking
+     cash to -3/20. B's 1/5 buy needs a 2/25 down payment, so the
+     frozen plan refinances 23/100 from B before buying. It ends with
+     B cv = 2/35, mv = 8/7, L = 3/5 and cash 0. Bar-1 maintenance is
+     (8/7)/(3/5) = 40/21, above the bar-0 minimum 5/3. Restoring the
+     temporary sell deficit early would instead leave total L = 3/4,
+     cash = 3/20, and lower maintenance to 32/21. *)
+  assert_close ~tolerance:1e-12 0.6 (final_equity result);
+  assert (result.margin_stats.Engine.refinances = 1);
+  assert (result.margin_stats.Engine.clamps = 0);
+  (match result.margin_stats.Engine.min_maintenance with
+   | Some ratio -> assert_close ~tolerance:1e-12 (5. /. 3.) ratio
+   | None -> assert false)
+
+let test_sell_only_fee_does_not_refinance () =
+  let flat =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 100. 100.;
+       bar "2020-01-03" 100. 100. |]
+  in
+  let falling =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 0.1 0.1;
+       bar "2020-01-03" 0.1 0.1 |]
+  in
+  let costs : Engine.costs =
+    { fee_bps = 0.; tax_bps = 0.; slip_bps = 0.; min_fee = 20. }
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.; maintenance_ratio = 0.;
+      ratios = [| 0.6; 0.6 |] }
+  in
+  let result =
+    Engine.run [| ("tw/A", flat); ("tw/B", falling) |]
+      { Engine.targets =
+          [| [| 0.5; 0.5; 0.5 |]; [| 0.5; 0.; 0. |] |] }
+      [| costs; costs |] ~margin ~capital:(Some 10000.)
+      ~fill:Engine.Close_same
+  in
+  (* Two 0.5 targets pay 0.002 each on entry, leaving E1 = 0.996
+     and cash inventories of 0.498 apiece. B falls to 0.1% of entry,
+     so pre-fill equity is 0.498 + 0.000498 = 0.498498. Its 0.002
+     exit fee leaves debt 0.001502 and equity 0.496498. A's target
+     never changes, so no buy exists and its inventory stays untouched.
+     There are only two entries, B's exit, and A's final close. That
+     close costs 0.002, leaving 0.494498. *)
+  assert_close ~tolerance:1e-12 0.494498 (final_equity result);
+  assert (result.margin_stats.Engine.refinances = 0);
+  assert (result.margin_stats.Engine.clamps = 0);
+  assert (List.length result.fills = 4)
+
+let test_residual_debt_does_not_force_refinance () =
+  let fee_asset =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 0.1 0.1;
+       bar "2020-01-03" 0.1 0.1 |]
+  in
+  let flat =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 100. 100.;
+       bar "2020-01-03" 100. 100. |]
+  in
+  let fee_costs : Engine.costs =
+    { fee_bps = 0.; tax_bps = 0.; slip_bps = 0.; min_fee = 20. }
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.; maintenance_ratio = 0.;
+      ratios = [| 0.6; 0.6; 0.6 |] }
+  in
+  let result =
+    Engine.run
+      [| ("tw/A", fee_asset); ("tw/B", flat); ("tw/C", flat) |]
+      { Engine.targets =
+          [| [| 0.5; 0.; 0. |];
+             [| 0.5; 0.5; 0.459 /. 0.497499 |];
+             [| 0.; 0.; 0.1 /. 0.497499 |] |] }
+      [| fee_costs; zero_costs; zero_costs |] ~margin
+      ~capital:(Some 10000.) ~fill:Engine.Close_same
+  in
+  (* A's 0.002 entry fee gives E1 = 0.998 and cash inventories
+     A = B = 0.499. A then falls to 0.000499 and exits for 0.000499
+     less another 0.002 fee, leaving debt 0.001501 while B keeps the
+     account solvent at equity 0.497499. On bar 2 B sells 0.04 to
+     0.459 and C buys 0.1 with minimum down payment 0.04. Available
+     cash is 0.497499 - 0.459 + 0.001501 debt = 0.04, exactly enough.
+     Thus no refinance or clamp is needed. The seven fills are two
+     entries, A's exit, B's sale, C's buy, and the two final closes;
+     final equity remains 0.497499. *)
+  assert (result.margin_stats.Engine.refinances = 0);
+  assert (result.margin_stats.Engine.clamps = 0);
+  assert (List.length result.fills = 7);
+  assert_close ~tolerance:1e-12 0.497499 (final_equity result)
+
 let test_refinance_scale_in () =
   let bars =
     [| bar "2020-01-01" 100. 100.;
@@ -2330,6 +2445,9 @@ let () =
   test_loan_sell_then_buy ();
   test_e1_order_independence ();
   test_refinance_scale_in ();
+  test_sell_deficit_waits_for_refinancing ();
+  test_sell_only_fee_does_not_refinance ();
+  test_residual_debt_does_not_force_refinance ();
   test_refinance_costs ();
   test_refinance_order_independence ();
   test_margin_refinance_with_interest ();

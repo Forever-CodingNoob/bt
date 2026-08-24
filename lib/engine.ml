@@ -452,7 +452,7 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
           done;
         let post_assets = sum post_cash_values +. sum post_margin_values in
         let post_liabilities = sum post_loans +. sum post_interests in
-        let available = e1 -. post_assets +. post_liabilities in
+        let available = e1 -. post_assets +. post_liabilities +. !debt in
         let cash_refinance_capacities = Array.make asset_count 0. in
         let margin_refinance_rates = Array.make asset_count 0. in
         let margin_refinance_capacities = Array.make asset_count 0. in
@@ -546,7 +546,7 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
         done;
         let shortage =
           let value = !minimum_total -. available in
-          if value > tolerance then value else 0.
+          if !buy_total > 0. && value > tolerance then value else 0.
         in
         let shortage = Float.min shortage !refinance_capacity in
         let allocations = Array.make asset_count 0. in
@@ -855,41 +855,6 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
           if item.plan_final_value = 0. then close_trip index ~date
         end
       done;
-      if !cash < 0. then begin
-        let deficit = -. !cash in
-        let settlement = ref 0. in
-        Array.iter
-          (fun item ->
-            if item.plan_changed && item.plan_trade < 0. then
-              settlement :=
-                !settlement +. item.plan_repayment
-                +. item.plan_interest_settled)
-          plan.planned_assets;
-        let restored = Float.min deficit !settlement in
-        if restored > 0. then begin
-          let unpaid_fraction = restored /. !settlement in
-          Array.iteri
-            (fun index item ->
-              if item.plan_changed && item.plan_trade < 0. then begin
-                loans.(index) <-
-                  loans.(index)
-                  +. item.plan_repayment *. unpaid_fraction;
-                interests.(index) <-
-                  interests.(index)
-                  +. item.plan_interest_settled *. unpaid_fraction
-              end)
-            plan.planned_assets
-        end;
-        debt := !debt +. deficit -. restored;
-        cash := 0.
-      end;
-      if equity () <= 0. then begin
-        if has_inventory () then bankrupt_all ~date price_at
-        else begin
-          bankrupt := true;
-          pending_liquidation := false
-        end
-      end;
       if not !bankrupt then begin
         if plan.planned_refinances then incr refinances;
         for index = 0 to asset_count - 1 do
@@ -970,7 +935,31 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
           end
         done;
         if !cash < 0. then begin
-          if -. !cash > tolerance then debt := !debt -. !cash;
+          let deficit = -. !cash in
+          let settlement = ref 0. in
+          Array.iter
+            (fun item ->
+              if item.plan_changed && item.plan_trade < 0. then
+                settlement :=
+                  !settlement +. item.plan_repayment
+                  +. item.plan_interest_settled)
+            plan.planned_assets;
+          let restored = Float.min deficit !settlement in
+          if restored > 0. then begin
+            let unpaid_fraction = restored /. !settlement in
+            Array.iteri
+              (fun index item ->
+                if item.plan_changed && item.plan_trade < 0. then begin
+                  loans.(index) <-
+                    loans.(index)
+                    +. item.plan_repayment *. unpaid_fraction;
+                  interests.(index) <-
+                    interests.(index)
+                    +. item.plan_interest_settled *. unpaid_fraction
+                end)
+              plan.planned_assets
+          end;
+          debt := !debt +. deficit -. restored;
           cash := 0.
         end;
         if equity () <= 0. then begin
