@@ -436,13 +436,16 @@ let fetch_prices ~token ~market ~symbol ~from_ ~to_ ~cache_path =
       | None, Some date -> date
       | None, None -> default_from
     in
-    if String.compare start_date to_ <= 0 then
-      fetch_rows ~token ~dataset:"TaiwanStockPrice" ~symbol
-        ~from_:start_date ~to_
-        ~expression:tw_expression
-        ~consume:(fun rows_path ->
-          append_rows ~header:tw_header
-            ~rows_path ~cache_path ~after:last_date)
+    let () =
+      if String.compare start_date to_ <= 0 then
+        fetch_rows ~token ~dataset:"TaiwanStockPrice" ~symbol
+          ~from_:start_date ~to_
+          ~expression:tw_expression
+          ~consume:(fun rows_path ->
+            append_rows ~header:tw_header
+              ~rows_path ~cache_path ~after:last_date)
+    in
+    ()
   else
     (* US Adj_Close is rewritten retroactively by upstream dividends and
        splits; appending fresh rows to old ones would mix adjustment
@@ -840,7 +843,9 @@ let filter_range ~from_ ~to_ bars =
 let filter_dates ~keep bars =
   bars
   |> Array.to_list
+  |> List.rev
   |> List.filter (fun bar -> keep bar.date)
+  |> List.rev
   |> Array.of_list
 
 let load ~market ~symbol ~from_ ~to_ ~data_dir =

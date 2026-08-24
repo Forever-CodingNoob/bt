@@ -107,7 +107,7 @@ let rsi s n =
   let len = Array.length s in
   let out = Array.make len nan in
   let rec scan i gain_sum loss_sum avg_gain avg_loss =
-    if i = len then ()
+    if i >= len then ()
     else
       let gain, loss = gain_and_loss (s.(i) -. s.(i - 1)) in
       let gain_sum, loss_sum =
