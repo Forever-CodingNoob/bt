@@ -17,22 +17,22 @@ let parse_file filename =
   in
   let lexbuf = Lexing.from_channel channel in
   let position = lexbuf.lex_curr_p in
-  lexbuf.lex_curr_p <- { position with pos_fname = filename };
+  let () = lexbuf.lex_curr_p <- { position with pos_fname = filename } in
   try
     let parsed = Parser.file Lexer.token lexbuf in
-    close_in_noerr channel;
+    let () = close_in_noerr channel in
     parsed
   with
   | Parsing.Parse_error ->
       let line = lexbuf.lex_curr_p.pos_lnum in
-      close_in_noerr channel;
+      let () = close_in_noerr channel in
       failwith (Printf.sprintf "%s:%d: parse error" filename line)
   | Failure message ->
       let line = lexbuf.lex_curr_p.pos_lnum in
-      close_in_noerr channel;
+      let () = close_in_noerr channel in
       failwith (Printf.sprintf "%s:%d: %s" filename line message)
   | exception_ ->
-      close_in_noerr channel;
+      let () = close_in_noerr channel in
       raise exception_
 
 let rec string_of_expr = function
@@ -64,13 +64,7 @@ let check_bool_lengths expression left right =
   if Array.length left <> Array.length right then
     fail_expr expression "boolean series length mismatch"
 
-let map_float function_ source =
-  let length = Array.length source in
-  let out = Array.make length Float.nan in
-  for i = 0 to length - 1 do
-    out.(i) <- function_ source.(i)
-  done;
-  out
+let map_float function_ source = Array.map function_ source
 
 let numeric_unary expression function_ = function
   | Scalar number -> Scalar (function_ number)
@@ -81,27 +75,12 @@ let numeric_binary expression function_ left right =
   match left, right with
   | Scalar a, Scalar b -> Scalar (function_ a b)
   | Scalar a, Series b ->
-      let length = Array.length b in
-      let out = Array.make length Float.nan in
-      for i = 0 to length - 1 do
-        out.(i) <- function_ a b.(i)
-      done;
-      Series out
+      Series (Array.map (fun value -> function_ a value) b)
   | Series a, Scalar b ->
-      let length = Array.length a in
-      let out = Array.make length Float.nan in
-      for i = 0 to length - 1 do
-        out.(i) <- function_ a.(i) b
-      done;
-      Series out
+      Series (Array.map (fun value -> function_ value b) a)
   | Series a, Series b ->
-      check_float_lengths expression a b;
-      let length = Array.length a in
-      let out = Array.make length Float.nan in
-      for i = 0 to length - 1 do
-        out.(i) <- function_ a.(i) b.(i)
-      done;
-      Series out
+      let () = check_float_lengths expression a b in
+      Series (Array.map2 function_ a b)
   | Bools _, _ | _, Bools _ ->
       fail_expr expression "arithmetic expects numbers or numeric series"
 
@@ -112,45 +91,24 @@ let comparison length expression predicate left right =
   match left, right with
   | Scalar a, Scalar b -> Bools (Array.make length (compare_number predicate a b))
   | Scalar a, Series b ->
-      let out = Array.make (Array.length b) false in
-      for i = 0 to Array.length b - 1 do
-        out.(i) <- compare_number predicate a b.(i)
-      done;
-      Bools out
+      Bools (Array.map (fun value -> compare_number predicate a value) b)
   | Series a, Scalar b ->
-      let out = Array.make (Array.length a) false in
-      for i = 0 to Array.length a - 1 do
-        out.(i) <- compare_number predicate a.(i) b
-      done;
-      Bools out
+      Bools (Array.map (fun value -> compare_number predicate value b) a)
   | Series a, Series b ->
-      check_float_lengths expression a b;
-      let out = Array.make (Array.length a) false in
-      for i = 0 to Array.length a - 1 do
-        out.(i) <- compare_number predicate a.(i) b.(i)
-      done;
-      Bools out
+      let () = check_float_lengths expression a b in
+      Bools (Array.map2 (compare_number predicate) a b)
   | Bools _, _ | _, Bools _ ->
       fail_expr expression "comparison expects numbers or numeric series"
 
 let logical_binary expression predicate left right =
   match left, right with
   | Bools a, Bools b ->
-      check_bool_lengths expression a b;
-      let out = Array.make (Array.length a) false in
-      for i = 0 to Array.length a - 1 do
-        out.(i) <- predicate a.(i) b.(i)
-      done;
-      Bools out
+      let () = check_bool_lengths expression a b in
+      Bools (Array.map2 predicate a b)
   | _ -> fail_expr expression "and/or expect boolean series"
 
 let logical_not expression = function
-  | Bools source ->
-      let out = Array.make (Array.length source) false in
-      for i = 0 to Array.length source - 1 do
-        out.(i) <- not source.(i)
-      done;
-      Bools out
+  | Bools source -> Bools (Array.map not source)
   | _ -> fail_expr expression "not expects a boolean series"
 
 let expect_series expression = function
@@ -166,8 +124,10 @@ let expect_period expression value =
   match classify_float number with
   | FP_nan | FP_infinite -> fail_expr expression "period must be finite"
   | FP_normal | FP_subnormal | FP_zero ->
-      if number < 1. || number > float_of_int max_int then
-        fail_expr expression "period must be at least 1";
+      let () =
+        if number < 1. || number > float_of_int max_int then
+          fail_expr expression "period must be at least 1"
+      in
       int_of_float number
 
 let cross_operand context expression = function
@@ -232,23 +192,23 @@ let rec eval context environment expression =
         | _ -> fail_expr expression (Printf.sprintf "unknown operator %s" operator)
       end
   | Call (qualifier, name, arguments) ->
-      begin
+      let () =
         match qualifier with
         | Some _ when name <> "atr" ->
             fail_expr expression
               (Printf.sprintf "only atr takes a stock alias, not %s" name)
         | _ -> ()
-      end;
-      begin
-        match builtin_arity name with
-        | None -> fail_expr expression (Printf.sprintf "unknown builtin %s" name)
-        | Some arity ->
+      in
+      match builtin_arity name with
+      | None -> fail_expr expression (Printf.sprintf "unknown builtin %s" name)
+      | Some arity ->
+          let () =
             if List.length arguments <> arity then
               fail_expr expression
-                (Printf.sprintf "%s expects %d argument(s)" name arity);
-            let values = eval_arguments context environment [] arguments in
-            eval_call context expression qualifier name values
-      end
+                (Printf.sprintf "%s expects %d argument(s)" name arity)
+          in
+          let values = eval_arguments context environment [] arguments in
+          eval_call context expression qualifier name values
 
 and eval_arguments context environment reversed = function
   | [] -> List.rev reversed
@@ -296,23 +256,25 @@ and eval_call context expression qualifier name arguments =
   | "num", [value] ->
       (match value with
        | Bools flags ->
-           let out = Array.make (Array.length flags) 0. in
-           for i = 0 to Array.length flags - 1 do
-             if flags.(i) then out.(i) <- 1.
-           done;
-           Series out
+           Series (Array.map (fun flag -> if flag then 1. else 0.) flags)
        | _ -> fail_expr expression "num expects a boolean series")
   | "hold", [set; reset] ->
       (match set, reset with
        | Bools set, Bools reset ->
-           check_bool_lengths expression set reset;
+           let () = check_bool_lengths expression set reset in
            let out = Array.make (Array.length set) false in
-           let state = ref false in
-           for i = 0 to Array.length set - 1 do
-             if reset.(i) then state := false
-             else if set.(i) then state := true;
-             out.(i) <- !state
-           done;
+           let rec scan i state =
+             if i = Array.length set then ()
+             else
+               let state =
+                 if reset.(i) then false
+                 else if set.(i) then true
+                 else state
+               in
+               let () = out.(i) <- state in
+               scan (i + 1) state
+           in
+           let () = scan 0 false in
            Bools out
        | _ -> fail_expr expression "hold expects two boolean series")
   | "cross_above", [left; right] ->
@@ -351,20 +313,11 @@ and eval_call context expression qualifier name arguments =
   | _ -> fail_expr expression "invalid builtin argument types"
 
 let series_environment ?alias (bars : Data.bar array) =
-  let length = Array.length bars in
-  let open_ = Array.make length Float.nan in
-  let high = Array.make length Float.nan in
-  let low = Array.make length Float.nan in
-  let close = Array.make length Float.nan in
-  let volume = Array.make length Float.nan in
-  for i = 0 to length - 1 do
-    let bar = bars.(i) in
-    open_.(i) <- bar.Data.o;
-    high.(i) <- bar.Data.h;
-    low.(i) <- bar.Data.l;
-    close.(i) <- bar.Data.c;
-    volume.(i) <- bar.Data.v
-  done;
+  let open_ = Array.map (fun bar -> bar.Data.o) bars in
+  let high = Array.map (fun bar -> bar.Data.h) bars in
+  let low = Array.map (fun bar -> bar.Data.l) bars in
+  let close = Array.map (fun bar -> bar.Data.c) bars in
+  let volume = Array.map (fun bar -> bar.Data.v) bars in
   let key name =
     match alias with None -> name | Some a -> a ^ "." ^ name
   in
@@ -427,62 +380,80 @@ let stocks_of ~filename statements =
       (function Stock (spec, alias) -> Some (spec, alias) | _ -> None)
       statements
   in
-  if declared = [] then
-    failwith (Printf.sprintf
-      "%s: add a stock statement, e.g. stock \"tw/00685L\"" filename);
+  let () =
+    if declared = [] then
+      failwith (Printf.sprintf
+        "%s: add a stock statement, e.g. stock \"tw/00685L\"" filename)
+  in
   let aliased = List.exists (fun (_, alias) -> alias <> None) declared in
-  if List.length declared > 1 && not aliased then
-    failwith (Printf.sprintf
-      "%s: multiple stocks require as aliases" filename);
-  if aliased && List.exists (fun (_, alias) -> alias = None) declared then
-    failwith (Printf.sprintf
-      "%s: mix of aliased and unaliased stock statements" filename);
+  let () =
+    if List.length declared > 1 && not aliased then
+      failwith (Printf.sprintf
+        "%s: multiple stocks require as aliases" filename)
+  in
+  let () =
+    if aliased && List.exists (fun (_, alias) -> alias = None) declared then
+      failwith (Printf.sprintf
+        "%s: mix of aliased and unaliased stock statements" filename)
+  in
   let seen_alias = Hashtbl.create 4 in
   let seen_spec = Hashtbl.create 4 in
   List.map
     (fun (spec, alias) ->
-      if Hashtbl.mem seen_spec spec then
-        failwith (Printf.sprintf "%s: duplicate stock %s" filename spec);
-      Hashtbl.replace seen_spec spec ();
-      (match alias with
-       | None -> ()
-       | Some name ->
-           if Hashtbl.mem seen_alias name then
-             failwith (Printf.sprintf "%s: duplicate alias %s" filename name);
-           Hashtbl.replace seen_alias name ();
-           if builtin_arity name <> None then
-             failwith (Printf.sprintf
-               "%s: alias %s collides with a builtin" filename name);
-           if List.mem name ["open"; "high"; "low"; "close"; "volume"] then
-             failwith (Printf.sprintf
-               "%s: alias %s collides with a series name" filename name);
-           List.iter
-             (function
-               | Param (p, _) when p = name ->
-                   failwith (Printf.sprintf
-                     "%s: alias %s collides with a param" filename name)
-               | Let (l, _) when l = name ->
-                   failwith (Printf.sprintf
-                     "%s: alias %s collides with a let" filename name)
-               | _ -> ())
-             statements);
+      let () =
+        if Hashtbl.mem seen_spec spec then
+          failwith (Printf.sprintf "%s: duplicate stock %s" filename spec)
+      in
+      let () = Hashtbl.replace seen_spec spec () in
+      let () =
+        match alias with
+        | None -> ()
+        | Some name ->
+            let () =
+              if Hashtbl.mem seen_alias name then
+                failwith (Printf.sprintf "%s: duplicate alias %s" filename name)
+            in
+            let () = Hashtbl.replace seen_alias name () in
+            let () =
+              if builtin_arity name <> None then
+                failwith (Printf.sprintf
+                  "%s: alias %s collides with a builtin" filename name)
+            in
+            let () =
+              if List.mem name ["open"; "high"; "low"; "close"; "volume"] then
+                failwith (Printf.sprintf
+                  "%s: alias %s collides with a series name" filename name)
+            in
+            List.iter
+              (function
+                | Param (p, _) when p = name ->
+                    failwith (Printf.sprintf
+                      "%s: alias %s collides with a param" filename name)
+                | Let (l, _) when l = name ->
+                    failwith (Printf.sprintf
+                      "%s: alias %s collides with a let" filename name)
+                | _ -> ())
+              statements
+      in
       let market, symbol = split_spec ~filename spec in
       alias, market, symbol)
     declared
 
 let compile_ast statements ~params ~assets =
   let declarations = declared_params_ast statements in
-  validate_overrides declarations params;
+  let () = validate_overrides declarations params in
   let length =
     match assets with
     | [] -> invalid_arg "Dsl.compile_ast: no assets"
     | (_, first) :: rest ->
         let length = Array.length first in
-        List.iter
-          (fun (_, bars) ->
-            if Array.length bars <> length then
-              invalid_arg "Dsl.compile_ast: bar length mismatch")
-          rest;
+        let () =
+          List.iter
+            (fun (_, bars) ->
+              if Array.length bars <> length then
+                invalid_arg "Dsl.compile_ast: bar length mismatch")
+            rest
+        in
         length
   in
   let context = { bars_by = assets; length } in
@@ -506,15 +477,17 @@ let compile_ast statements ~params ~assets =
   let groups : (string option, Group.t) Hashtbl.t = Hashtbl.create 4 in
   let declared_aliases = List.map fst assets in
   let group alias =
-    if not (List.mem alias declared_aliases) then
-      (match alias with
-       | Some name -> failwith (Printf.sprintf "unknown stock alias %s" name)
-       | None -> failwith "statements must name a stock alias in aliased files");
+    let () =
+      if not (List.mem alias declared_aliases) then
+        match alias with
+        | Some name -> failwith (Printf.sprintf "unknown stock alias %s" name)
+        | None -> failwith "statements must name a stock alias in aliased files"
+    in
     match Hashtbl.find_opt groups alias with
     | Some g -> g
     | None ->
         let g = Group.make () in
-        Hashtbl.replace groups alias g;
+        let () = Hashtbl.replace groups alias g in
         g
   in
   let environment =
@@ -540,7 +513,7 @@ let compile_ast statements ~params ~assets =
                   Some (size_expression,
                         eval context environment size_expression)
             in
-            g.entries <- (signal, inline_size) :: g.entries;
+            let () = g.entries <- (signal, inline_size) :: g.entries in
             environment
         | Exit (alias, expression, inline_size_expression) ->
             let g = group alias in
@@ -555,36 +528,32 @@ let compile_ast statements ~params ~assets =
                   Some (size_expression,
                         eval context environment size_expression)
             in
-            g.exits <- (signal, inline_size) :: g.exits;
+            let () = g.exits <- (signal, inline_size) :: g.exits in
             environment
         | Size (alias, expression) ->
             let g = group alias in
-            begin
-              match g.size with
-              | Some _ -> failwith "strategy may contain at most one size statement"
-              | None ->
-                  let value = eval context environment expression in
-                  g.size <- Some (expression, value);
-                  environment
-            end
+            (match g.size with
+             | Some _ -> failwith "strategy may contain at most one size statement"
+             | None ->
+                 let value = eval context environment expression in
+                 let () = g.size <- Some (expression, value) in
+                 environment)
         | Target (alias, expression) ->
             let g = group alias in
             let value = eval context environment expression in
-            g.targets <- (expression, value) :: g.targets;
+            let () = g.targets <- (expression, value) :: g.targets in
             environment
         | Cap (alias, value) ->
             let g = group alias in
-            begin
-              match g.cap with
-              | Some _ -> failwith "strategy may contain at most one cap statement"
-              | None ->
-                  g.cap <- Some value;
-                  environment
-            end
+            (match g.cap with
+             | Some _ -> failwith "strategy may contain at most one cap statement"
+             | None ->
+                 let () = g.cap <- Some value in
+                 environment)
         | Stock _ -> environment)
       initial_environment statements
   in
-  ignore environment;
+  let () = ignore environment in
   let compile_group context (group : Group.t) =
     let entries = group.entries in
     let exits = group.exits in
@@ -605,20 +574,30 @@ let compile_ast statements ~params ~assets =
       | None -> (fun _ -> 1.)
       | Some (_, Scalar number) -> (fun _ -> number)
       | Some (expression, Series series) ->
-          if Array.length series <> context.length then
-            fail_expr expression "size series length mismatch";
+          let () =
+            if Array.length series <> context.length then
+              fail_expr expression "size series length mismatch"
+          in
           (fun t -> series.(t))
       | Some (expression, Bools _) ->
           fail_expr expression "size must be a scalar or numeric series"
     in
-    if has_target then begin
-      if List.length targets > 1 then
-        failwith "only one target statement is allowed";
-      if entries <> [] || exits <> [] then
-        failwith "target cannot be mixed with entry/exit statements";
-      if cap <> None then failwith "cap is only valid with entry/exit sizes";
-      if size <> None then
-        failwith "size is only valid in legacy entry/exit style";
+    if has_target then
+      let () =
+        if List.length targets > 1 then
+          failwith "only one target statement is allowed"
+      in
+      let () =
+        if entries <> [] || exits <> [] then
+          failwith "target cannot be mixed with entry/exit statements"
+      in
+      let () =
+        if cap <> None then failwith "cap is only valid with entry/exit sizes"
+      in
+      let () =
+        if size <> None then
+          failwith "size is only valid in legacy entry/exit style"
+      in
       let expression, value =
         match targets with
         | [(expression, value)] -> expression, value
@@ -627,15 +606,20 @@ let compile_ast statements ~params ~assets =
       match value with
       | Scalar number -> Array.make context.length number
       | Series series ->
-          if Array.length series <> context.length then
-            fail_expr expression "target series length mismatch";
+          let () =
+            if Array.length series <> context.length then
+              fail_expr expression "target series length mismatch"
+          in
           series
       | Bools _ -> fail_expr expression "target must be numeric"
-    end
-    else if style_2 then begin
-      if size <> None then
-        failwith "standalone size is only valid in the legacy entry/exit style";
-      if entries = [] then failwith "at least one entry statement is required";
+    else if style_2 then
+      let () =
+        if size <> None then
+          failwith "standalone size is only valid in the legacy entry/exit style"
+      in
+      let () =
+        if entries = [] then failwith "at least one entry statement is required"
+      in
       let entry_signals =
         List.rev_map
           (fun (condition, inline_size) ->
@@ -654,26 +638,32 @@ let compile_ast statements ~params ~assets =
         if Float.is_nan value then 0. else value
       in
       let target = Array.make context.length 0. in
-      let exposure = ref 0. in
-      for t = 0 to context.length - 1 do
-        let delta = ref 0. in
-        List.iter
-          (fun (condition, points_at) ->
-            if condition.(t) then
-              delta := !delta +. size_points points_at t)
-          entry_signals;
-        List.iter
-          (fun (condition, points_at) ->
-            if condition.(t) then
-              delta := !delta -. size_points points_at t)
-          exit_signals;
-        exposure :=
-          Float.min cap_value (Float.max 0. (!exposure +. !delta));
-        target.(t) <- !exposure
-      done;
+      let rec scan t exposure =
+        if t = context.length then ()
+        else
+          let delta =
+            List.fold_left
+              (fun delta (condition, points_at) ->
+                if condition.(t) then delta +. size_points points_at t
+                else delta)
+              0. entry_signals
+          in
+          let delta =
+            List.fold_left
+              (fun delta (condition, points_at) ->
+                if condition.(t) then delta -. size_points points_at t
+                else delta)
+              delta exit_signals
+          in
+          let exposure =
+            Float.min cap_value (Float.max 0. (exposure +. delta))
+          in
+          let () = target.(t) <- exposure in
+          scan (t + 1) exposure
+      in
+      let () = scan 0 0. in
       target
-    end
-    else begin
+    else
       let entry =
         match entries with
         | [(signal, None)] -> signal
@@ -689,21 +679,21 @@ let compile_ast statements ~params ~assets =
         if Float.is_nan value || value <= 0. then 1. else value
       in
       let target = Array.make context.length 0. in
-      let in_position = ref false in
-      let held = ref 0. in
-      for t = 0 to context.length - 1 do
-        if !in_position then begin
-          if exit_.(t) then in_position := false
-          else target.(t) <- !held
-        end
-        else if entry.(t) then begin
-          held := clamp_legacy (size_at t);
-          in_position := true;
-          target.(t) <- !held
-        end
-      done;
+      let rec scan t in_position held =
+        if t = context.length then ()
+        else if in_position then
+          if exit_.(t) then scan (t + 1) false held
+          else
+            let () = target.(t) <- held in
+            scan (t + 1) true held
+        else if entry.(t) then
+          let held = clamp_legacy (size_at t) in
+          let () = target.(t) <- held in
+          scan (t + 1) true held
+        else scan (t + 1) false held
+      in
+      let () = scan 0 false 0. in
       target
-    end
   in
   let strategy : Engine.strategy =
     { targets =
