@@ -568,6 +568,28 @@ let test_engine_bankruptcy () =
    | [trip] -> assert_close ~tolerance:1e-12 (-0.5) trip.net_ret
    | _ -> assert false)
 
+let test_open_next_bankruptcy_freezes_at_close () =
+  let bars =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 100. 40.;
+       bar "2020-01-03" 100. 100. |]
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.; maintenance_ratio = 0.; ratios = [| 0.6 |] }
+  in
+  let result =
+    Engine.run [| ("tw/TEST", bars) |]
+      { Engine.targets = [| [| 2.5; 2.5; 2.5 |] |] }
+      [| zero_costs |] ~margin ~capital:None ~fill:Engine.Open_next
+  in
+  (* The 2.5x entry fills at the second-bar open with mv = 2.5 and
+     loan = 1.5. Its 40 close marks mv to 1.0 and equity to -0.5.
+     The close-price guard sells mv for 1.0, leaves debt 0.5, and
+     freezes before the next 100 open can resurrect the account. *)
+  assert_float_array [| 1.; -0.5; -0.5 |]
+    (Array.of_list (List.map snd result.equity_curve));
+  assert (List.length result.fills = 2)
+
 let test_engine_insolvent_gap () =
   (* Entry at 2x gives cv = 1/3, mv = 5/3, loan = 1, and cash = 0.
      At 50, cv = 1/6 and mv = 5/6, so equity is exactly 0 and
@@ -658,9 +680,9 @@ let test_engine_exit_fee_bankruptcy () =
   in
   (* Entry E1 = 0.998 gives cv = E1/3, mv = 5*E1/3, loan = E1,
      and cash = 0. At 50.05, total value is 2*E1*0.5005 and pre-fill
-     equity is 0.000998. The 0.002 exit fee makes proceeds insufficient
-     by 0.001002; cash stays 0, that loan residual carries the negative
-     equity, and the next target is never sized. *)
+     equity is 0.000998. The 0.002 exit fee exceeds all remaining
+     equity by 0.001002; cash stays 0, account debt carries the
+     deficit, and the next target is never sized. *)
   let entry_fee = 20. /. 10000. in
   let entry_e1 = 1. -. entry_fee in
   let loan = entry_e1 in
@@ -668,10 +690,11 @@ let test_engine_exit_fee_bankruptcy () =
   let exit_fee =
     Float.max (exit_value *. 3.99 /. 10000.) (20. /. 10000.)
   in
-  let residual_loan = loan -. (exit_value -. exit_fee) in
+  let residual_debt = loan -. (exit_value -. exit_fee) in
   assert_close ~tolerance:1e-12
-    (-. residual_loan) (final_equity result);
-  assert (List.length result.fills = 2)
+    (-. residual_debt) (final_equity result);
+  assert (List.length result.fills = 2);
+  assert (result.margin_stats.Engine.clamps = 0)
 
 let test_engine_zero_value_exit_preserves_liability () =
   let cash_asset =
@@ -2031,6 +2054,36 @@ let test_refinance_order_independence () =
        assert_close ~tolerance:1e-12 (5. /. 3.) a
    | _ -> assert false)
 
+let test_margin_refinance_with_interest () =
+  let bars =
+    [| bar "2020-01-03" 100. 100.;
+       bar "2020-01-06" 200. 200.;
+       bar "2020-01-07" 200. 200. |]
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.0635; maintenance_ratio = 0.;
+      ratios = [| 0.6 |] }
+  in
+  let result =
+    Engine.run [| ("tw/TEST", bars) |]
+      { Engine.targets = [| [| 2.; 1.8; 1.8 |] |] }
+      [| zero_costs |] ~margin ~capital:None ~fill:Engine.Close_same
+  in
+  (* Friday entry has cv = 1/3, mv = 5/3, L = 1. By Monday's
+     doubled close, cv = 2/3, mv = 10/3, and
+     I = 0.0635*3/365 = 0.0005219178082191781, so E = 3-I.
+     Buying B = 1.8*E-4 needs S = 0.4*B. Cash capacity is 0.4;
+     margin capacity uses the required liability-adjusted freed rate
+     0.6-(1+I)/(10/3) = 0.2998434246575342, giving capacity 1-I.
+     Pro-rata refinancing plus the buy leaves loan
+     2.3992692527828274. Tuesday accrues one more day, hence final
+     equity E - L*0.0635/365 = 2.9990606750752007. *)
+  assert_close ~tolerance:1e-12
+    2.9990606750752007 (final_equity result);
+  assert (result.margin_stats.Engine.refinances = 1);
+  assert (result.margin_stats.Engine.clamps = 0);
+  assert (List.length result.fills = 7)
+
 let test_e1_drift_reversal () =
   (* The target drops 2.0 -> 1.8 while price doubles, but drifted
      exposure is only 4/3, so reaching 1.8 still requires a buy. *)
@@ -2279,12 +2332,14 @@ let () =
   test_refinance_scale_in ();
   test_refinance_costs ();
   test_refinance_order_independence ();
+  test_margin_refinance_with_interest ();
   test_e1_drift_reversal ();
   test_e1_sell_then_buy ();
   test_call_liquidates_margin_only ();
   test_insolvent_call_sells_all_at_open ();
   test_engine_margin_call ();
   test_engine_bankruptcy ();
+  test_open_next_bankruptcy_freezes_at_close ();
   test_engine_insolvent_gap ();
   test_engine_insolvent_min_fee ();
   test_engine_exit_fee_bankruptcy ();

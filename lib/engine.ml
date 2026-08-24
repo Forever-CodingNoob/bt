@@ -129,6 +129,7 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
   let margin_values = Array.make asset_count 0. in
   let loans = Array.make asset_count 0. in
   let interests = Array.make asset_count 0. in
+  let debt = ref 0. in
   let prev_eff = Array.make asset_count 0. in
   let pending_liquidation = ref false in
   let bankrupt = ref false in
@@ -154,13 +155,13 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
     done;
     !total
   in
-  let total_liabilities () = sum loans +. sum interests in
+  let total_liabilities () = sum loans +. sum interests +. !debt in
   let has_inventory () =
     Array.exists (fun value -> value > 0.) cash_values
     || Array.exists (fun value -> value > 0.) margin_values
   in
   let equity () =
-    !cash +. total_assets () -. sum loans -. sum interests
+    !cash +. total_assets () -. total_liabilities ()
   in
   let charge index ~equity_before ~delta =
     let costs = costs.(index) in
@@ -229,7 +230,8 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
         loans;
       Array.iteri
         (fun index interest -> interests.(index) <- interest *. remaining)
-        interests
+        interests;
+      debt := !debt *. remaining
     end
   in
   let sell_inventory ?(settle = true) index ~margin_only ~date ~price =
@@ -281,7 +283,12 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
         in
         let equity_after = equity_now *. (1. -. fraction) in
         cash_values.(index) <- 0.;
-        cash := equity_after -. total_assets ()
+        let cash_after = equity_after -. total_assets () in
+        if cash_after < 0. then begin
+          debt := !debt -. cash_after;
+          cash := 0.
+        end
+        else cash := cash_after
       end
       else begin
         if margin_only then
@@ -292,7 +299,7 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
         end;
         cash := !cash +. amount -. cost_value;
         if !cash < 0. then begin
-          loans.(index) <- loans.(index) -. !cash;
+          debt := !debt -. !cash;
           cash := 0.
         end;
         if settle then settle_asset_liabilities index
@@ -430,6 +437,9 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
             post_interests.(index) <- interests.(index) -. settled
           end
         done;
+        let has_requested_buy =
+          Array.exists (fun trade -> trade > 0.) trades
+        in
         if buy_scale < 1. then
           for index = 0 to asset_count - 1 do
             if changed.(index) && trades.(index) > 0. then begin
@@ -483,10 +493,13 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
         in
         let requested_minimum = minimum_total () in
         let capacity_clamp =
-          requested_minimum -. available
-          > !refinance_capacity +. tolerance
+          requested_minimum > 0.
+          && requested_minimum -. available
+             > !refinance_capacity +. tolerance
         in
-        let funding_clamp = buy_scale < 1. || capacity_clamp in
+        let funding_clamp =
+          capacity_clamp || (buy_scale < 1. && has_requested_buy)
+        in
         if capacity_clamp && requested_minimum > 0. then begin
           let fundable =
             Float.max 0. (available +. !refinance_capacity)
@@ -780,9 +793,13 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
           incr iteration;
           let previous = !e1 in
           let plan = compute_plan buy_scale previous in
-          e1 := e0 -. plan.planned_total_cost;
-          if abs_float (!e1 -. previous) <= tolerance then
-            converged := true
+          let next = e0 -. plan.planned_total_cost in
+          if next <= 0. then converged := true
+          else begin
+            e1 := next;
+            if abs_float (!e1 -. previous) <= tolerance then
+              converged := true
+          end
         done;
         compute_plan buy_scale !e1
       in
@@ -848,20 +865,22 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
                 !settlement +. item.plan_repayment
                 +. item.plan_interest_settled)
           plan.planned_assets;
-        if !settlement <= 0. || deficit > !settlement +. tolerance then
-          failwith "Engine.run: negative cash after sells";
-        let unpaid_fraction = deficit /. !settlement in
-        Array.iteri
-          (fun index item ->
-            if item.plan_changed && item.plan_trade < 0. then begin
-              loans.(index) <-
-                loans.(index)
-                +. item.plan_repayment *. unpaid_fraction;
-              interests.(index) <-
-                interests.(index)
-                +. item.plan_interest_settled *. unpaid_fraction
-            end)
-          plan.planned_assets;
+        let restored = Float.min deficit !settlement in
+        if restored > 0. then begin
+          let unpaid_fraction = restored /. !settlement in
+          Array.iteri
+            (fun index item ->
+              if item.plan_changed && item.plan_trade < 0. then begin
+                loans.(index) <-
+                  loans.(index)
+                  +. item.plan_repayment *. unpaid_fraction;
+                interests.(index) <-
+                  interests.(index)
+                  +. item.plan_interest_settled *. unpaid_fraction
+              end)
+            plan.planned_assets
+        end;
+        debt := !debt +. deficit -. restored;
         cash := 0.
       end;
       if equity () <= 0. then begin
@@ -951,8 +970,8 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
           end
         done;
         if !cash < 0. then begin
-          if -. !cash <= tolerance then cash := 0.
-          else failwith "Engine.run: negative cash after fill"
+          if -. !cash > tolerance then debt := !debt -. !cash;
+          cash := 0.
         end;
         if equity () <= 0. then begin
           if has_inventory () then bankrupt_all ~date price_at
@@ -1029,11 +1048,15 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
            end)
     end;
     if not !bankrupt then
+      guard_solvency ~date (fun i -> close_at i t);
+    if not !bankrupt then
       (match track_maintenance () with
        | Some ratio when ratio < margin.maintenance_ratio ->
            record_call date;
            pending_liquidation := true
        | _ -> ());
+    if !cash < -1e-9 then
+      invalid_arg "Engine.run: negative cash invariant";
     equity_curve := (date, equity ()) :: !equity_curve
   done;
   let last = length - 1 in
