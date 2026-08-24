@@ -18,11 +18,11 @@ let market_name market =
 let check_symbol symbol =
   if symbol = "" || symbol = "." || symbol = ".." then
     failwith "symbol must not be empty"
-  else
-    for i = 0 to String.length symbol - 1 do
-      if symbol.[i] = '/' || symbol.[i] = '\\' || symbol.[i] = '\000' then
-        failf "invalid symbol %S" symbol
-    done
+  else if
+    String.exists
+      (fun ch -> ch = '/' || ch = '\\' || ch = '\000')
+      symbol
+  then failf "invalid symbol %S" symbol
 
 let leap_year year =
   year mod 400 = 0 || (year mod 4 = 0 && year mod 100 <> 0)
@@ -36,16 +36,21 @@ let days_in_month year month =
 
 let parse_date label value =
   try
-    if String.length value <> 10 || value.[4] <> '-' || value.[7] <> '-' then
-      raise Exit;
+    let () =
+      if String.length value <> 10 || value.[4] <> '-' || value.[7] <> '-' then
+        raise Exit
+    in
     let year = int_of_string (String.sub value 0 4) in
     let month = int_of_string (String.sub value 5 2) in
     let day = int_of_string (String.sub value 8 2) in
-    if year < 1 || month < 1 || month > 12 || day < 1 ||
-       day > days_in_month year month then
-      raise Exit;
-    (year, month, day)
-  with Failure _ | Exit -> failf "invalid %s date %S (expected YYYY-MM-DD)" label value
+    let () =
+      if year < 1 || month < 1 || month > 12 || day < 1 ||
+         day > days_in_month year month then
+        raise Exit
+    in
+    year, month, day
+  with Failure _ | Exit ->
+    failf "invalid %s date %S (expected YYYY-MM-DD)" label value
 
 let next_date value =
   let year, month, day = parse_date "cached" value in
@@ -69,8 +74,8 @@ let previous_date value =
     Printf.sprintf "%04d-12-31" (year - 1)
 
 let validate_range from_ to_ =
-  ignore (parse_date "from" from_);
-  ignore (parse_date "to" to_);
+  let () = ignore (parse_date "from" from_) in
+  let () = ignore (parse_date "to" to_) in
   if String.compare from_ to_ > 0 then
     failf "from date %s is after to date %s" from_ to_
 
@@ -129,8 +134,10 @@ let read_text path =
       let rec loop first =
         match input_line input with
         | line ->
-            if not first then Buffer.add_char buffer '\n';
-            Buffer.add_string buffer line;
+            let () =
+              if not first then Buffer.add_char buffer '\n'
+            in
+            let () = Buffer.add_string buffer line in
             loop false
         | exception End_of_file -> Buffer.contents buffer
       in
@@ -143,15 +150,17 @@ let is_unreserved = function
 let url_encode value =
   let hex = "0123456789ABCDEF" in
   let buffer = Buffer.create (String.length value) in
-  String.iter
-    (fun ch ->
-      if is_unreserved ch then Buffer.add_char buffer ch
-      else
-        let code = Char.code ch in
-        Buffer.add_char buffer '%';
-        Buffer.add_char buffer hex.[code lsr 4];
-        Buffer.add_char buffer hex.[code land 0x0f])
-    value;
+  let () =
+    String.iter
+      (fun ch ->
+        if is_unreserved ch then Buffer.add_char buffer ch
+        else
+          let code = Char.code ch in
+          let () = Buffer.add_char buffer '%' in
+          let () = Buffer.add_char buffer hex.[code lsr 4] in
+          Buffer.add_char buffer hex.[code land 0x0f])
+      value
+  in
   Buffer.contents buffer
 
 let api_url ~dataset ~symbol ~from_ ~to_ =
@@ -169,10 +178,12 @@ let curl_get ~token ~url ~output =
   (* the header travels in a 0600 temp file so the token never shows in argv *)
   with_temp ".hdr" (fun header_path ->
     let channel = open_out header_path in
-    Fun.protect
-      ~finally:(fun () -> close_out channel)
-      (fun () ->
-        output_string channel ("Authorization: Bearer " ^ token ^ "\n"));
+    let () =
+      Fun.protect
+        ~finally:(fun () -> close_out channel)
+        (fun () ->
+          output_string channel ("Authorization: Bearer " ^ token ^ "\n"))
+    in
     with_temp ".status" (fun status_path ->
       let status =
         run_to_file "/usr/bin/curl"
@@ -180,7 +191,7 @@ let curl_get ~token ~url ~output =
            "-w"; "%{http_code}"; url]
           status_path
       in
-      (status, String.trim (read_text status_path))))
+      status, String.trim (read_text status_path)))
 
 let jq_message json_path =
   with_temp ".msg" (fun output ->
@@ -271,7 +282,9 @@ let append_rows ~header ~rows_path ~cache_path ~after =
   Fun.protect
     ~finally:(fun () -> close_out output)
     (fun () ->
-      if needs_header then output_string output (header ^ "\n");
+      let () =
+        if needs_header then output_string output (header ^ "\n")
+      in
       let input = open_in rows_path in
       Fun.protect
         ~finally:(fun () -> close_in input)
@@ -281,9 +294,13 @@ let append_rows ~header ~rows_path ~cache_path ~after =
             | line ->
                 let normalized = normalize_row line in
                 let date = row_date normalized in
-                if date <> "" &&
-                   (match after with None -> true | Some previous -> String.compare date previous > 0)
-                then output_string output (normalized ^ "\n");
+                let () =
+                  if date <> "" &&
+                     (match after with
+                      | None -> true
+                      | Some previous -> String.compare date previous > 0)
+                  then output_string output (normalized ^ "\n")
+                in
                 loop ()
             | exception End_of_file -> ()
           in
@@ -296,42 +313,50 @@ let prepend_rows ~header ~rows_path ~cache_path ~before =
   Fun.protect
     ~finally:(fun () -> if not !completed then remove_if_exists temporary)
     (fun () ->
-      let output = open_out_bin temporary in
-      Fun.protect
-        ~finally:(fun () -> close_out output)
-        (fun () ->
-          output_string output (header ^ "\n");
-          let rows = open_in rows_path in
-          Fun.protect
-            ~finally:(fun () -> close_in rows)
-            (fun () ->
-              let rec loop () =
-                match input_line rows with
-                | line ->
-                    let normalized = normalize_row line in
-                    let date = row_date normalized in
-                    if date <> "" && String.compare date before < 0 then
-                      output_string output (normalized ^ "\n");
-                    loop ()
-                | exception End_of_file -> ()
-              in
-              loop ());
-          let cache = open_in cache_path in
-          Fun.protect
-            ~finally:(fun () -> close_in cache)
-            (fun () ->
-              (match input_line cache with
-               | _header -> ()
-               | exception End_of_file -> ());
-              let rec loop () =
-                match input_line cache with
-                | line ->
-                    output_string output (line ^ "\n");
-                    loop ()
-                | exception End_of_file -> ()
-              in
-              loop ()));
-      Sys.rename temporary cache_path;
+      let () =
+        let output = open_out_bin temporary in
+        Fun.protect
+          ~finally:(fun () -> close_out output)
+          (fun () ->
+            let () = output_string output (header ^ "\n") in
+            let rows = open_in rows_path in
+            let () =
+              Fun.protect
+                ~finally:(fun () -> close_in rows)
+                (fun () ->
+                  let rec loop () =
+                    match input_line rows with
+                    | line ->
+                        let normalized = normalize_row line in
+                        let date = row_date normalized in
+                        let () =
+                          if date <> "" && String.compare date before < 0 then
+                            output_string output (normalized ^ "\n")
+                        in
+                        loop ()
+                    | exception End_of_file -> ()
+                  in
+                  loop ())
+            in
+            let cache = open_in cache_path in
+            Fun.protect
+              ~finally:(fun () -> close_in cache)
+              (fun () ->
+                let () =
+                  match input_line cache with
+                  | _header -> ()
+                  | exception End_of_file -> ()
+                in
+                let rec loop () =
+                  match input_line cache with
+                  | line ->
+                      let () = output_string output (line ^ "\n") in
+                      loop ()
+                  | exception End_of_file -> ()
+                in
+                loop ()))
+      in
+      let () = Sys.rename temporary cache_path in
       completed := true)
 
 let rewrite_rows ~header ~rows_path ~cache_path =
@@ -341,24 +366,29 @@ let rewrite_rows ~header ~rows_path ~cache_path =
   Fun.protect
     ~finally:(fun () -> if not !completed then remove_if_exists temporary)
     (fun () ->
-      let output = open_out_bin temporary in
-      Fun.protect
-        ~finally:(fun () -> close_out output)
-        (fun () ->
-          output_string output (header ^ "\n");
-          let input = open_in rows_path in
-          Fun.protect
-            ~finally:(fun () -> close_in input)
-            (fun () ->
-              let rec loop () =
-                match input_line input with
-                | line ->
-                    if line <> "" then output_string output (normalize_row line ^ "\n");
-                    loop ()
-                | exception End_of_file -> ()
-              in
-              loop ()));
-      Sys.rename temporary cache_path;
+      let () =
+        let output = open_out_bin temporary in
+        Fun.protect
+          ~finally:(fun () -> close_out output)
+          (fun () ->
+            let () = output_string output (header ^ "\n") in
+            let input = open_in rows_path in
+            Fun.protect
+              ~finally:(fun () -> close_in input)
+              (fun () ->
+                let rec loop () =
+                  match input_line input with
+                  | line ->
+                      let () =
+                        if line <> "" then
+                          output_string output (normalize_row line ^ "\n")
+                      in
+                      loop ()
+                  | exception End_of_file -> ()
+                in
+                loop ()))
+      in
+      let () = Sys.rename temporary cache_path in
       completed := true)
 
 let transform_json ~args ~expression ~json_path ~rows_path =
@@ -373,30 +403,32 @@ let fetch_rows ~token ~dataset ~symbol ~from_ ~to_ ~expression ~consume =
   with_temp ".json" (fun json_path ->
     let url = api_url ~dataset ~symbol ~from_ ~to_ in
     let process_status, http_code = curl_get ~token ~url ~output:json_path in
-    require_price_response json_path process_status http_code;
+    let () = require_price_response json_path process_status http_code in
     with_temp ".rows" (fun rows_path ->
-      transform_json ~args:[] ~expression ~json_path ~rows_path;
+      let () = transform_json ~args:[] ~expression ~json_path ~rows_path in
       consume rows_path))
 
 let fetch_prices ~token ~market ~symbol ~from_ ~to_ ~cache_path =
   let default_from = "1994-10-01" in
-  if market = "tw" then begin
+  if market = "tw" then
     (* raw TW prices never change retroactively; cached rows win at both seams *)
     let tw_expression =
       ".data[] | [.date, .open, .max, .min, .close, .Trading_Volume] | @csv"
     in
     let tw_header = "date,open,high,low,close,volume" in
-    (match from_, first_cached_date cache_path with
-     | Some start_date, Some first
-       when should_probe_head ~from_ ~first_cached:first ->
-         let day_before = previous_date first in
-         fetch_rows ~token ~dataset:"TaiwanStockPrice" ~symbol
-           ~from_:start_date ~to_:day_before
-           ~expression:tw_expression
-           ~consume:(fun rows_path ->
-             prepend_rows ~header:tw_header ~rows_path ~cache_path
-               ~before:first)
-     | _ -> ());
+    let () =
+      match from_, first_cached_date cache_path with
+      | Some start_date, Some first
+        when should_probe_head ~from_ ~first_cached:first ->
+          let day_before = previous_date first in
+          fetch_rows ~token ~dataset:"TaiwanStockPrice" ~symbol
+            ~from_:start_date ~to_:day_before
+            ~expression:tw_expression
+            ~consume:(fun rows_path ->
+              prepend_rows ~header:tw_header ~rows_path ~cache_path
+                ~before:first)
+      | _ -> ()
+    in
     let last_date = last_cached_date cache_path in
     let start_date =
       match last_date, from_ with
@@ -411,8 +443,7 @@ let fetch_prices ~token ~market ~symbol ~from_ ~to_ ~cache_path =
         ~consume:(fun rows_path ->
           append_rows ~header:tw_header
             ~rows_path ~cache_path ~after:last_date)
-  end
-  else begin
+  else
     (* US Adj_Close is rewritten retroactively by upstream dividends and
        splits; appending fresh rows to old ones would mix adjustment
        baselines, so the US cache is refetched in full and rewritten *)
@@ -431,7 +462,6 @@ let fetch_prices ~token ~market ~symbol ~from_ ~to_ ~cache_path =
       ~consume:(fun rows_path ->
         rewrite_rows ~header:"date,open,high,low,close,adj_close,volume"
           ~rows_path ~cache_path)
-  end
 
 let fetch_dividends ~token ~symbol ~to_ ~cache_path =
   with_temp ".json" (fun json_path ->
@@ -458,12 +488,14 @@ let fetch_dividends ~token ~symbol ~to_ ~cache_path =
       | `Error message -> keep message
       | `Ok ->
           with_temp ".rows" (fun rows_path ->
-            transform_json ~args:[]
-              ~expression:(
-                ".data[] | select(.before_price != null and .after_price != null) " ^
-                "| select((.before_price | tonumber) != 0) " ^
-                "| [.date, ((.after_price | tonumber) / (.before_price | tonumber))] | @csv")
-              ~json_path ~rows_path;
+            let () =
+              transform_json ~args:[]
+                ~expression:(
+                  ".data[] | select(.before_price != null and .after_price != null) " ^
+                  "| select((.before_price | tonumber) != 0) " ^
+                  "| [.date, ((.after_price | tonumber) / (.before_price | tonumber))] | @csv")
+                ~json_path ~rows_path
+            in
             rewrite_rows ~header:"date,factor" ~rows_path ~cache_path))
 
 (* factor = after / before; back_adjust applies it to bars strictly
@@ -502,21 +534,26 @@ let fetch_events ~token ~symbol ~to_ ~cache_path =
         else api_url_no_id ~dataset ~from_:"1900-01-01" ~to_
       in
       let process_status, http_code = curl_get ~token ~url ~output:json_path in
-      if not (process_ok process_status) || http_code <> "200" then begin
-        keep
-          (dataset ^ ": HTTP " ^
-           (if http_code = "" || http_code = "000" then "unavailable"
-            else http_code));
+      if not (process_ok process_status) || http_code <> "200" then
+        let () =
+          keep
+            (dataset ^ ": HTTP " ^
+             (if http_code = "" || http_code = "000" then "unavailable"
+              else http_code))
+        in
         None
-      end
       else
         match check_api_response json_path with
-        | `Error message -> keep (dataset ^ ": " ^ message); None
+        | `Error message ->
+            let () = keep (dataset ^ ": " ^ message) in
+            None
         | `Ok ->
             with_temp ".rows" (fun rows_path ->
-              transform_json ~args:["--arg"; "sym"; symbol]
-                ~expression:(event_expression ~before ~after)
-                ~json_path ~rows_path;
+              let () =
+                transform_json ~args:["--arg"; "sym"; symbol]
+                  ~expression:(event_expression ~before ~after)
+                  ~json_path ~rows_path
+              in
               Some (non_empty_lines rows_path)))
   in
   let rec collect acc = function
@@ -532,10 +569,12 @@ let fetch_events ~token ~symbol ~to_ ~cache_path =
       let rows = List.sort String.compare rows in
       with_temp ".rows" (fun rows_path ->
         let output = open_out rows_path in
-        Fun.protect
-          ~finally:(fun () -> close_out output)
-          (fun () ->
-            List.iter (fun row -> output_string output (row ^ "\n")) rows);
+        let () =
+          Fun.protect
+            ~finally:(fun () -> close_out output)
+            (fun () ->
+              List.iter (fun row -> output_string output (row ^ "\n")) rows)
+        in
         rewrite_rows ~header:"date,factor" ~rows_path ~cache_path)
 
 let fetch_stockinfo ~token ~symbol ~cache_path =
@@ -561,11 +600,13 @@ let fetch_stockinfo ~token ~symbol ~cache_path =
       | `Error message -> keep message
       | `Ok ->
           with_temp ".rows" (fun rows_path ->
-            transform_json ~args:[]
-              ~expression:(
-                ".data[] | select(.type == \"twse\" or .type == \"tpex\") " ^
-                "| [.stock_id, .type, .date] | @csv")
-              ~json_path ~rows_path;
+            let () =
+              transform_json ~args:[]
+                ~expression:(
+                  ".data[] | select(.type == \"twse\" or .type == \"tpex\") " ^
+                  "| [.stock_id, .type, .date] | @csv")
+                ~json_path ~rows_path
+            in
             let new_rows = non_empty_lines rows_path in
             let old_rows =
               if Sys.file_exists cache_path then
@@ -579,40 +620,47 @@ let fetch_stockinfo ~token ~symbol ~cache_path =
             in
             with_temp ".merged" (fun merged_path ->
               let output = open_out merged_path in
-              Fun.protect
-                ~finally:(fun () -> close_out output)
-                (fun () ->
-                  List.iter
-                    (fun row ->
-                      if String.trim row <> "" then
-                        output_string output (normalize_row row ^ "\n"))
-                    (old_rows @ new_rows));
+              let () =
+                Fun.protect
+                  ~finally:(fun () -> close_out output)
+                  (fun () ->
+                    List.iter
+                      (fun row ->
+                        if String.trim row <> "" then
+                          output_string output (normalize_row row ^ "\n"))
+                      (old_rows @ new_rows))
+              in
               rewrite_rows ~header:"stock_id,type,date"
                 ~rows_path:merged_path ~cache_path)))
 
 let fetch ~market ~symbol ~from_ ~to_ ~data_dir =
   let market = market_name market in
-  check_symbol symbol;
-  (match from_ with
-   | None -> ignore (parse_date "to" to_)
-   | Some date -> validate_range date to_);
+  let () = check_symbol symbol in
+  let () =
+    match from_ with
+    | None -> ignore (parse_date "to" to_)
+    | Some date -> validate_range date to_
+  in
   let token =
     match Sys.getenv_opt "FINMIND_TOKEN" with
     | Some token when String.trim token <> "" -> token
     | _ -> failwith "export FINMIND_TOKEN=\"your_token_here\""
   in
   let directory = Filename.concat data_dir market in
-  mkdir_p directory;
+  let () = mkdir_p directory in
   let cache_path = Filename.concat directory (symbol ^ ".csv") in
-  fetch_prices ~token ~market ~symbol ~from_ ~to_ ~cache_path;
-  if market = "tw" then begin
-    fetch_dividends ~token ~symbol ~to_
-      ~cache_path:(Filename.concat directory (symbol ^ ".div.csv"));
-    fetch_events ~token ~symbol ~to_
-      ~cache_path:(Filename.concat directory (symbol ^ ".events.csv"));
+  let () = fetch_prices ~token ~market ~symbol ~from_ ~to_ ~cache_path in
+  if market = "tw" then
+    let () =
+      fetch_dividends ~token ~symbol ~to_
+        ~cache_path:(Filename.concat directory (symbol ^ ".div.csv"))
+    in
+    let () =
+      fetch_events ~token ~symbol ~to_
+        ~cache_path:(Filename.concat directory (symbol ^ ".events.csv"))
+    in
     fetch_stockinfo ~token ~symbol
       ~cache_path:(Filename.concat directory "stockinfo.csv")
-  end
 
 let float_field path line_number name value =
   try float_of_string value with Failure _ ->
@@ -632,8 +680,10 @@ let read_bars ~market path =
         | line -> line
         | exception End_of_file -> ""
       in
-      if header <> expected_header then
-        failf "%s: expected header %s" path expected_header;
+      let () =
+        if header <> expected_header then
+          failf "%s: expected header %s" path expected_header
+      in
       let rec loop line_number acc =
         match input_line input with
         | line when line = "" -> loop (line_number + 1) acc
@@ -678,7 +728,10 @@ let read_dividends path =
         | line -> line
         | exception End_of_file -> ""
       in
-      if header <> "date,factor" then failf "%s: expected header date,factor" path;
+      let () =
+        if header <> "date,factor" then
+          failf "%s: expected header date,factor" path
+      in
       let rec loop line_number acc =
         match input_line input with
         | line when line = "" -> loop (line_number + 1) acc
@@ -699,55 +752,79 @@ let financing_ratio ~data_dir ~symbol =
     Filename.concat (Filename.concat data_dir "tw") "stockinfo.csv"
   in
   let fallback () =
-    Printf.eprintf
-      "warning: financing ratio unknown for %s; assuming TWSE 60%%\n" symbol;
+    let () =
+      Printf.eprintf
+        "warning: financing ratio unknown for %s; assuming TWSE 60%%\n" symbol
+    in
     0.6
   in
   if not (Sys.file_exists path) then fallback ()
-  else begin
+  else
     let input = open_in path in
     Fun.protect
       ~finally:(fun () -> close_in input)
       (fun () ->
-        let best = ref None in
-        (try
-           ignore (input_line input);
-           while true do
-             match String.split_on_char ',' (input_line input) with
-             | [stock_id; kind; date] when unquote stock_id = symbol ->
-                 let date = unquote date in
-                 (match !best with
-                  | Some (previous, _) when String.compare previous date >= 0 ->
-                      ()
-                  | _ -> best := Some (date, unquote kind))
-             | _ -> ()
-           done
-         with End_of_file -> ());
-        match !best with
+        let () =
+          match input_line input with
+          | _header -> ()
+          | exception End_of_file -> ()
+        in
+        let rec read_best best =
+          match input_line input with
+          | line ->
+              let best =
+                match String.split_on_char ',' line with
+                | [stock_id; kind; date] when unquote stock_id = symbol ->
+                    let date = unquote date in
+                    (match best with
+                     | Some (previous, _)
+                       when String.compare previous date >= 0 ->
+                         best
+                     | _ -> Some (date, unquote kind))
+                | _ -> best
+              in
+              read_best best
+          | exception End_of_file -> best
+        in
+        match read_best None with
         | Some (_, "twse") -> 0.6
         | Some (_, "tpex") -> 0.5
         | _ -> fallback ())
-  end
 
 let back_adjust bars dividends =
-  Array.sort (fun left right -> String.compare left.date right.date) bars;
-  Array.sort (fun (left, _) (right, _) -> String.compare left right) dividends;
-  let dividend_index = ref (Array.length dividends - 1) in
-  let factor = ref 1. in
-  for bar_index = Array.length bars - 1 downto 0 do
-    while !dividend_index >= 0 &&
-          String.compare (fst dividends.(!dividend_index)) bars.(bar_index).date > 0 do
-      factor := !factor *. snd dividends.(!dividend_index);
-      decr dividend_index
-    done;
-    let current = bars.(bar_index) in
-    bars.(bar_index) <-
-      { current with
-        o = current.o *. !factor;
-        h = current.h *. !factor;
-        l = current.l *. !factor;
-        c = current.c *. !factor }
-  done
+  let () =
+    Array.sort (fun left right -> String.compare left.date right.date) bars
+  in
+  let () =
+    Array.sort
+      (fun (left, _) (right, _) -> String.compare left right)
+      dividends
+  in
+  let rec descend bar_date dividend_index factor =
+    if dividend_index >= 0 &&
+       String.compare (fst dividends.(dividend_index)) bar_date > 0 then
+      let factor = factor *. snd dividends.(dividend_index) in
+      descend bar_date (dividend_index - 1) factor
+    else dividend_index, factor
+  in
+  let rec adjust bar_index dividend_index factor =
+    if bar_index < 0 then ()
+    else
+      let dividend_index, factor =
+        descend bars.(bar_index).date dividend_index factor
+      in
+      let current = bars.(bar_index) in
+      let () =
+        bars.(bar_index) <-
+          { current with
+            o = current.o *. factor;
+            h = current.h *. factor;
+            l = current.l *. factor;
+            c = current.c *. factor }
+      in
+      adjust (bar_index - 1) dividend_index factor
+  in
+  adjust (Array.length bars - 1) (Array.length dividends - 1) 1.
 
 
 let in_range ~from_ ~to_ date =
@@ -755,55 +832,72 @@ let in_range ~from_ ~to_ date =
   (match to_ with None -> true | Some last -> String.compare date last <= 0)
 
 let filter_range ~from_ ~to_ bars =
-  let selected = ref [] in
-  for index = Array.length bars - 1 downto 0 do
-    if in_range ~from_ ~to_ bars.(index).date then
-      selected := bars.(index) :: !selected
-  done;
-  Array.of_list !selected
+  bars
+  |> Array.to_list
+  |> List.filter (fun bar -> in_range ~from_ ~to_ bar.date)
+  |> Array.of_list
 
 let filter_dates ~keep bars =
-  let selected = ref [] in
-  for index = Array.length bars - 1 downto 0 do
-    if keep bars.(index).date then selected := bars.(index) :: !selected
-  done;
-  Array.of_list !selected
+  bars
+  |> Array.to_list
+  |> List.filter (fun bar -> keep bar.date)
+  |> Array.of_list
 
 let load ~market ~symbol ~from_ ~to_ ~data_dir =
   let market = market_name market in
-  check_symbol symbol;
-  (match from_ with None -> () | Some date -> ignore (parse_date "from" date));
-  (match to_ with None -> () | Some date -> ignore (parse_date "to" date));
-  (match from_, to_ with
-   | Some first, Some last when String.compare first last > 0 ->
-       failf "from date %s is after to date %s" first last
-   | _ -> ());
+  let () = check_symbol symbol in
+  let () =
+    match from_ with
+    | None -> ()
+    | Some date -> ignore (parse_date "from" date)
+  in
+  let () =
+    match to_ with
+    | None -> ()
+    | Some date -> ignore (parse_date "to" date)
+  in
+  let () =
+    match from_, to_ with
+    | Some first, Some last when String.compare first last > 0 ->
+        failf "from date %s is after to date %s" first last
+    | _ -> ()
+  in
   let directory = Filename.concat data_dir market in
   let cache_path = Filename.concat directory (symbol ^ ".csv") in
-  if not (Sys.file_exists cache_path) then
-    failf "%s not found; run bt fetch --market %s --symbol %s"
-      cache_path market symbol;
+  let () =
+    if not (Sys.file_exists cache_path) then
+      failf "%s not found; run bt fetch --market %s --symbol %s"
+        cache_path market symbol
+  in
   let bars = read_bars ~market cache_path in
-  Array.sort (fun left right -> String.compare left.date right.date) bars;
-  if market = "tw" then (
-    let read_factors path warning =
-      if Sys.file_exists path then read_dividends path
-      else (prerr_endline warning; [||])
-    in
-    let dividends =
-      read_factors
-        (Filename.concat directory (symbol ^ ".div.csv"))
-        "warning: prices unadjusted for dividends"
-    in
-    let events =
-      read_factors
-        (Filename.concat directory (symbol ^ ".events.csv"))
-        "warning: prices unadjusted for splits/reductions"
-    in
-    let factors = Array.append dividends events in
-    if Array.length factors > 0 then back_adjust bars factors);
+  let () =
+    Array.sort (fun left right -> String.compare left.date right.date) bars
+  in
+  let () =
+    if market = "tw" then
+      let read_factors path warning =
+        if Sys.file_exists path then read_dividends path
+        else
+          let () = prerr_endline warning in
+          [||]
+      in
+      let dividends =
+        read_factors
+          (Filename.concat directory (symbol ^ ".div.csv"))
+          "warning: prices unadjusted for dividends"
+      in
+      let events =
+        read_factors
+          (Filename.concat directory (symbol ^ ".events.csv"))
+          "warning: prices unadjusted for splits/reductions"
+      in
+      let factors = Array.append dividends events in
+      if Array.length factors > 0 then back_adjust bars factors
+  in
   let selected = filter_range ~from_ ~to_ bars in
-  if Array.length selected < 2 then
-    failf "%s contains fewer than 2 bars in the requested range; run bt fetch --market %s --symbol %s"
-      cache_path market symbol;
+  let () =
+    if Array.length selected < 2 then
+      failf "%s contains fewer than 2 bars in the requested range; run bt fetch --market %s --symbol %s"
+        cache_path market symbol
+  in
   selected
