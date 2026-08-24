@@ -24,15 +24,15 @@ styles below. Do not mix styles for one stock.
 target 0.5 * num(base) + 0.5 * num(base and boost)
 ```
 
-`target` sets the desired exposure for each bar. The expression must give
-a scalar or a numeric series. A scalar applies to all bars. The engine fills
-when the target value changes. Positions drift between fills. An exposure
-above 1.0 borrows cash at the financing rate. Standard TW margin purchases
-finance 60% for TWSE stocks (2.5x leverage) and 50% for TPEX (2.0x). If
-maintenance falls below
-the configured threshold, the engine liquidates at the next open. A target
-change on the breach bar re-enters at that liquidation fill; otherwise the
-strategy stays flat until a later target change.
+`target` sets the desired exposure for each bar. The expression must give a scalar or a numeric series. A scalar applies to all bars. The engine fills when the target value changes, so positions drift between fills.
+
+Each asset has separate cash and margin inventories. A buy uses available cash first. A new margin purchase borrows 60% of its value for a TWSE stock or 50% for a TPEX stock. If the required down payments exceed available cash, the engine can refinance existing inventory with a sell and buy pair. Both legs charge full trading costs.
+
+Financing interest accrues as a daily liability at 6.35% per year by default. It does not reduce cash each day. A repayment settles the same fraction of accrued interest. Equity is cash plus both inventories, less loans, accrued interest, and residual debt.
+
+Maintenance equals total margin inventory value divided by total loans. It starts at 166.7% for a TWSE margin entry and 200% for a TPEX margin entry, independent of total exposure. If maintenance falls below the configured threshold, the engine sells all margin inventories at the next open. Cash inventories remain. If equity is zero or less at a close, the engine sells all inventories, keeps any unpaid debt, and freezes the account.
+
+The engine assumes every Taiwan symbol is marginable at the standard exchange ratio. It does not check broker eligibility or reduced financing ratios. Leveraged ETFs such as 00685L have historically been excluded from margin financing or assigned reduced ratios, so live margin trading can be unavailable.
 
 ### Partial orders
 

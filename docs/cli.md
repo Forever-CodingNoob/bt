@@ -84,11 +84,9 @@ rewrites `SYM.div.csv` on each run. If this fetch fails, the command keeps the
 existing dividend file. If no file exists, the command warns that prices
 will be unadjusted for dividends.
 
-For every Taiwan fetch, the command also downloads the `TaiwanStockInfo`
-table and rewrites `data/tw/stockinfo.csv`. It keeps only `twse` and `tpex`
-rows. If this fetch fails, the command keeps the existing stock-info cache.
-An unknown symbol or a missing cache makes `bt run` warn and use the TWSE
-financing ratio of 60%.
+For every Taiwan fetch, the command also downloads the `TaiwanStockInfo` table and rewrites `data/tw/stockinfo.csv`. It keeps only `twse` and `tpex` rows. If this fetch fails, the command keeps the existing stock-info cache. An unknown symbol or a missing cache makes `bt run` warn and use the TWSE financing ratio of 60%.
+
+The stock-info table selects the standard exchange ratio only. The engine assumes every Taiwan symbol is marginable and does not check broker eligibility or reduced ratios. Leveraged ETFs such as 00685L have historically been excluded from margin financing or assigned reduced ratios, so live margin trading can be unavailable.
 
 For US prices, `bt fetch` rewrites `SYM.csv` on each run. If a cache exists,
 the request starts at the earlier of its first date and `--from`. This full
@@ -128,9 +126,9 @@ strategy file selects its data with exactly one
 | `--tax-bps F` | Override the sell tax in basis points for all strategies and the baseline. |
 | `--slip-bps F` | Override slippage in basis points for all strategies and the baseline. |
 | `--min-fee F` | Override the minimum commission per order in TWD for all strategies and the baseline. The minimum applies only with `--capital`. |
-| `--financing-rate PERCENT` | Set the annual financing rate. The default is 6.35%. |
-| `--maintenance-ratio PERCENT` | Set the maintenance threshold. The default is 130%. The engine force-liquidates at the next open when maintenance falls below it. |
-| `--financing-ratio PERCENT` | Set one initial financing ratio for every asset and skip stock-info classification. By default, the cache resolves TWSE to 60% and TPEX to 50%. |
+| `--financing-rate PERCENT` | Set the annual financing rate. The default is 6.35%. Interest accrues by calendar day as a liability and settles with loan repayment. It does not reduce cash each day. |
+| `--maintenance-ratio PERCENT` | Set the maintenance threshold. The default is 130%. Maintenance is total margin inventory value divided by total loans. The engine sells all margin inventories at the next open when maintenance falls below the threshold. Cash inventories remain. |
+| `--financing-ratio PERCENT` | Set the fresh-loan financing ratio for every asset and skip stock-info classification. By default, the cache selects 60% for TWSE and 50% for TPEX. |
 | `--data-dir DIR` | Set the cache directory. The default is `data/`. |
 | `--out-dir DIR` | Set the output directory. The default is `out/`. |
 | `--out-name NAME` | Set the equity CSV and PNG stem. The default joins the strategy names with `_vs_`. |
@@ -138,6 +136,10 @@ strategy file selects its data with exactly one
 | `-h`, `-help`, `--help` | Print the run options to standard output and exit with code 0. |
 
 The three margin options apply to every strategy and the baseline.
+
+The engine keeps separate cash and margin inventories for each asset. Buys use available cash first and take fresh loans only for margin-funded shares. If required down payments exceed available cash, the engine can refinance existing inventories with sell and buy legs. Both legs charge full trading costs. A cash inventory frees the financing ratio per refinanced unit. A margin inventory frees only a positive amount after its loan and interest are repaid.
+
+At a standard margin entry, collateral-only maintenance is 166.7% for TWSE and 200% for TPEX, independent of total exposure. If equity is zero or less at a close, the engine sells all inventories, keeps any unpaid debt, and freezes the account.
 
 Do not pass `--market`, `--symbol`, or `--benchmark-market` to `bt run`.
 `--benchmark` was renamed to `--baseline`.
@@ -202,11 +204,10 @@ return, CAGR, Sharpe, MaxDD, and Calmar. The lines below the table show each
 strategy's trade count and win rate, the common date range, and the fill
 mode.
 
-If a strategy had a loan on at least one bar, `bt run` also prints a margin
-line with the run's financing rate and margin statistics:
+If a strategy had a loan on at least one bar, `bt run` also prints a margin line with the financing rate, minimum maintenance, margin-call count, refinance count, and clamp count:
 
 ```text
-channel_ladder: margin — financing 6.35%/yr, min maintenance 145.20%, margin calls 1, clamps 0
+channel_ladder: margin — financing 6.35%/yr, min maintenance 145.20%, margin calls 1, refinances 3, clamps 0
 ```
 
 A strategy that never had a loan has no margin line.

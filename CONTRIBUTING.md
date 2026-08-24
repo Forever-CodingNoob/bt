@@ -10,7 +10,7 @@ lib/ast.ml       Strategy AST types
 lib/lexer.mll    Lexer (ocamllex)
 lib/parser.mly   Grammar (ocamlyacc)
 lib/dsl.ml       Evaluator; compiles a script to Engine.strategy
-lib/engine.ml    Portfolio engine (per-asset targets, costs, and margin accounting)
+lib/engine.ml    Portfolio engine (per-asset targets, costs, and two-inventory margin accounting)
 lib/metrics.ml   CAGR, Sharpe, MaxDD, Calmar, trade statistics
 lib/report.ml    Terminal table, CSV output, PNG plot
 test/test_bt.ml  Assert-based tests (dune test)
@@ -57,6 +57,10 @@ Do not change these types or formats:
   arrays in stock declaration order)
 - Engine fill modes: `Close_same` fills at the decision close. `Open_next`
   fills at the next open.
+- Margin accounting keeps separate cash and margin inventories for each asset. Equity subtracts loans, accrued interest, and residual debt.
+- Buys use cash first. A fresh margin buy takes a standard exchange-ratio loan. Refinancing uses a sell and buy pair with full costs on both legs. Interest is a liability that settles with repayment.
+- Maintenance is total margin inventory value divided by total loans. A margin call sells only margin inventories. Bankruptcy sells everything, keeps residual debt, and freezes the account.
+- The engine assumes every Taiwan symbol is marginable at the standard TWSE or TPEX ratio. Broker eligibility and reduced ratios, including possible limits on leveraged ETFs such as 00685L, are outside the model.
 - TW cache header: `date,open,high,low,close,volume`
 - Dividend cache header: `date,factor`
 - US cache header: `date,open,high,low,close,adj_close,volume`

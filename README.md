@@ -154,11 +154,13 @@ styles, grammar, statements, types, and every builtin.
   is zero. Override these with the cost flags (0.0399% = 3.99 basis points).
 - An open position at the end of the data is closed at the last close.
 
-Targets fill only when they change, so positions drift between fills. Exposure
-above 1.0 uses margin financing at 6.35% per year by default. Standard TW
-margin purchases finance 60% of the purchase for TWSE stocks (2.5x leverage)
-and 50% for TPEX stocks (2.0x leverage). The default maintenance threshold
-is 130%.
+Targets fill only when they change, so positions drift between fills. Each asset has separate cash and margin inventories. A buy uses available cash first. A new margin purchase borrows 60% of its value for a TWSE stock or 50% for a TPEX stock.
+
+If required down payments exceed available cash, the engine can refinance existing inventory with a sell and buy pair. Both legs charge full trading costs. Financing interest accrues by calendar day as a liability at 6.35% per year by default and settles with repayment. It does not reduce cash each day. Equity is cash plus both inventories, less loans, accrued interest, and residual debt.
+
+Maintenance is total margin inventory value divided by total loans. It starts at 166.7% for a TWSE margin entry and 200% for a TPEX margin entry, independent of total exposure. The default threshold is 130%. A call sells all margin inventories at the next open, but cash inventories remain. If equity is zero or less at a close, the engine sells everything, keeps any unpaid debt, and freezes the account.
+
+The engine assumes every Taiwan symbol is marginable at the standard exchange ratio. It does not check broker eligibility or reduced financing ratios. Leveraged ETFs such as 00685L have historically been excluded from margin financing or assigned reduced ratios, so live margin trading can be unavailable.
 
 ## Data notes
 
