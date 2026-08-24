@@ -119,9 +119,10 @@ let print_many ~columns ~baseline ~fill ~stocks ~financing_rate =
       | None -> ()
       | Some ratio ->
           Printf.printf
-            "%s: margin — financing %.2f%%/yr, min maintenance %s, margin calls %d, clamps %d\n"
+            "%s: margin — financing %.2f%%/yr, min maintenance %s, margin calls %d, refinances %d, clamps %d\n"
             name financing_rate (format_percent ratio)
-            (List.length stats.Engine.margin_call_dates) stats.Engine.clamps)
+            (List.length stats.Engine.margin_call_dates)
+            stats.Engine.refinances stats.Engine.clamps)
     columns column_metrics;
   let curve =
     match columns with
