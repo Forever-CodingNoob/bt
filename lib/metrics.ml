@@ -26,8 +26,10 @@ let days_in_month year = function
 
 let epoch_days value =
   let invalid () = invalid_arg (Printf.sprintf "invalid date %S" value) in
-  if String.length value <> 10 || value.[4] <> '-' || value.[7] <> '-' then
-    invalid ();
+  let () =
+    if String.length value <> 10 || value.[4] <> '-' || value.[7] <> '-' then
+      invalid ()
+  in
   let year, month, day =
     try
       (int_of_string (String.sub value 0 4),
@@ -35,9 +37,11 @@ let epoch_days value =
        int_of_string (String.sub value 8 2))
     with Failure _ -> invalid ()
   in
-  if year < 1 || month < 1 || month > 12 || day < 1 ||
-     day > days_in_month year month then
-    invalid ();
+  let () =
+    if year < 1 || month < 1 || month > 12 || day < 1 ||
+       day > days_in_month year month then
+      invalid ()
+  in
   let month_offsets = [|0; 31; 59; 90; 120; 151; 181; 212; 243; 273; 304; 334|] in
   let previous_year = year - 1 in
   365 * previous_year + previous_year / 4 - previous_year / 100 +
@@ -60,30 +64,27 @@ let cagr equity_curve =
 let daily_returns equity_curve =
   let values = Array.of_list equity_curve in
   let length = Array.length values in
-  let returns = Array.make (max 0 (length - 1)) 0. in
-  for i = 1 to length - 1 do
-    returns.(i - 1) <- snd values.(i) /. snd values.(i - 1) -. 1.
-  done;
-  returns
+  Array.init (max 0 (length - 1)) (fun i ->
+      snd values.(i + 1) /. snd values.(i) -. 1.)
 
 let sharpe_from_returns returns =
   let length = Array.length returns in
   if length < 2 then 0.
-  else begin
-    let sum = ref 0. in
-    for i = 0 to length - 1 do
-      sum := !sum +. returns.(i)
-    done;
-    let mean = !sum /. float_of_int length in
-    let squared = ref 0. in
-    for i = 0 to length - 1 do
-      let difference = returns.(i) -. mean in
-      squared := !squared +. difference *. difference
-    done;
-    let standard_deviation = sqrt (!squared /. float_of_int (length - 1)) in
+  else
+    let sum =
+      Array.fold_left (fun sum value -> sum +. value) 0. returns
+    in
+    let mean = sum /. float_of_int length in
+    let squared =
+      Array.fold_left
+        (fun squared value ->
+          let difference = value -. mean in
+          squared +. difference *. difference)
+        0. returns
+    in
+    let standard_deviation = sqrt (squared /. float_of_int (length - 1)) in
     if standard_deviation = 0. then 0.
     else mean /. standard_deviation *. sqrt 252.
-  end
 
 let sharpe equity_curve = sharpe_from_returns (daily_returns equity_curve)
 
