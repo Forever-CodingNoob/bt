@@ -49,10 +49,14 @@ let print_many ~columns ~baseline ~fill ~stocks ~financing_rate =
     List.map fst columns @
     match baseline with None -> [] | Some _ -> ["baseline"]
   in
-  Printf.printf "%-16s" "Metric";
-  List.iter (fun name -> print_cell (display_name name)) names;
-  print_newline ();
-  print_endline (String.make (16 + (15 * List.length names)) '-');
+  let () = Printf.printf "%-16s" "Metric" in
+  let () =
+    List.iter (fun name -> print_cell (display_name name)) names
+  in
+  let () = print_newline () in
+  let () =
+    print_endline (String.make (16 + (15 * List.length names)) '-')
+  in
   let rows =
     [ ("Total return", false,
        (fun (metrics : Metrics.t) -> Some metrics.total_return),
@@ -70,60 +74,70 @@ let print_many ~columns ~baseline ~fill ~stocks ~financing_rate =
        (fun (metrics : Metrics.t) -> metrics.calmar),
        format_number) ]
   in
-  List.iter
-    (fun (label, lower, get, formatter) ->
-      let format = function
-        | None -> "n/a"
-        | Some value -> formatter value
-      in
-      let baseline_value =
-        match baseline_metrics with
-        | None -> None
-        | Some metrics -> get metrics
-      in
-      let strategy_cell metrics =
-        let value = get metrics in
-        let formatted = format value in
-        match value, baseline_value with
-        | Some value, Some baseline_value
-          when formatted <> "n/a" &&
-               format (Some baseline_value) <> "n/a" ->
-            formatted ^ marker ~lower value baseline_value
-        | _ -> formatted
-      in
-      Printf.printf "%-16s" label;
-      List.iter
-        (fun (_, metrics) -> print_cell (strategy_cell metrics))
-        column_metrics;
-      (match baseline_metrics with
-       | None -> ()
-       | Some metrics -> print_cell (format (get metrics)));
-      print_newline ())
-    rows;
-  List.iter2
-    (fun (name, result) (_, metrics) ->
-      let stock =
-        match List.assoc_opt name stocks with
-        | Some stock -> stock
-        | None -> invalid_arg ("Report.print_many: missing stock for " ^ name)
-      in
-      let win_rate =
-        match metrics.Metrics.win_rate with
-        | None -> "n/a"
-        | Some rate -> format_percent rate
-      in
-      Printf.printf "%s: %s — trades %d (win rate %s);\n"
-        name stock (List.length result.Engine.trips) win_rate;
-      let stats = result.Engine.margin_stats in
-      match stats.Engine.min_maintenance with
-      | None -> ()
-      | Some ratio ->
-          Printf.printf
-            "%s: margin — financing %.2f%%/yr, min maintenance %s, margin calls %d, refinances %d, clamps %d\n"
-            name financing_rate (format_percent ratio)
-            (List.length stats.Engine.margin_call_dates)
-            stats.Engine.refinances stats.Engine.clamps)
-    columns column_metrics;
+  let () =
+    List.iter
+      (fun (label, lower, get, formatter) ->
+        let format = function
+          | None -> "n/a"
+          | Some value -> formatter value
+        in
+        let baseline_value =
+          match baseline_metrics with
+          | None -> None
+          | Some metrics -> get metrics
+        in
+        let strategy_cell metrics =
+          let value = get metrics in
+          let formatted = format value in
+          match value, baseline_value with
+          | Some value, Some baseline_value
+            when formatted <> "n/a" &&
+                 format (Some baseline_value) <> "n/a" ->
+              formatted ^ marker ~lower value baseline_value
+          | _ -> formatted
+        in
+        let () = Printf.printf "%-16s" label in
+        let () =
+          List.iter
+            (fun (_, metrics) -> print_cell (strategy_cell metrics))
+            column_metrics
+        in
+        let () =
+          match baseline_metrics with
+          | None -> ()
+          | Some metrics -> print_cell (format (get metrics))
+        in
+        print_newline ())
+      rows
+  in
+  let () =
+    List.iter2
+      (fun (name, result) (_, metrics) ->
+        let stock =
+          match List.assoc_opt name stocks with
+          | Some stock -> stock
+          | None -> invalid_arg ("Report.print_many: missing stock for " ^ name)
+        in
+        let win_rate =
+          match metrics.Metrics.win_rate with
+          | None -> "n/a"
+          | Some rate -> format_percent rate
+        in
+        let () =
+          Printf.printf "%s: %s — trades %d (win rate %s);\n"
+            name stock (List.length result.Engine.trips) win_rate
+        in
+        let stats = result.Engine.margin_stats in
+        match stats.Engine.min_maintenance with
+        | None -> ()
+        | Some ratio ->
+            Printf.printf
+              "%s: margin — financing %.2f%%/yr, min maintenance %s, margin calls %d, refinances %d, clamps %d\n"
+              name financing_rate (format_percent ratio)
+              (List.length stats.Engine.margin_call_dates)
+              stats.Engine.refinances stats.Engine.clamps)
+      columns column_metrics
+  in
   let curve =
     match columns with
     | [] -> []
@@ -140,7 +154,9 @@ let print_many ~columns ~baseline ~fill ~stocks ~financing_rate =
      | Engine.Open_next -> "open")
 
 let write_equity ~out_dir ~stem ~columns ~baseline =
-  if columns = [] then invalid_arg "Report.write_outputs: no columns";
+  let () =
+    if columns = [] then invalid_arg "Report.write_outputs: no columns"
+  in
   let named_results =
     match baseline with
     | None -> columns
@@ -154,31 +170,46 @@ let write_equity ~out_dir ~stem ~columns ~baseline =
          named_results)
   in
   let length = Array.length (snd curves.(0)) in
-  Array.iter (fun (_, curve) -> assert (Array.length curve = length)) curves;
-  for row = 0 to length - 1 do
-    let date = fst (snd curves.(0)).(row) in
-    for column = 1 to Array.length curves - 1 do
-      assert (fst (snd curves.(column)).(row) = date)
-    done
-  done;
+  let () =
+    Array.iter
+      (fun (_, curve) -> assert (Array.length curve = length))
+      curves
+  in
+  let () =
+    Array.iteri
+      (fun row _ ->
+        let date = fst (snd curves.(0)).(row) in
+        Array.iteri
+          (fun column (_, curve) ->
+            if column > 0 then assert (fst curve.(row) = date))
+          curves)
+      (snd curves.(0))
+  in
   let path = Filename.concat out_dir (stem ^ ".csv") in
   let output = open_out_bin path in
   Fun.protect
     ~finally:(fun () -> close_out output)
     (fun () ->
-      output_string output "date";
-      Array.iter
-        (fun (name, _) -> Printf.fprintf output ",%s" name)
-        curves;
-      output_char output '\n';
-      for row = 0 to length - 1 do
-        Printf.fprintf output "%s" (fst (snd curves.(0)).(row));
+      let () = output_string output "date" in
+      let () =
         Array.iter
-          (fun (_, curve) ->
-            Printf.fprintf output ",%.17g" (snd curve.(row)))
-          curves;
-        output_char output '\n'
-      done)
+          (fun (name, _) -> Printf.fprintf output ",%s" name)
+          curves
+      in
+      let () = output_char output '\n' in
+      Array.iteri
+        (fun row _ ->
+          let () =
+            Printf.fprintf output "%s" (fst (snd curves.(0)).(row))
+          in
+          let () =
+            Array.iter
+              (fun (_, curve) ->
+                Printf.fprintf output ",%.17g" (snd curve.(row)))
+              curves
+          in
+          output_char output '\n')
+        (snd curves.(0)))
 
 let write_fills ~out_dir ~name (fills : Engine.fill_event list) =
   let path = Filename.concat out_dir (name ^ ".trades.csv") in
@@ -186,7 +217,9 @@ let write_fills ~out_dir ~name (fills : Engine.fill_event list) =
   Fun.protect
     ~finally:(fun () -> close_out output)
     (fun () ->
-      output_string output "date,stock,price,from_exposure,to_exposure\n";
+      let () =
+        output_string output "date,stock,price,from_exposure,to_exposure\n"
+      in
       List.iter
         (fun (fill : Engine.fill_event) ->
           Printf.fprintf output "%s,%s,%.17g,%.17g,%.17g\n"
@@ -194,8 +227,8 @@ let write_fills ~out_dir ~name (fills : Engine.fill_event list) =
         fills)
 
 let write_outputs ~out_dir ~stem ~columns ~baseline =
-  Data.mkdir_p out_dir;
-  write_equity ~out_dir ~stem ~columns ~baseline;
+  let () = Data.mkdir_p out_dir in
+  let () = write_equity ~out_dir ~stem ~columns ~baseline in
   List.iter
     (fun (name, result) ->
       write_fills ~out_dir ~name result.Engine.fills)
@@ -221,7 +254,7 @@ let write_png ~out_dir ~stem =
   | None -> warn_plot stem
   | Some script_path ->
       try
-        Data.mkdir_p out_dir;
+        let () = Data.mkdir_p out_dir in
         let csv_path = Filename.concat out_dir (stem ^ ".csv") in
         let png_path = Filename.concat out_dir (stem ^ ".png") in
         let arguments = [|"python3"; script_path; csv_path; png_path|] in
