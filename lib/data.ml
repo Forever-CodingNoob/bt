@@ -173,7 +173,7 @@ let api_url_no_id ~dataset ~from_ ~to_ =
     "https://api.finmindtrade.com/api/v4/data?dataset=%s&start_date=%s&end_date=%s"
     (url_encode dataset) (url_encode from_) (url_encode to_)
 
-(* ponytail: curl+jq pipeline; native HTTP+JSON client if fetch ever needs to be self-contained *)
+(* curl+jq pipeline; native HTTP+JSON client if fetch ever needs to be self-contained *)
 let curl_get ~token ~url ~output =
   (* the header travels in a 0600 temp file so the token never shows in argv *)
   with_temp ".hdr" (fun header_path ->
