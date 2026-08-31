@@ -152,15 +152,12 @@ After the close of any bar with `sum(loan_i) > 0`:
 maintenance = sum(margin_value_i) / sum(loan_i)
 ```
 
-At purchase this equals `1 / ratio` (166.7% TWSE, 200% TPEX)
-regardless of leverage; it moves only with prices afterward. Below
-the maintenance threshold (default 130%): at the next bar's opens the
-engine sells the entire margin inventory of every asset (self-directed
-liquidation, better than the broker's T+3 disposal and executable via
-Shioaji), repays all loans and accrued interest from the proceeds,
-records the call date. Cash inventories are untouched; the account
-continues at its remaining exposure and fills again only when a
-target changes value.
+At purchase this equals `1 / ratio` (166.7% at the current 60% standard for both TWSE and TPEX), regardless of leverage.
+It moves only with prices afterward.
+Below the maintenance threshold (default 130%), the engine sells the entire margin inventory of every asset at the next bar's opens.
+This self-directed liquidation is faster than the broker's T+3 disposal and is executable through Shioaji.
+It repays all loans and accrued interest from the proceeds and records the call date.
+Cash inventories are untouched; the account continues at its remaining exposure and fills again only when a target changes value.
 
 Bankruptcy occurs when equity is non-positive: the engine sells every remaining inventory, settles as much loan, interest, and account debt as proceeds allow, floors cash at zero, leaves any residual debt on the books, and freezes all later interest, fills, and checks.
 

@@ -79,11 +79,19 @@ let default_costs ~market ~symbol =
   match String.lowercase_ascii market with
   | "us" -> { fee_bps = 0.; tax_bps = 0.; slip_bps = 0.; min_fee = 0. }
   | "tw" ->
-      let is_etf =
-        String.length symbol >= 2 && symbol.[0] = '0' && symbol.[1] = '0'
+      let length = String.length symbol in
+      let starts_with_zero second =
+        length >= 2 && symbol.[0] = '0' && symbol.[1] = second
+      in
+      let is_etf = starts_with_zero '0' in
+      let tax_bps =
+        (* The 2017-01-01 through 2026-12-31 temporary exemption covers ordinary bond ETFs; leveraged/inverse L/R classes remain taxed. *)
+        if is_etf && symbol.[length - 1] = 'B' then 0.
+        else if is_etf || starts_with_zero '2' then 10.
+        else 30.
       in
       { fee_bps = 3.99;
-        tax_bps = if is_etf then 10. else 30.;
+        tax_bps;
         slip_bps = 0.;
         min_fee = 20. }
   | _ -> invalid_arg "Engine.default_costs: market must be tw or us"

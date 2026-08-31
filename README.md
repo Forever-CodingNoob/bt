@@ -147,18 +147,19 @@ styles, grammar, statements, types, and every builtin.
   it at the next bar open.
 - A strategy states a target exposure per bar. The engine trades the
   difference and charges costs on the traded fraction.
-- Default costs: a TW trade pays the online commission of 0.0399% on each
-  side, with a 20 TWD minimum per order. The minimum applies only when
-  `--capital` is given. A TW sale also pays a tax: 0.1% for ETFs (symbols
-  that start with `00`) and 0.3% for stocks. US costs are zero. Slippage
-  is zero. Override these with the cost flags (0.0399% = 3.99 basis points).
+- Default costs: a TW trade pays the online commission of 0.0399% on each side, with a 20 TWD minimum per order.
+  The minimum applies only when `--capital` is given.
+  Through 2026-12-31, an ordinary bond ETF (a symbol that starts with `00` and ends with `B`) pays no sell tax.
+  Other `00` ETFs and `02` ETNs pay 0.1%; other Taiwan symbols pay 0.3%.
+  US costs and slippage are zero.
+  Override these with the cost flags (0.0399% = 3.99 basis points).
 - An open position at the end of the data is closed at the last close.
 
-Targets fill only when they change, so positions drift between fills. Each asset has separate cash and margin inventories. A buy uses available cash first. A new margin purchase borrows 60% of its value for a TWSE stock or 50% for a TPEX stock.
+Targets fill only when they change, so positions drift between fills. Each asset has separate cash and margin inventories. A buy uses available cash first. A new margin purchase borrows 60% of its value for both TWSE and TPEX stocks. The TPEX maximum became 60% on 2014-11-10; use `--financing-ratio 50` for earlier TPEX backtests.
 
 If required down payments exceed available cash, the engine can refinance existing inventory with a sell and buy pair. Both legs charge full trading costs. Financing interest accrues by calendar day as a liability at 6.35% per year by default and settles with repayment. It does not reduce cash each day. Equity is cash plus both inventories, less loans, accrued interest, and residual debt.
 
-Maintenance is total margin inventory value divided by total loans. It starts at 166.7% for a TWSE margin entry and 200% for a TPEX margin entry, independent of total exposure. The default threshold is 130%. A call sells all margin inventories at the next open, but cash inventories remain. If equity is zero or less at a close, the engine sells everything, keeps any unpaid debt, and freezes the account.
+Maintenance is total margin inventory value divided by total loans. It starts at 166.7% for both TWSE and TPEX margin entries, independent of total exposure. The default threshold is 130%. A call sells all margin inventories at the next open, but cash inventories remain. If equity is zero or less at a close, the engine sells everything, keeps any unpaid debt, and freezes the account.
 
 The engine assumes every Taiwan symbol is marginable at the standard exchange ratio. It does not check broker eligibility or reduced financing ratios. Leveraged ETFs such as 00685L have historically been excluded from margin financing or assigned reduced ratios, so live margin trading can be unavailable.
 

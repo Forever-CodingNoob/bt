@@ -76,6 +76,16 @@ let fill_bars =
 let zero_costs : Engine.costs =
   { fee_bps = 0.; tax_bps = 0.; slip_bps = 0.; min_fee = 0. }
 
+let test_default_costs () =
+  let tax_bps symbol =
+    (Engine.default_costs ~market:"tw" ~symbol).tax_bps
+  in
+  (* The ordinary bond-ETF exemption runs from 2017-01-01 through 2026-12-31. *)
+  assert (tax_bps "00679B" = 0.);
+  assert (tax_bps "020000" = 10.);
+  assert (tax_bps "0050" = 10.);
+  assert (tax_bps "2330" = 30.)
+
 let rec scalar_value = function
   | Ast.Num number -> number
   | Ast.Unop ("-", expression) -> -. scalar_value expression
@@ -1808,7 +1818,8 @@ let test_financing_ratio () =
              8069,\"tpex\",\"2020-01-01\"\n\
              8069,\"twse\",\"2024-01-01\"\n");
       assert (Data.financing_ratio ~data_dir:root ~symbol:"00685L" = 0.6);
-      assert (Data.financing_ratio ~data_dir:root ~symbol:"5483" = 0.5);
+      (* The FSC's 60% TPEX maximum took effect on 2014-11-10. *)
+      assert (Data.financing_ratio ~data_dir:root ~symbol:"5483" = 0.6);
       (* the row with the latest date wins *)
       assert (Data.financing_ratio ~data_dir:root ~symbol:"8069" = 0.6);
       (* unknown symbol warns and defaults *)
@@ -2420,6 +2431,7 @@ let test_loan_sell_then_buy () =
 
 let () =
   test_parser ();
+  test_default_costs ();
   test_parser_aliases ();
   test_filter_dates ();
   test_stock_statement ();

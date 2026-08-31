@@ -128,7 +128,7 @@ strategy file selects its data with exactly one
 | `--min-fee F` | Override the minimum commission per order in TWD for all strategies and the baseline. The minimum applies only with `--capital`. |
 | `--financing-rate PERCENT` | Set the annual financing rate. The default is 6.35%. Interest accrues by calendar day as a liability and settles with loan repayment. It does not reduce cash each day. |
 | `--maintenance-ratio PERCENT` | Set the maintenance threshold. The default is 130%. Maintenance is total margin inventory value divided by total loans. The engine sells all margin inventories at the next open when maintenance falls below the threshold. Cash inventories remain. |
-| `--financing-ratio PERCENT` | Set the fresh-loan financing ratio for every asset and skip stock-info classification. By default, the cache selects 60% for TWSE and 50% for TPEX. |
+| `--financing-ratio PERCENT` | Set the fresh-loan financing ratio for every asset and skip stock-info classification. By default, the cache selects 60% for both TWSE and TPEX. Use 50 for TPEX backtests before 2014-11-10. |
 | `--data-dir DIR` | Set the cache directory. The default is `data/`. |
 | `--out-dir DIR` | Set the output directory. The default is `out/`. |
 | `--out-name NAME` | Set the equity CSV and PNG stem. The default joins the strategy names with `_vs_`. |
@@ -139,7 +139,7 @@ The three margin options apply to every strategy and the baseline.
 
 The engine keeps separate cash and margin inventories for each asset. Buys use available cash first and take fresh loans only for margin-funded shares. If required down payments exceed available cash, the engine can refinance existing inventories with sell and buy legs. Both legs charge full trading costs. A cash inventory frees the financing ratio per refinanced unit. A margin inventory frees only a positive amount after its loan and interest are repaid.
 
-At a standard margin entry, collateral-only maintenance is 166.7% for TWSE and 200% for TPEX, independent of total exposure. If equity is zero or less at a close, the engine sells all inventories, keeps any unpaid debt, and freezes the account.
+At a standard margin entry, collateral-only maintenance is 166.7% for both TWSE and TPEX, independent of total exposure. If equity is zero or less at a close, the engine sells all inventories, keeps any unpaid debt, and freezes the account.
 
 Do not pass `--market`, `--symbol`, or `--benchmark-market` to `bt run`.
 `--benchmark` was renamed to `--baseline`.
@@ -171,8 +171,11 @@ One basis point is 0.01%. One hundred basis points are 1%.
 | Market and symbol | Fee | Minimum fee | Sell tax | Slippage |
 | --- | --- | --- | --- | --- |
 | US | 0 bps (0%) | 0 TWD | 0 bps (0%) | 0 bps (0%) |
-| Taiwan symbol that starts with `00` | 3.99 bps (0.0399%) | 20 TWD per order | 10 bps (0.10%) | 0 bps (0%) |
+| Taiwan ordinary bond ETF (symbol starts with `00` and ends with `B`) | 3.99 bps (0.0399%) | 20 TWD per order | 0 bps (0%) through 2026-12-31 | 0 bps (0%) |
+| Other Taiwan symbol that starts with `00`, or an ETN that starts with `02` | 3.99 bps (0.0399%) | 20 TWD per order | 10 bps (0.10%) | 0 bps (0%) |
 | Other Taiwan symbol | 3.99 bps (0.0399%) | 20 TWD per order | 30 bps (0.30%) | 0 bps (0%) |
+
+Leveraged and inverse bond ETFs end in `L` or `R`, not `B`, so they use the 10 bps ETF rate.
 
 An exposure increase pays the commission and slippage. An exposure decrease
 pays the commission, sell tax, and slippage. Commission is proportional to
