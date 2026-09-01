@@ -1227,6 +1227,46 @@ let back_adjust_volume bars events =
       adjust (bar_index - 1) event_index factor
   in
   adjust (Array.length bars - 1) (Array.length events - 1) 1.
+let restate_dividend_cash dividends events =
+  let dividends = Array.copy dividends in
+  let events = Array.copy events in
+  let () =
+    Array.sort
+      (fun left right -> String.compare left.ex_date right.ex_date)
+      dividends
+  in
+  let () =
+    Array.sort
+      (fun (left, _) (right, _) -> String.compare left right)
+      events
+  in
+  let rec descend ex_date event_index factor =
+    if event_index >= 0 &&
+       String.compare (fst events.(event_index)) ex_date > 0 then
+      let factor = factor *. snd events.(event_index) in
+      descend ex_date (event_index - 1) factor
+    else
+      event_index, factor
+  in
+  let rec adjust dividend_index event_index factor =
+    if dividend_index < 0 then ()
+    else
+      let current = dividends.(dividend_index) in
+      let event_index, factor =
+        descend current.ex_date event_index factor
+      in
+      let () =
+        dividends.(dividend_index) <-
+          { current with
+            cash_per_share = current.cash_per_share *. factor }
+      in
+      adjust (dividend_index - 1) event_index factor
+  in
+  let () =
+    adjust (Array.length dividends - 1) (Array.length events - 1) 1.
+  in
+  dividends
+
 
 
 let in_range ~from_ ~to_ date =
@@ -1323,6 +1363,9 @@ let load_asset ~market ~symbol ~from_ ~to_ ~data_dir =
       in
       let () =
         if Array.length events > 0 then back_adjust_volume money events
+      in
+      let cash_dividends =
+        restate_dividend_cash cash_dividends events
       in
       money, signal, cash_dividends
   in

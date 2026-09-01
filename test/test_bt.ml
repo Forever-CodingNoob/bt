@@ -2258,6 +2258,73 @@ let test_two_price_planes () =
     assert_close 100. loaded.Data.money.(2).Data.c;
     (* The ex-date raw close falls from adjusted 100 to money price 90. *)
     assert_close 90. loaded.Data.money.(3).Data.c)
+let test_dividend_cash_split_restatement () =
+  with_temp_market "tw" (fun root tw ->
+    let write name contents =
+      let output = open_out (Filename.concat tw name) in
+      Fun.protect
+        ~finally:(fun () -> close_out output)
+        (fun () -> output_string output contents)
+    in
+    let prices =
+      "date,open,high,low,close,volume\n\
+       2025-01-01,100,100,100,100,1000\n\
+       2025-01-02,90,90,90,90,1000\n\
+       2025-01-03,22.5,22.5,22.5,22.5,4000\n\
+       2025-01-04,21.5,21.5,21.5,21.5,4000\n"
+    in
+    let factors =
+      [| "2025-01-02", 0.9;
+         "2025-01-04", 21.5 /. 22.5 |]
+    in
+    let factor_csv =
+      "date,factor\n\
+       2025-01-02,0.9\n\
+       2025-01-04,0.9555555555555556\n"
+    in
+    let events = "date,factor\n2025-01-03,0.25\n" in
+    let () = write "DIRECT.csv" prices in
+    let () = write "DIRECT.div.csv" factor_csv in
+    let () = write "DIRECT.events.csv" events in
+    let () =
+      write "DIRECT.cashdiv.csv"
+        "ex_date,cash_per_share,pay_date\n\
+         2025-01-02,10,2025-02-02\n\
+         2025-01-04,1,2025-02-04\n"
+    in
+    let direct =
+      Data.load_asset ~market:"tw" ~symbol:"DIRECT" ~from_:None ~to_:None
+        ~data_dir:root
+    in
+    (* Both direct-source cash rows survive the loader. *)
+    assert (Array.length direct.Data.dividends = 2);
+    (* The later 1:4 event restates pre-split cash: 10 * 0.25 = 2.5. *)
+    assert_close 2.5 direct.Data.dividends.(0).Data.cash_per_share;
+    (* No share-count event follows the second dividend, so 1 stays 1. *)
+    assert_close 1. direct.Data.dividends.(1).Data.cash_per_share;
+    let () = write "FALLBACK.csv" prices in
+    let () = write "FALLBACK.div.csv" factor_csv in
+    let () = write "FALLBACK.events.csv" events in
+    let derived =
+      Data.derive_cash_dividends
+        (Data.read_bars ~market:"tw" (Filename.concat tw "FALLBACK.csv"))
+        factors
+    in
+    let () =
+      Data.merge_cash_dividend_cache derived
+        ~cache_path:(Filename.concat tw "FALLBACK.cashdiv.csv")
+    in
+    let fallback =
+      Data.load_asset ~market:"tw" ~symbol:"FALLBACK" ~from_:None ~to_:None
+        ~data_dir:root
+    in
+    (* The factor fallback derives both historical-basis cash rows. *)
+    assert (Array.length fallback.Data.dividends = 2);
+    (* The loader also restates fallback cash: 10 * 0.25 = 2.5. *)
+    assert_close 2.5 fallback.Data.dividends.(0).Data.cash_per_share;
+    (* The post-split fallback amount is (1 - 21.5/22.5) * 22.5 = 1. *)
+    assert_close 1. fallback.Data.dividends.(1).Data.cash_per_share)
+
 
 
 let test_load_adjustments () =
@@ -3216,6 +3283,7 @@ let () =
   test_cash_dividend_fallback_derivation ();
   test_us_dividend_derivation ();
   test_two_price_planes ();
+  test_dividend_cash_split_restatement ();
   test_load_adjustments ();
   test_financing_ratio ();
   test_event_transform ();
