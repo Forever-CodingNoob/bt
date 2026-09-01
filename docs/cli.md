@@ -95,13 +95,22 @@ splits.
 
 ### Price adjustments
 
-The Taiwan price cache contains raw prices. The dividend file stores `after_price / before_price` for each event. During a run, `bt` applies all later event factors to each earlier open, high, low, and close value. It does not adjust volume.
+The Taiwan price cache contains raw prices and volume. The dividend file
+stores `after_price / before_price` for each dividend. During a run, `bt`
+applies each dividend factor to open, high, low, and close values on bars
+before its date. A later dividend factor can still adjust that date.
+Dividend factors do not change volume.
 
 `bt fetch` also downloads split, capital-reduction, and par-value-change
 reference prices for Taiwan symbols into `<symbol>.events.csv`. Each row
-holds the event date and the exact price factor. `bt` applies these
-factors together with the dividend factors during the same load step. If
-the file is missing, `bt` prints a warning and loads unadjusted prices.
+holds the event date and the exact price factor. `bt` applies each event
+factor to open, high, low, and close values on bars before its date. It
+also multiplies volume on those bars by the inverse cumulative event
+factor. Thus, volume uses the post-event share basis from the start. A
+later event factor can still adjust an earlier event date. Each factor
+excludes its own date and later dates. If the file is missing, `bt` prints
+a warning and continues without share-count-event adjustment to prices or
+volume.
 
 The US cache contains both close and adjusted close values. During a run, `bt` multiplies each open, high, low, and close value by `adj_close / close`. It does not adjust volume.
 

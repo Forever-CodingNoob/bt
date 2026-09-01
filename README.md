@@ -165,13 +165,16 @@ The engine assumes every Taiwan symbol is marginable at the standard exchange ra
 
 ## Data notes
 
-- TW prices are cached raw. The loader adjusts them for dividends with
-  factors from `TaiwanStockDividendResult`.
-- The loader adjusts TW prices for splits, capital reductions, and par
+- TW prices are cached raw. The loader adjusts prices before each dividend
+  date with factors from `TaiwanStockDividendResult`. Dividend factors do
+  not change volume.
+- The loader adjusts TW prices before splits, capital reductions, and par
   value changes with factors from `TaiwanStockSplitPrice`,
   `TaiwanStockCapitalReductionReferencePrice`, and
   `TaiwanStockParValueChange`, cached per symbol in
-  `data/tw/<symbol>.events.csv`.
+  `data/tw/<symbol>.events.csv`. It multiplies earlier volume by the inverse
+  cumulative event factor. This restates volume to the post-event share
+  basis.
 - US prices are adjusted with the `Adj_Close` column. The US cache is
   downloaded again in full on each fetch, because `Adj_Close` changes
   for old rows after each dividend.

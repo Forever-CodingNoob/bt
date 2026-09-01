@@ -1757,7 +1757,7 @@ let test_back_adjust_events () =
   Data.back_adjust combined [| ("2020-01-02", 0.9); ("2020-01-02", 0.5) |];
   assert_close 45. combined.(0).c
 
-let test_load_events () =
+let test_load_adjustments () =
   let root = Filename.temp_file "bt-test-data-" "" in
   Sys.remove root;
   Unix.mkdir root 0o700;
@@ -1777,21 +1777,73 @@ let test_load_events () =
           ~finally:(fun () -> close_out output)
           (fun () -> output_string output contents)
       in
+      write (Filename.concat tw "MIXED.csv")
+        "date,open,high,low,close,volume\n\
+         2025-06-17,400,400,400,400,100\n\
+         2025-06-18,100,100,100,100,500\n\
+         2025-07-20,100,100,100,100,600\n\
+         2025-07-21,98,98,98,98,700\n";
+      write (Filename.concat tw "MIXED.div.csv")
+        "date,factor\n2025-07-21,0.98\n";
+      write (Filename.concat tw "MIXED.events.csv")
+        "date,factor\n2025-06-18,0.25\n";
+      let mixed =
+        Data.load ~market:"tw" ~symbol:"MIXED" ~from_:None ~to_:None
+          ~data_dir:root
+      in
+      (* Before both events, 400 * 0.25 * 0.98 = 98. *)
+      assert_close 98. mixed.(0).Data.c;
+      (* The split date is adjusted only by the later dividend: 100 * 0.98 = 98. *)
+      assert_close 98. mixed.(1).Data.c;
+      (* Between the split and dividend, only the later 0.98 factor applies. *)
+      assert_close 98. mixed.(2).Data.c;
+      (* Strict-before excludes the dividend date, so its raw close stays 98. *)
+      assert_close 98. mixed.(3).Data.c;
+      (* Before the 1:4 split, 100 * (1 / 0.25) = 400 shares. *)
+      assert_close 400. mixed.(0).Data.v;
+      (* Strict-before excludes the split date, so its raw volume stays 500. *)
+      assert_close 500. mixed.(1).Data.v;
+      (* No later share-count event applies, so raw volume 600 stays 600. *)
+      assert_close 600. mixed.(2).Data.v;
+      (* A dividend does not restate volume, so raw volume 700 stays 700. *)
+      assert_close 700. mixed.(3).Data.v;
+      write (Filename.concat tw "DIV.csv")
+        "date,open,high,low,close,volume\n\
+         2020-01-01,100,100,100,100,111\n\
+         2020-01-02,90,90,90,90,222\n";
+      write (Filename.concat tw "DIV.div.csv")
+        "date,factor\n2020-01-02,0.9\n";
+      write (Filename.concat tw "DIV.events.csv") "date,factor\n";
+      let dividend =
+        Data.load ~market:"tw" ~symbol:"DIV" ~from_:None ~to_:None
+          ~data_dir:root
+      in
+      (* Before the dividend, 100 * 0.9 = 90. *)
+      assert_close 90. dividend.(0).Data.c;
+      (* Dividend adjustment never changes the raw pre-date volume of 111. *)
+      assert_close 111. dividend.(0).Data.v;
+      (* Strict-before excludes the dividend date, leaving raw volume 222. *)
+      assert_close 222. dividend.(1).Data.v;
       write (Filename.concat tw "SPLIT.csv")
         "date,open,high,low,close,volume\n\
-         2026-06-29,300,307,299,306,1000\n\
-         2026-06-30,306,307,299,306,1000\n\
-         2026-07-07,13.09,13.2,12.0,12.23,1000\n";
+         2026-06-29,100,100,100,100,10\n\
+         2026-06-30,50,50,50,50,20\n\
+         2026-07-01,55,55,55,55,30\n";
+      write (Filename.concat tw "SPLIT.div.csv") "date,factor\n";
       write (Filename.concat tw "SPLIT.events.csv")
-        "date,factor\n2026-07-07,0.041666666666666664\n";
-      let bars =
+        "date,factor\n2026-06-30,0.5\n";
+      let split =
         Data.load ~market:"tw" ~symbol:"SPLIT" ~from_:None ~to_:None
           ~data_dir:root
       in
-      assert (Array.length bars = 3);
-      assert_close 12.75 bars.(0).Data.c;
-      assert_close 12.75 bars.(1).Data.c;
-      assert_close 12.23 bars.(2).Data.c)
+      (* Before the 1:2 split, 100 * 0.5 = 50. *)
+      assert_close 50. split.(0).Data.c;
+      (* The inverse split factor restates 10 / 0.5 = 20 shares. *)
+      assert_close 20. split.(0).Data.v;
+      (* Strict-before excludes the split date, leaving raw volume 20. *)
+      assert_close 20. split.(1).Data.v;
+      (* After the split, no event factor applies and raw volume stays 30. *)
+      assert_close 30. split.(2).Data.v)
 
 let test_financing_ratio () =
   let root = Filename.temp_file "bt-test-info-" "" in
@@ -2502,7 +2554,7 @@ let () =
   test_head_probe_gate ();
   test_plot_script ();
   test_back_adjust_events ();
-  test_load_events ();
+  test_load_adjustments ();
   test_financing_ratio ();
   test_event_transform ();
   print_endline "ok"

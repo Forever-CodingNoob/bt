@@ -831,6 +831,34 @@ let back_adjust bars dividends =
   in
   adjust (Array.length bars - 1) (Array.length dividends - 1) 1.
 
+let back_adjust_volume bars events =
+  let () =
+    Array.sort
+      (fun (left, _) (right, _) -> String.compare left right)
+      events
+  in
+  let rec descend bar_date event_index factor =
+    if event_index >= 0 &&
+       String.compare (fst events.(event_index)) bar_date > 0 then
+      let factor = factor *. snd events.(event_index) in
+      descend bar_date (event_index - 1) factor
+    else event_index, factor
+  in
+  let rec adjust bar_index event_index factor =
+    if bar_index < 0 then ()
+    else
+      let event_index, factor =
+        descend bars.(bar_index).date event_index factor
+      in
+      let current = bars.(bar_index) in
+      let () =
+        bars.(bar_index) <-
+          { current with v = current.v *. (1. /. factor) }
+      in
+      adjust (bar_index - 1) event_index factor
+  in
+  adjust (Array.length bars - 1) (Array.length events - 1) 1.
+
 
 let in_range ~from_ ~to_ date =
   (match from_ with None -> true | Some first -> String.compare date first >= 0) &&
@@ -899,7 +927,10 @@ let load ~market ~symbol ~from_ ~to_ ~data_dir =
           "warning: prices unadjusted for splits/reductions"
       in
       let factors = Array.append dividends events in
-      if Array.length factors > 0 then back_adjust bars factors
+      let () =
+        if Array.length factors > 0 then back_adjust bars factors
+      in
+      if Array.length events > 0 then back_adjust_volume bars events
   in
   let selected = filter_range ~from_ ~to_ bars in
   let () =
