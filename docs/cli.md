@@ -26,7 +26,7 @@ bt run STRAT... [--baseline M/SYM] [--from D] [--to D]
        [-p name=value ...] [--fill open|close]
        [--fee-bps F] [--tax-bps F] [--slip-bps F] [--min-fee F]
        [--financing-rate PERCENT] [--maintenance-ratio PERCENT]
-       [--financing-ratio PERCENT] [--loan-term-months N]
+       [--financing-ratio PERCENT] [--loan-term-months N] [--dividend-tax PERCENT]
        [--capital TWD] [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]
 ```
 
@@ -66,6 +66,7 @@ The default cache has these files:
 | --- | --- | --- |
 | Taiwan | `data/tw/SYM.csv` | `date,open,high,low,close,volume` |
 | Taiwan | `data/tw/SYM.div.csv` | `date,factor` |
+| Taiwan | `data/tw/SYM.cashdiv.csv` | `ex_date,cash_per_share,pay_date` |
 | Taiwan | `data/tw/stockinfo.csv` | `stock_id,type,date` |
 | US | `data/us/SYM.csv` | `date,open,high,low,close,adj_close,volume` |
 
@@ -77,11 +78,8 @@ earlier range and prepends it. It also fetches dates after the last cached
 date and appends them. Cached rows win at both boundaries.
 A plain fetch updates an existing cache forward only; pass an explicit
 `--from` earlier than the cache start to backfill.
-Therefore, the command does not add a date twice, and a repeated fetch is
-idempotent. The command fetches the full Taiwan dividend history and
-rewrites `SYM.div.csv` on each run. If this fetch fails, the command keeps the
-existing dividend file. If no file exists, the command warns that prices
-will be unadjusted for dividends.
+Therefore, the command does not add a date twice, and a repeated fetch is idempotent.
+The command fetches the full Taiwan dividend-factor history and rewrites `SYM.div.csv` on each run. It also fetches cash dividends into `SYM.cashdiv.csv`. If the cash-dividend source omits a pay date, the loader uses one calendar month after the ex-date. If the source rejects the request with HTTP or API status 400, 402, or 403, `bt fetch` derives cash amounts from the legacy dividend factors and treats every factor as cash-only. This fallback is exact for cash-only TW ETFs but can misprice stocks that also pay stock dividends. Other fetch failures keep an existing cash-dividend file; without one, `bt run` warns and continues without cash credits.
 
 For every Taiwan fetch, the command also downloads the `TaiwanStockInfo` table and rewrites `data/tw/stockinfo.csv`. It keeps only `twse` and `tpex` rows. If this fetch fails, the command keeps the existing stock-info cache. An unknown symbol or a missing cache makes `bt run` warn and use the TWSE financing ratio of 60%.
 
@@ -94,24 +92,11 @@ splits.
 
 ### Price adjustments
 
-The Taiwan price cache contains raw prices and volume. The dividend file
-stores `after_price / before_price` for each dividend. During a run, `bt`
-applies each dividend factor to open, high, low, and close values on bars
-before its date. A later dividend factor can still adjust that date.
-Dividend factors do not change volume.
+The engine loads two price series for every asset. The signal series includes cash-dividend and corporate-event adjustments. The DSL evaluates indicators and rules on this series. The money series includes split, capital-reduction, par-value-change, and stock-dividend adjustments but leaves cash-dividend drops in place. The engine uses the money series for fills, inventory, loans, collateral, and equity.
 
-`bt fetch` also downloads split, capital-reduction, and par-value-change
-reference prices for Taiwan symbols into `<symbol>.events.csv`. Each row
-holds the event date and the exact price factor. `bt` applies each event
-factor to open, high, low, and close values on bars before its date. It
-also multiplies volume on those bars by the inverse cumulative event
-factor. Thus, volume uses the post-event share basis from the start. A
-later event factor can still adjust an earlier event date. Each factor
-excludes its own date and later dates. If the file is missing, `bt` prints
-a warning and continues without share-count-event adjustment to prices or
-volume.
+For Taiwan, `<symbol>.div.csv` supplies the full dividend adjustment to the signal series and `<symbol>.cashdiv.csv` separates the cash component for the money series and ledger. `<symbol>.events.csv` supplies exact split, capital-reduction, and par-value-change factors to both price series. Share-count event factors also restate earlier volume to the post-event share basis. Cash-dividend factors do not change volume.
 
-The US cache contains both close and adjusted close values. During a run, `bt` multiplies each open, high, low, and close value by `adj_close / close`. It does not adjust volume.
+For US assets, the cache contains raw close and adjusted close. The signal series uses the adjusted-close scale. The money series uses raw prices, and the loader derives each cash dividend from the daily change in the close-to-adjusted-close ratio.
 
 ## `bt run`
 
@@ -134,6 +119,7 @@ strategy file selects its data with exactly one
 | `--tax-bps F` | Override the sell tax in basis points for all strategies and the baseline. |
 | `--slip-bps F` | Override slippage in basis points for all strategies and the baseline. |
 | `--min-fee F` | Override the minimum commission per order in TWD for all strategies and the baseline. The minimum applies only with `--capital`. |
+| `--dividend-tax PERCENT` | Reduce every TW receivable and US cash dividend at creation. The default is 0%. This single percentage represents dividend income tax and the NHI supplementary premium. |
 | `--financing-rate PERCENT` | Set the annual financing rate. The default is 6.35%. A loan lot starts interest on its origination T+2 trading bar. Repayment settles interest through its repayment T+2 trading bar. The engine caps this tail at the last bar. Interest is a liability and does not reduce cash each day. |
 | `--maintenance-ratio PERCENT` | Set the maintenance threshold. The default is 130%. Maintenance is total margin inventory value divided by total loan principal. The engine sells all margin inventories at the next open when maintenance falls below the threshold. Cash inventories remain. |
 | `--financing-ratio PERCENT` | Set the fresh-loan financing ratio for every asset and skip stock-info classification. By default, the cache selects 60% for both TWSE and TPEX. Use 50 for TPEX backtests before 2014-11-10. |
@@ -144,13 +130,19 @@ strategy file selects its data with exactly one
 | `--no-plot` | Do not run `scripts/plot.py` or create or update the equity PNG. The command still writes the equity CSV and all strategy fill logs. |
 | `-h`, `-help`, `--help` | Print the run options to standard output and exit with code 0. |
 
-The four margin options apply to every strategy and the baseline. US assets ignore `--loan-term-months`.
+The four margin options apply to every strategy and the baseline. US assets ignore `--loan-term-months`. `--dividend-tax` also applies to every strategy and the baseline.
 
 The engine keeps separate cash and margin inventories for each asset. Each margin purchase creates a loan lot with its own origination, principal, and interest. Partial repayments reduce all lots for that asset pro rata. Buys use available cash first and take fresh loans only for margin-funded shares. If required down payments exceed available cash, the engine can refinance existing inventories with sell and buy legs. Both legs charge full trading costs. A cash inventory frees the financing ratio per refinanced unit. A margin inventory frees only a positive amount after its loan and interest are repaid.
 
 A TW lot matures on the same day of the month after the configured term. The date clamps to the month end when needed. On the first bar at or after maturity, the engine sells that lot's margin inventory and buys back the fundable part on margin. Appreciation frees cash. An underwater lot draws from available cash. Any unfundable part stays sold, which reduces exposure and creates a fill-log row. The sell and buy legs pay normal costs and increment the refinance count. The interest tail stops at repayment T+2 or the last bar, whichever comes first. The last-bar cap is a simplification because the engine does not extrapolate prices.
 
 At a standard margin entry, collateral-only maintenance is 166.7% for both TWSE and TPEX, independent of total exposure. If equity is zero or less at a close, the engine sells all inventories, keeps any unpaid debt, and freezes the account.
+
+On a TW ex-date, the engine books a receivable from the shares held in each cash and margin inventory. Receivables increase equity but do not increase maintenance collateral or the fill planner's available cash. In a synchronized multi-stock run, the engine books an event on the retained bar whose interval satisfies `previous common date < ex-date <= current common date`. It ignores events on or before the first retained date because the run had no earlier inventory.
+
+On the first retained bar on or after a TW pay date, the cash-inventory receivable becomes account cash. The margin-inventory receivable repays that asset's loan lots pro rata and settles the matching share of accrued interest. Any amount above loan principal and interest becomes account cash. A frozen account still converts a receivable and uses it to reduce residual debt.
+
+For US assets, the full net dividend becomes cash on the ex-date. This zero-lag treatment is a simplification; the engine does not create a US receivable period. Any bar where dividend cash reaches the account triggers one normal fill pass toward every asset's current target, with normal costs. Bars without a target change or dividend cash keep the normal drift behavior.
 
 Do not pass `--market`, `--symbol`, or `--benchmark-market` to `bt run`.
 `--benchmark` was renamed to `--baseline`.

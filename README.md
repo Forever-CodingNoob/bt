@@ -84,7 +84,7 @@ bt run STRAT... [--baseline M/SYM] [--from D] [--to D]
        [-p name=value ...] [--fill open|close]
        [--fee-bps F] [--tax-bps F] [--slip-bps F] [--min-fee F]
        [--financing-rate PCT] [--maintenance-ratio PCT] [--financing-ratio PCT]
-       [--loan-term-months N]
+       [--loan-term-months N] [--dividend-tax PCT]
        [--capital TWD] [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]
 ```
 
@@ -107,6 +107,7 @@ See [docs/cli.md](./docs/cli.md) for the complete reference.
 - `--no-plot` skips `scripts/plot.py` and prevents updates to `<stem>.png`.
 - `--fee-bps`, `--tax-bps`, and `--slip-bps` take basis points. 100 basis
   points are 1%. `--capital` and `--min-fee` take TWD.
+- `--dividend-tax` takes a percentage. It defaults to 0 and reduces each dividend before the engine books it.
 
 ## Strategy language (DSL)
 
@@ -164,23 +165,20 @@ TW loan lots mature after 18 calendar months by default. The maturity keeps the 
 
 Maintenance is total margin inventory value divided by total loan principal. It starts at 166.7% for both TWSE and TPEX margin entries, independent of total exposure. The default threshold is 130%. A call sells all margin inventories at the next open, but cash inventories remain. If equity is zero or less at a close, the engine sells everything, keeps any unpaid debt, and freezes the account.
 
+The engine uses two price series for each asset. The signal series keeps dividend and corporate-event adjustments, so indicators and rules keep their existing meaning. The money series keeps split, capital-reduction, par-value-change, and stock-dividend adjustments but leaves cash-dividend drops in place. Fills, inventory, loans, collateral, and equity use the money series.
+
+On a TW ex-date, the engine books net cash dividends as receivables for the shares in the cash and margin inventories. Receivables count in equity but not in maintenance or fill-planner liquidity. On the first bar on or after the pay date, the cash-inventory receivable becomes cash. The margin-inventory receivable repays that asset's loan lots pro rata with matching accrued interest, and any excess becomes cash. A frozen account still applies paid receivables to residual debt.
+
+US dividends become cash on the ex-date. This zero-lag treatment is a simplification. Whenever dividend cash arrives, the engine makes one normal fill pass toward the current targets for every asset and charges normal costs. `--dividend-tax PCT` reduces the dividend when it is booked and defaults to 0.
+
 The engine assumes every Taiwan symbol is marginable at the standard exchange ratio. It does not check broker eligibility or reduced financing ratios. Leveraged ETFs such as 00685L have historically been excluded from margin financing or assigned reduced ratios, so live margin trading can be unavailable.
 
 ## Data notes
 
-- TW prices are cached raw. The loader adjusts prices before each dividend
-  date with factors from `TaiwanStockDividendResult`. Dividend factors do
-  not change volume.
-- The loader adjusts TW prices before splits, capital reductions, and par
-  value changes with factors from `TaiwanStockSplitPrice`,
-  `TaiwanStockCapitalReductionReferencePrice`, and
-  `TaiwanStockParValueChange`, cached per symbol in
-  `data/tw/<symbol>.events.csv`. It multiplies earlier volume by the inverse
-  cumulative event factor. This restates volume to the post-event share
-  basis.
-- US prices are adjusted with the `Adj_Close` column. The US cache is
-  downloaded again in full on each fetch, because `Adj_Close` changes
-  for old rows after each dividend.
+- TW prices are cached raw. `data/tw/<symbol>.cashdiv.csv` stores cash ex-dates, cash per share, and pay dates. If a pay date is absent, the loader uses one calendar month after the ex-date.
+- The loader builds a dividend-adjusted signal series and a money series that keeps cash-dividend price drops. Both series keep exact split, capital-reduction, par-value-change, and stock-dividend adjustments. Volume changes only for share-count events.
+- If FinMind denies the cash-dividend table with HTTP or API status 400, 402, or 403, `bt fetch` derives cash from the legacy `<symbol>.div.csv` factors and treats every factor as cash-only. This is exact for cash-only TW ETFs. It can misprice stocks that also pay stock dividends.
+- US caches keep raw close and adjusted close. The loader uses their daily ratio to derive ex-date cash dividends, builds the signal series from adjusted prices, and keeps cash-dividend drops in the money series.
 - A Taiwan fetch prepends rows when `--from` is earlier than the first
   cached date. It also appends rows after the last cached date. Cached
   dates are not added again, so repeated fetches are idempotent.

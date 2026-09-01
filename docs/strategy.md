@@ -38,6 +38,16 @@ Forced margin-call and solvency sales fill at the recorded next-open or close pr
 
 The engine assumes every Taiwan symbol is marginable at the standard exchange ratio. It does not check broker eligibility or reduced financing ratios. Leveraged ETFs such as 00685L have historically been excluded from margin financing or assigned reduced ratios, so live margin trading can be unavailable.
 
+### Dividend accounting
+
+The DSL reads a signal price series that adjusts for dividends and corporate events. The engine uses a separate money price series that keeps cash-dividend drops but adjusts splits, capital reductions, par-value changes, and stock dividends. Strategy conditions therefore keep their adjusted-price meaning, while fills, inventory, loans, collateral, and equity use traded-price economics.
+
+On a TW ex-date, the engine books net cash dividends as separate receivables for cash and margin inventory shares. The receivables increase equity but do not count as maintenance collateral or fill-planner liquidity. On the first bar on or after the pay date, the cash-side amount becomes cash. The margin-side amount repays that asset's loan lots pro rata with matching accrued interest; any excess becomes cash. A frozen account still uses paid receivables to reduce residual debt.
+
+If TW data omits a pay date, the loader uses one calendar month after the ex-date. On a common-date axis, it books each event on the retained bar where `previous common date < ex-date <= current common date`; an event on or before the first retained date is ignored because there was no pre-run inventory.
+
+US dividends become cash on their ex-date. This zero-lag treatment is a simplification. When dividend cash arrives, the engine runs one normal cost-bearing fill pass toward the current targets for all assets. Other bars retain target-change-only fills and normal drift. `--dividend-tax PCT`, default 0, reduces each dividend when it is booked.
+
 ### Partial orders
 
 ```
@@ -171,8 +181,7 @@ Operator precedence, from low to high: `or`, `and`, `not`, comparisons,
 - `cap number`, or `alias.cap number`, sets the maximum exposure for
   partial orders. It is optional. The default is 1.0.
 
-Trips are per stock. Entry and exit prices are the exposure-weighted fill
-VWAPs, and `net_ret = exit VWAP / entry VWAP - 1`. Costs are excluded.
+Trips are per stock. Entry and exit prices are the exposure-weighted fill VWAPs, and `net_ret = exit VWAP / entry VWAP - 1`. Costs and dividends are excluded. These statistics are ex-dividend price returns: dividend cash affects portfolio equity, not the trip win rate.
 
 ## Values and types
 
