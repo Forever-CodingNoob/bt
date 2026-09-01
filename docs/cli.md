@@ -27,7 +27,7 @@ bt run STRAT... [--baseline M/SYM] [--from D] [--to D]
        [-p name=value ...] [--fill open|close]
        [--fee-bps F] [--tax-bps F] [--slip-bps F] [--min-fee F]
        [--financing-rate PERCENT] [--maintenance-ratio PERCENT]
-       [--financing-ratio PERCENT]
+       [--financing-ratio PERCENT] [--loan-term-months N]
        [--capital TWD] [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]
 ```
 
@@ -135,18 +135,21 @@ strategy file selects its data with exactly one
 | `--tax-bps F` | Override the sell tax in basis points for all strategies and the baseline. |
 | `--slip-bps F` | Override slippage in basis points for all strategies and the baseline. |
 | `--min-fee F` | Override the minimum commission per order in TWD for all strategies and the baseline. The minimum applies only with `--capital`. |
-| `--financing-rate PERCENT` | Set the annual financing rate. The default is 6.35%. Interest accrues by calendar day as a liability and settles with loan repayment. It does not reduce cash each day. |
-| `--maintenance-ratio PERCENT` | Set the maintenance threshold. The default is 130%. Maintenance is total margin inventory value divided by total loans. The engine sells all margin inventories at the next open when maintenance falls below the threshold. Cash inventories remain. |
+| `--financing-rate PERCENT` | Set the annual financing rate. The default is 6.35%. A loan lot starts interest on its origination T+2 trading bar. Repayment settles interest through its repayment T+2 trading bar. The engine caps this tail at the last bar. Interest is a liability and does not reduce cash each day. |
+| `--maintenance-ratio PERCENT` | Set the maintenance threshold. The default is 130%. Maintenance is total margin inventory value divided by total loan principal. The engine sells all margin inventories at the next open when maintenance falls below the threshold. Cash inventories remain. |
 | `--financing-ratio PERCENT` | Set the fresh-loan financing ratio for every asset and skip stock-info classification. By default, the cache selects 60% for both TWSE and TPEX. Use 50 for TPEX backtests before 2014-11-10. |
+| `--loan-term-months N` | Set the TW margin-loan term in calendar months. The default is 18. Use 0 for open-ended TW loans. US loans are always open-ended. |
 | `--data-dir DIR` | Set the cache directory. The default is `data/`. |
 | `--out-dir DIR` | Set the output directory. The default is `out/`. |
 | `--out-name NAME` | Set the equity CSV and PNG stem. The default joins the strategy names with `_vs_`. |
 | `--no-plot` | Do not run `scripts/plot.py` or create or update the equity PNG. The command still writes the equity CSV and all strategy fill logs. |
 | `-h`, `-help`, `--help` | Print the run options to standard output and exit with code 0. |
 
-The three margin options apply to every strategy and the baseline.
+The four margin options apply to every strategy and the baseline. US assets ignore `--loan-term-months`.
 
-The engine keeps separate cash and margin inventories for each asset. Buys use available cash first and take fresh loans only for margin-funded shares. If required down payments exceed available cash, the engine can refinance existing inventories with sell and buy legs. Both legs charge full trading costs. A cash inventory frees the financing ratio per refinanced unit. A margin inventory frees only a positive amount after its loan and interest are repaid.
+The engine keeps separate cash and margin inventories for each asset. Each margin purchase creates a loan lot with its own origination, principal, and interest. Partial repayments reduce all lots for that asset pro rata. Buys use available cash first and take fresh loans only for margin-funded shares. If required down payments exceed available cash, the engine can refinance existing inventories with sell and buy legs. Both legs charge full trading costs. A cash inventory frees the financing ratio per refinanced unit. A margin inventory frees only a positive amount after its loan and interest are repaid.
+
+A TW lot matures on the same day of the month after the configured term. The date clamps to the month end when needed. On the first bar at or after maturity, the engine sells that lot's margin inventory and buys back the fundable part on margin. Appreciation frees cash. An underwater lot draws from available cash. Any unfundable part stays sold, which reduces exposure and creates a fill-log row. The sell and buy legs pay normal costs and increment the refinance count. The interest tail stops at repayment T+2 or the last bar, whichever comes first. The last-bar cap is a simplification because the engine does not extrapolate prices.
 
 At a standard margin entry, collateral-only maintenance is 166.7% for both TWSE and TPEX, independent of total exposure. If equity is zero or less at a close, the engine sells all inventories, keeps any unpaid debt, and freezes the account.
 
@@ -216,7 +219,7 @@ return, CAGR, Sharpe, MaxDD, and Calmar. The lines below the table show each
 strategy's trade count and win rate, the common date range, and the fill
 mode.
 
-If a strategy had a loan on at least one bar, `bt run` also prints a margin line with the financing rate, minimum maintenance, margin-call count, refinance count, and clamp count:
+If a strategy had a loan on at least one bar, `bt run` also prints a margin line with the financing rate, minimum maintenance, margin-call count, refinance count, and clamp count. The refinance count includes forced term rollovers:
 
 ```text
 channel_ladder: margin — financing 6.35%/yr, min maintenance 145.20%, margin calls 1, refinances 3, clamps 0

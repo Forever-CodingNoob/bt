@@ -6,6 +6,7 @@ let usage =
    \         [-p name=value ...] [--fill open|close]\n\
    \         [--fee-bps F] [--tax-bps F] [--slip-bps F] [--min-fee F]\n\
    \         [--financing-rate PCT] [--maintenance-ratio PCT] [--financing-ratio PCT]\n\
+   \         [--loan-term-months N]\n\
    \         [--capital TWD] [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]"
 
 let help =
@@ -170,6 +171,7 @@ let run argv =
   let financing_rate = ref 6.35 in
   let maintenance_ratio = ref 130. in
   let financing_ratio = ref None in
+  let loan_term_months = ref 18 in
   let data_dir = ref "data" in
   let out_dir = ref "out" in
   let out_name = ref None in
@@ -209,6 +211,9 @@ let run argv =
       ("--financing-ratio",
        Arg.Float (fun value -> financing_ratio := Some value),
        "uniform financing ratio percent");
+      ("--loan-term-months",
+       Arg.Set_int loan_term_months,
+       "TW margin-loan term in months; 0 disables (default 18)");
       ("--data-dir", Arg.Set_string data_dir, "cache directory");
       ("--out-dir", Arg.Set_string out_dir, "output directory");
       ("--out-name", Arg.String (fun value -> out_name := Some value), "output stem");
@@ -228,6 +233,8 @@ let run argv =
        exit 0);
   let strategy_files = List.rev !strategy_files in
   if strategy_files = [] then usage_error "run: at least one STRAT file is required";
+  if !loan_term_months < 0 then
+    usage_error "run: --loan-term-months must be 0 or greater";
   (match !baseline with
    | Some (market, _) when market <> "tw" && market <> "us" ->
        usage_error "run: --baseline market must be tw or us"
@@ -307,6 +314,9 @@ let run argv =
     | Some percent -> percent /. 100.
     | None -> Btlib.Data.financing_ratio ~data_dir:!data_dir ~symbol
   in
+  let configured_loan_term =
+    if !loan_term_months = 0 then None else Some !loan_term_months
+  in
   let runs =
     List.map
       (fun input ->
@@ -348,7 +358,13 @@ let run argv =
         let margin_config : Btlib.Engine.margin =
           { financing_rate = !financing_rate /. 100.;
             maintenance_ratio = !maintenance_ratio /. 100.;
-            ratios }
+            ratios;
+            loan_term_months =
+              if List.exists
+                   (fun (_, market, _) -> market = "tw")
+                   input.stocks
+              then configured_loan_term
+              else None }
         in
         let result =
           Btlib.Engine.run engine_assets strategy costs
@@ -368,7 +384,9 @@ let run argv =
         let margin_config : Btlib.Engine.margin =
           { financing_rate = !financing_rate /. 100.;
             maintenance_ratio = !maintenance_ratio /. 100.;
-            ratios = [| ratio_for symbol |] }
+            ratios = [| ratio_for symbol |];
+            loan_term_months =
+              if market = "tw" then configured_loan_term else None }
         in
         Some
           (Btlib.Engine.run [| (market ^ "/" ^ symbol, bars) |]

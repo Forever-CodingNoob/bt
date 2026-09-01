@@ -84,6 +84,7 @@ bt run STRAT... [--baseline M/SYM] [--from D] [--to D]
        [-p name=value ...] [--fill open|close]
        [--fee-bps F] [--tax-bps F] [--slip-bps F] [--min-fee F]
        [--financing-rate PCT] [--maintenance-ratio PCT] [--financing-ratio PCT]
+       [--loan-term-months N]
        [--capital TWD] [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]
 ```
 
@@ -155,11 +156,13 @@ styles, grammar, statements, types, and every builtin.
   Override these with the cost flags (0.0399% = 3.99 basis points).
 - An open position at the end of the data is closed at the last close.
 
-Targets fill only when they change, so positions drift between fills. Each asset has separate cash and margin inventories. A buy uses available cash first. A new margin purchase borrows 60% of its value for both TWSE and TPEX stocks. The TPEX maximum became 60% on 2014-11-10; use `--financing-ratio 50` for earlier TPEX backtests.
+Targets fill only when they change, so positions drift between fills. Each asset has separate cash and margin inventories. A buy uses available cash first. Each margin purchase creates a separate loan lot. A new lot borrows 60% of its value for both TWSE and TPEX stocks. The TPEX maximum became 60% on 2014-11-10; use `--financing-ratio 50` for earlier TPEX backtests.
 
-If required down payments exceed available cash, the engine can refinance existing inventory with a sell and buy pair. Both legs charge full trading costs. Financing interest accrues by calendar day as a liability at 6.35% per year by default and settles with repayment. It does not reduce cash each day. Equity is cash plus both inventories, less loans, accrued interest, and residual debt.
+If required down payments exceed available cash, the engine can refinance existing inventory with a sell and buy pair. Both legs charge full trading costs. Financing interest is a liability at 6.35% per year by default. It starts on the second trading bar after a loan lot originates. Repayment settles interest through the second trading bar after repayment. The engine caps this tail at the last bar instead of extrapolating beyond the data. This cap is a simplification. Interest does not reduce cash each day. Equity is cash plus both inventories, less loan principal, accrued interest, and residual debt.
 
-Maintenance is total margin inventory value divided by total loans. It starts at 166.7% for both TWSE and TPEX margin entries, independent of total exposure. The default threshold is 130%. A call sells all margin inventories at the next open, but cash inventories remain. If equity is zero or less at a close, the engine sells everything, keeps any unpaid debt, and freezes the account.
+TW loan lots mature after 18 calendar months by default. The maturity keeps the origination day of the month and clamps to the month end when needed. The engine rolls a mature lot by selling its margin inventory and buying back the fundable part on margin. Both legs pay normal costs. Appreciation can free cash. An underwater lot uses available cash, and any unfundable part stays sold. The rollover increments the refinance count. Use `--loan-term-months 0` to disable the TW term. US loan lots are always open-ended.
+
+Maintenance is total margin inventory value divided by total loan principal. It starts at 166.7% for both TWSE and TPEX margin entries, independent of total exposure. The default threshold is 130%. A call sells all margin inventories at the next open, but cash inventories remain. If equity is zero or less at a close, the engine sells everything, keeps any unpaid debt, and freezes the account.
 
 The engine assumes every Taiwan symbol is marginable at the standard exchange ratio. It does not check broker eligibility or reduced financing ratios. Leveraged ETFs such as 00685L have historically been excluded from margin financing or assigned reduced ratios, so live margin trading can be unavailable.
 

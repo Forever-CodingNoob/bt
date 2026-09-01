@@ -21,11 +21,13 @@ type fill_event = {
   to_e : float;
 }
 
-(** Portfolio margin configuration and per-asset financing ratios. *)
+(** Portfolio margin configuration. [loan_term_months] is the TW
+    calendar-month term; US assets always remain open-ended. *)
 type margin = {
   financing_rate : float;
   maintenance_ratio : float;
   ratios : float array;
+  loan_term_months : int option;
 }
 
 (** Margin diagnostics collected during a run. *)

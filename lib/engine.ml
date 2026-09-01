@@ -21,6 +21,13 @@ type margin = {
   financing_rate : float;
   maintenance_ratio : float;
   ratios : float array;
+  loan_term_months : int option;
+}
+
+type margin_lot = {
+  origination_index : int;
+  mutable principal : float;
+  mutable interest : float;
 }
 
 type margin_stats = {
@@ -109,6 +116,24 @@ let day_number date =
   let m = month + (12 * a) - 3 in
   day + (((153 * m) + 2) / 5) + (365 * y) + (y / 4) - (y / 100) + (y / 400)
 
+let days_in_month year = function
+  | 2 ->
+      if year mod 400 = 0 || (year mod 4 = 0 && year mod 100 <> 0)
+      then 29
+      else 28
+  | 4 | 6 | 9 | 11 -> 30
+  | _ -> 31
+
+let add_months_clamped date months =
+  let year = int_of_string (String.sub date 0 4) in
+  let month = int_of_string (String.sub date 5 2) in
+  let day = int_of_string (String.sub date 8 2) in
+  let absolute_month = (year * 12) + month - 1 + months in
+  let target_year = absolute_month / 12 in
+  let target_month = absolute_month mod 12 + 1 in
+  let target_day = min day (days_in_month target_year target_month) in
+  Printf.sprintf "%04d-%02d-%02d" target_year target_month target_day
+
 let run (assets : (string * Data.bar array) array) (strategy : strategy)
     (costs : costs array) ~(margin : margin)
     ~capital:(capital : float option) ~fill =
@@ -158,8 +183,7 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
   let cash = ref 1. in
   let cash_values = Array.make asset_count 0. in
   let margin_values = Array.make asset_count 0. in
-  let loans = Array.make asset_count 0. in
-  let interests = Array.make asset_count 0. in
+  let margin_lots = Array.make asset_count [] in
   let debt = ref 0. in
   let prev_eff = Array.make asset_count 0. in
   let pending_liquidation = ref false in
@@ -176,13 +200,80 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
   let fills = ref [] in
   let trips = ref [] in
   let equity_curve = ref [] in
+  let last_index = length - 1 in
+  let date_at index bar_index =
+    (snd assets.(index)).(bar_index).Data.date
+  in
+  let loan_at index =
+    List.fold_left
+      (fun total lot -> total +. lot.principal)
+      0. margin_lots.(index)
+  in
+  let interest_at index =
+    List.fold_left
+      (fun total lot -> total +. lot.interest)
+      0. margin_lots.(index)
+  in
+  let total_loans () =
+    fold_assets (fun total index -> total +. loan_at index) 0.
+  in
+  let total_interests () =
+    fold_assets (fun total index -> total +. interest_at index) 0.
+  in
+  let scale_lots index remaining =
+    if remaining <= 0. then margin_lots.(index) <- []
+    else
+      List.iter
+        (fun lot ->
+          lot.principal <- lot.principal *. remaining;
+          lot.interest <- lot.interest *. remaining)
+        margin_lots.(index)
+  in
+  let add_lot index ~bar_index principal =
+    if principal > 0. then
+      margin_lots.(index) <-
+        { origination_index = bar_index; principal; interest = 0. }
+        :: margin_lots.(index)
+  in
+  let settlement_start_index lot =
+    Int.min last_index (lot.origination_index + 2)
+  in
+  let tail_interest_for_lot index bar_index lot =
+    let start_index =
+      Int.max bar_index (settlement_start_index lot)
+    in
+    let stop_index = Int.min last_index (bar_index + 2) in
+    if stop_index > start_index then
+      let days =
+        day_number (date_at index stop_index)
+        - day_number (date_at index start_index)
+      in
+      lot.principal *. margin.financing_rate
+      *. float_of_int days /. 365.
+    else 0.
+  in
+  let tail_interest_at index bar_index =
+    List.fold_left
+      (fun total lot ->
+        total +. tail_interest_for_lot index bar_index lot)
+      0. margin_lots.(index)
+  in
+  let capitalize_tail_interest index bar_index =
+    List.iter
+      (fun lot ->
+        lot.interest <-
+          lot.interest +. tail_interest_for_lot index bar_index lot)
+      margin_lots.(index)
+  in
   let total_value index =
     cash_values.(index) +. margin_values.(index)
   in
   let total_assets () =
     fold_assets (fun total index -> total +. total_value index) 0.
   in
-  let total_liabilities () = sum loans +. sum interests +. !debt in
+  let total_liabilities () =
+    total_loans () +. total_interests () +. !debt
+  in
   let has_inventory () =
     Array.exists (fun value -> value > 0.) cash_values
     || Array.exists (fun value -> value > 0.) margin_values
@@ -237,33 +328,41 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
         net_ret = exit_price /. entry_price -. 1. } :: !trips
   in
   let settle_asset_liabilities index =
-    let total = loans.(index) +. interests.(index) in
-    if !cash > 0. && total > 0. then
-      let payment = Float.min !cash total in
-      let remaining = 1. -. payment /. total in
-      let () = cash := !cash -. payment in
-      let () = loans.(index) <- loans.(index) *. remaining in
-      interests.(index) <- interests.(index) *. remaining
+    let total = loan_at index +. interest_at index in
+    let () =
+      if !cash > 0. && total > 0. then
+        let payment = Float.min !cash total in
+        let remaining = 1. -. payment /. total in
+        let () = cash := !cash -. payment in
+        scale_lots index remaining
+    in
+    if margin_values.(index) = 0. then
+      let residual = loan_at index +. interest_at index in
+      if residual > 0. then
+        let () = debt := !debt +. residual in
+        margin_lots.(index) <- []
   in
   let settle_all_liabilities () =
     let total = total_liabilities () in
-    if !cash > 0. && total > 0. then
-      let payment = Float.min !cash total in
-      let remaining = 1. -. payment /. total in
-      let () = cash := !cash -. payment in
-      let () =
-        Array.iteri
-          (fun index loan -> loans.(index) <- loan *. remaining)
-          loans
-      in
-      let () =
-        Array.iteri
-          (fun index interest -> interests.(index) <- interest *. remaining)
-          interests
-      in
-      debt := !debt *. remaining
+    let () =
+      if !cash > 0. && total > 0. then
+        let payment = Float.min !cash total in
+        let remaining = 1. -. payment /. total in
+        let () = cash := !cash -. payment in
+        let () =
+          iter_assets (fun index -> scale_lots index remaining)
+        in
+        debt := !debt *. remaining
+    in
+    iter_assets (fun index ->
+      if margin_values.(index) = 0. then
+        let residual = loan_at index +. interest_at index in
+        if residual > 0. then
+          let () = debt := !debt +. residual in
+          margin_lots.(index) <- [])
   in
-  let sell_inventory ?(settle = true) index ~margin_only ~date ~price =
+  let sell_inventory ?(settle = true) index ~margin_only ~bar_index
+      ~date ~price =
     let total_before = total_value index in
     let amount =
       if margin_only then margin_values.(index) else total_before
@@ -335,13 +434,15 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
               let () = debt := !debt -. !cash in
               cash := 0.
           in
-          if settle then settle_asset_liabilities index
+          if settle then
+            let () = capitalize_tail_interest index bar_index in
+            settle_asset_liabilities index
       in
       let () = record_fill index ~date ~price ~from_e ~to_e in
       if total_value index = 0. then close_trip index ~date
   in
   let track_maintenance () =
-    let total_loan = sum loans in
+    let total_loan = total_loans () in
     if total_loan > 0. then
       let ratio = sum margin_values /. total_loan in
       let () =
@@ -352,17 +453,185 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
       Some ratio
     else None
   in
+  let rollover_matured ~bar_index ~date price_at =
+    match margin.loan_term_months with
+    | None -> ()
+    | Some months ->
+        let e0 = equity () in
+        if months > 0 && e0 > 0. then
+          let roll_values = Array.make asset_count 0. in
+          let roll_dues = Array.make asset_count 0. in
+          let remaining_lots = Array.copy margin_lots in
+          let has_rollover = ref false in
+          let () =
+            iter_assets (fun index ->
+              let stock = fst assets.(index) in
+              if String.length stock >= 3
+                 && stock.[0] = 't' && stock.[1] = 'w' && stock.[2] = '/'
+              then
+                let matured_reversed, live_reversed =
+                  List.fold_left
+                    (fun (matured, live) lot ->
+                      let origination_date =
+                        date_at index lot.origination_index
+                      in
+                      let maturity =
+                        add_months_clamped origination_date months
+                      in
+                      if String.compare date maturity >= 0 then
+                        lot :: matured, live
+                      else matured, lot :: live)
+                    ([], []) margin_lots.(index)
+                in
+                match matured_reversed with
+                | [] -> ()
+                | _ ->
+                    let matured = List.rev matured_reversed in
+                    let total_loan = loan_at index in
+                    let matured_principal =
+                      List.fold_left
+                        (fun total lot -> total +. lot.principal)
+                        0. matured
+                    in
+                    let value =
+                      if total_loan > 0. then
+                        margin_values.(index)
+                        *. matured_principal /. total_loan
+                      else 0.
+                    in
+                    let due =
+                      List.fold_left
+                        (fun total lot ->
+                          total +. lot.principal +. lot.interest
+                          +. tail_interest_for_lot index bar_index lot)
+                        0. matured
+                    in
+                    let () = has_rollover := true in
+                    let () = roll_values.(index) <- value in
+                    let () = roll_dues.(index) <- due in
+                    remaining_lots.(index) <- List.rev live_reversed)
+          in
+          if !has_rollover then
+            let () = ignore (track_maintenance ()) in
+            let sell_costs =
+              Array.init asset_count
+                (fun index ->
+                  let value = roll_values.(index) in
+                  if value > 0. then
+                    charge index ~equity_before:e0
+                      ~delta:(-. value /. e0) *. e0
+                  else 0.)
+            in
+            let cash_after_sales =
+              fold_assets
+                (fun available index ->
+                  available +. roll_values.(index)
+                  -. sell_costs.(index) -. roll_dues.(index))
+                !cash
+            in
+            let rebuy_cash scale =
+              fold_assets
+                (fun required index ->
+                  let buy = roll_values.(index) *. scale in
+                  if buy > 0. then
+                    let buy_cost =
+                      charge index ~equity_before:e0
+                        ~delta:(buy /. e0) *. e0
+                    in
+                    required
+                    +. (1. -. margin.ratios.(index)) *. buy
+                    +. buy_cost
+                  else required)
+                0.
+            in
+            let scale =
+              if cash_after_sales <= 0. then 0.
+              else if rebuy_cash 1. <= cash_after_sales then 1.
+              else
+                let rec search remaining low high =
+                  if remaining = 0 then low
+                  else
+                    let candidate = (low +. high) /. 2. in
+                    if rebuy_cash candidate <= cash_after_sales then
+                      search (remaining - 1) candidate high
+                    else search (remaining - 1) low candidate
+                in
+                search 60 0. 1.
+            in
+            let from_es =
+              Array.init asset_count
+                (fun index -> total_value index /. e0)
+            in
+            let sell_to_es =
+              Array.init asset_count
+                (fun index ->
+                  (total_value index -. roll_values.(index)) /. e0)
+            in
+            let () =
+              iter_assets (fun index ->
+                let value = roll_values.(index) in
+                let () =
+                  margin_values.(index) <-
+                    Float.max 0. (margin_values.(index) -. value)
+                in
+                let () = margin_lots.(index) <- remaining_lots.(index) in
+                if value > 0. then
+                  record_fill index ~date ~price:(price_at index)
+                    ~from_e:from_es.(index) ~to_e:sell_to_es.(index))
+            in
+            let () =
+              if cash_after_sales < 0. then
+                let () = debt := !debt -. cash_after_sales in
+                cash := 0.
+              else cash := cash_after_sales
+            in
+            let () =
+              if cash_after_sales >= 0. then
+                iter_assets (fun index ->
+                  let buy = roll_values.(index) *. scale in
+                  if buy > 0. then
+                    let buy_cost =
+                      charge index ~equity_before:e0
+                        ~delta:(buy /. e0) *. e0
+                    in
+                    let () =
+                      cash :=
+                        !cash
+                        -. (1. -. margin.ratios.(index)) *. buy
+                        -. buy_cost
+                    in
+                    let () =
+                      margin_values.(index) <-
+                        margin_values.(index) +. buy
+                    in
+                    let () =
+                      add_lot index ~bar_index
+                        (buy *. margin.ratios.(index))
+                    in
+                    record_fill index ~date ~price:(price_at index)
+                      ~from_e:sell_to_es.(index)
+                      ~to_e:
+                        ((total_value index) /. e0))
+            in
+            let () =
+              if !cash < 0. then
+                let () = debt := !debt -. !cash in
+                cash := 0.
+            in
+            incr refinances
+  in
   let record_call date =
     match !margin_call_dates with
     | latest :: _ when latest = date -> ()
     | _ -> margin_call_dates := date :: !margin_call_dates
   in
-  let bankrupt_all ~date price_at =
+  let bankrupt_all ~bar_index ~date price_at =
     let () = ignore (track_maintenance ()) in
     let () = record_call date in
     let () =
       iter_assets (fun index ->
-        sell_inventory index ~margin_only:false ~date ~price:(price_at index))
+        sell_inventory index ~margin_only:false ~bar_index
+          ~date ~price:(price_at index))
     in
     let () = settle_all_liabilities () in
     let () = bankrupt := true in
@@ -401,17 +670,26 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
       if margin_values.(index) <> 0. then
         margin_values.(index) <- margin_values.(index) *. factor)
   in
-  let accrue_interest ~date ~prev_date =
+  let accrue_interest ~bar_index ~date ~prev_date =
     let days = day_number date - day_number prev_date in
     iter_assets (fun index ->
-      if loans.(index) > 0. then
-        interests.(index) <-
-          interests.(index)
-          +. loans.(index) *. margin.financing_rate
-             *. float_of_int days /. 365.)
+      List.iter
+        (fun lot ->
+          if bar_index > settlement_start_index lot then
+            lot.interest <-
+              lot.interest
+              +. lot.principal *. margin.financing_rate
+                 *. float_of_int days /. 365.)
+        margin_lots.(index))
   in
-  let apply_fills ~date ~eff ~clamped price_at =
+  let apply_fills ~bar_index ~date ~eff ~clamped price_at =
     let e0 = equity () in
+    let current_loans = Array.init asset_count loan_at in
+    let current_interests = Array.init asset_count interest_at in
+    let current_tails =
+      Array.init asset_count
+        (fun index -> tail_interest_at index bar_index)
+    in
     let () =
       if e0 > 0. then
       let tolerance = 1e-15 *. abs_float e0 in
@@ -431,10 +709,12 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
         let sell_cashes = Array.make asset_count 0. in
         let repayments = Array.make asset_count 0. in
         let interest_settled = Array.make asset_count 0. in
+        let interest_tails = Array.make asset_count 0. in
         let post_cash_values = Array.copy cash_values in
         let post_margin_values = Array.copy margin_values in
-        let post_loans = Array.copy loans in
-        let post_interests = Array.copy interests in
+        let post_loans = Array.copy current_loans in
+        let post_interests = Array.copy current_interests in
+        let post_tails = Array.copy current_tails in
         let () =
           iter_assets (fun index ->
             let current = total_value index in
@@ -461,12 +741,17 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
                   sell_margin /. margin_values.(index)
                 else 0.
               in
-              let repayment = loans.(index) *. fraction in
-              let settled = interests.(index) *. fraction in
+              let repayment = current_loans.(index) *. fraction in
+              let accrued =
+                current_interests.(index) *. fraction
+              in
+              let tail = current_tails.(index) *. fraction in
+              let settled = accrued +. tail in
               let () = sell_margins.(index) <- sell_margin in
               let () = sell_cashes.(index) <- sell_cash in
               let () = repayments.(index) <- repayment in
               let () = interest_settled.(index) <- settled in
+              let () = interest_tails.(index) <- tail in
               let () =
                 post_cash_values.(index) <-
                   cash_values.(index) -. sell_cash
@@ -475,8 +760,15 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
                 post_margin_values.(index) <-
                   margin_values.(index) -. sell_margin
               in
-              let () = post_loans.(index) <- loans.(index) -. repayment in
-              post_interests.(index) <- interests.(index) -. settled)
+              let () =
+                post_loans.(index) <-
+                  current_loans.(index) -. repayment
+              in
+              let () =
+                post_interests.(index) <-
+                  current_interests.(index) -. accrued
+              in
+              post_tails.(index) <- current_tails.(index) -. tail)
         in
         let has_requested_buy =
           Array.exists (fun trade -> trade > 0.) trades
@@ -512,7 +804,8 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
                 if post_margin_values.(index) > 0. then
                   Float.max 0.
                     (ratio
-                     -. (post_loans.(index) +. post_interests.(index))
+                     -. (post_loans.(index) +. post_interests.(index)
+                         +. post_tails.(index))
                         /. post_margin_values.(index))
                 else 0.
               in
@@ -585,7 +878,7 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
                 let () = trade_costs.(index) <- cost in
                 total_cost +. cost
               else total_cost)
-            0.
+            (sum interest_tails)
         in
         let minimums = Array.make asset_count 0. in
         let buy_total, minimum_total =
@@ -779,7 +1072,9 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
                   in
                   let fraction = value /. post_margin_values.(index) in
                   let repayment = post_loans.(index) *. fraction in
-                  let settled = post_interests.(index) *. fraction in
+                  let accrued = post_interests.(index) *. fraction in
+                  let tail = post_tails.(index) *. fraction in
+                  let settled = accrued +. tail in
                   let sell_cost =
                     charge index ~equity_before:equity_basis
                       ~delta:(-. value /. equity_basis)
@@ -802,7 +1097,7 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
                     margin_refinance_buy_costs.(index) <- buy_cost
                   in
                   let () = refinance_es.(index) <- refinance_e in
-                  total_cost +. sell_cost +. buy_cost
+                  total_cost +. sell_cost +. buy_cost +. tail
                 else total_cost)
               total_cost
           else total_cost
@@ -939,11 +1234,13 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
                 margin_values.(index) <- 0.
             in
             let () =
-              loans.(index) <- loans.(index) -. item.plan_repayment
-            in
-            let () =
-              interests.(index) <-
-                interests.(index) -. item.plan_interest_settled
+              if item.plan_repayment > 0. then
+                let current_loan = loan_at index in
+                let remaining =
+                  if item.plan_repayment >= current_loan then 0.
+                  else 1. -. item.plan_repayment /. current_loan
+                in
+                scale_lots index remaining
             in
             let () =
               cash :=
@@ -984,9 +1281,8 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
                     margin_values.(index) +. item.plan_refinance_cash
                 in
                 let () =
-                  loans.(index) <-
-                    loans.(index)
-                    +. item.plan_refinance_cash *. margin.ratios.(index)
+                  add_lot index ~bar_index
+                    (item.plan_refinance_cash *. margin.ratios.(index))
                 in
                 let () =
                   cash :=
@@ -1005,12 +1301,16 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
                   margin_values.(index) -. item.plan_refinance_margin
               in
               let () =
-                loans.(index) <-
-                  loans.(index) -. item.plan_refinance_margin_repayment
-              in
-              let () =
-                interests.(index) <-
-                  interests.(index) -. item.plan_refinance_margin_interest
+                if item.plan_refinance_margin_repayment > 0. then
+                  let current_loan = loan_at index in
+                  let remaining =
+                    if item.plan_refinance_margin_repayment >= current_loan
+                    then 0.
+                    else
+                      1.
+                      -. item.plan_refinance_margin_repayment /. current_loan
+                  in
+                  scale_lots index remaining
               in
               let () =
                 cash :=
@@ -1029,9 +1329,8 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
                   margin_values.(index) +. item.plan_refinance_margin
               in
               let () =
-                loans.(index) <-
-                  loans.(index)
-                  +. item.plan_refinance_margin *. margin.ratios.(index)
+                add_lot index ~bar_index
+                  (item.plan_refinance_margin *. margin.ratios.(index))
               in
               let () =
                 cash :=
@@ -1069,9 +1368,8 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
                   margin_values.(index) +. item.plan_buy_margin
               in
               let () =
-                loans.(index) <-
-                  loans.(index)
-                  +. item.plan_buy_margin *. margin.ratios.(index)
+                add_lot index ~bar_index
+                  (item.plan_buy_margin *. margin.ratios.(index))
               in
               let () =
                 cash :=
@@ -1083,61 +1381,37 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
         let () =
           if !cash < 0. then
             let deficit = -. !cash in
-            let settlement =
-              fold_assets
-                (fun settlement index ->
-                  let item = plan.planned_assets.(index) in
-                  if item.plan_changed && item.plan_trade < 0. then
-                    settlement +. item.plan_repayment
-                    +. item.plan_interest_settled
-                  else settlement)
-                0.
-            in
-            let restored = Float.min deficit settlement in
-            let () =
-              if restored > 0. then
-                let unpaid_fraction = restored /. settlement in
-                iter_assets (fun index ->
-                  let item = plan.planned_assets.(index) in
-                  if item.plan_changed && item.plan_trade < 0. then
-                    let () =
-                      loans.(index) <-
-                        loans.(index)
-                        +. item.plan_repayment *. unpaid_fraction
-                    in
-                    interests.(index) <-
-                      interests.(index)
-                      +. item.plan_interest_settled *. unpaid_fraction)
-            in
-            let () = debt := !debt +. deficit -. restored in
+            let () = debt := !debt +. deficit in
             cash := 0.
         in
         if equity () <= 0. then
-          if has_inventory () then bankrupt_all ~date price_at
+          if has_inventory () then
+            bankrupt_all ~bar_index ~date price_at
           else
             let () = bankrupt := true in
             pending_liquidation := false
     in
     Array.blit eff 0 prev_eff 0 asset_count
   in
-  let guard_solvency ~date price_at =
+  let guard_solvency ~bar_index ~date price_at =
     if not !bankrupt && equity () <= 0. then
-      if has_inventory () then bankrupt_all ~date price_at
+      if has_inventory () then bankrupt_all ~bar_index ~date price_at
       else
         let () = bankrupt := true in
         pending_liquidation := false
   in
-  let liquidate ~date price_at =
+  let liquidate ~bar_index ~date price_at =
     let () =
       iter_assets (fun index ->
-        sell_inventory ~settle:false index ~margin_only:true
+        let () = capitalize_tail_interest index bar_index in
+        sell_inventory ~settle:false index ~margin_only:true ~bar_index
           ~date ~price:(price_at index))
     in
     let () = settle_all_liabilities () in
     if equity () <= 0. then
       let () =
         iter_assets (fun index ->
-          sell_inventory index ~margin_only:false
+          sell_inventory index ~margin_only:false ~bar_index
             ~date ~price:(price_at index))
       in
       let () = settle_all_liabilities () in
@@ -1152,7 +1426,7 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
         if not !bankrupt then
           let () =
             if t > 0 then
-              accrue_interest ~date
+              accrue_interest ~bar_index:t ~date
                 ~prev_date:((snd assets.(0)).(t - 1).Data.date)
           in
           match fill with
@@ -1163,7 +1437,9 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
                     scale_values (fun i -> open_at i t)
                       (fun i -> close_at i (t - 1))
                   in
-                  let () = liquidate ~date (fun i -> open_at i t) in
+                  let () =
+                    liquidate ~bar_index:t ~date (fun i -> open_at i t)
+                  in
                   let () = pending_liquidation := false in
                   scale_values
                     (fun i -> close_at i t) (fun i -> open_at i t)
@@ -1172,12 +1448,17 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
                     (fun i -> close_at i (t - 1))
               in
               let () =
-                guard_solvency ~date (fun i -> close_at i t)
+                guard_solvency ~bar_index:t ~date (fun i -> close_at i t)
               in
               if not !bankrupt then
                 let eff, clamped = effective t in
-                if differs eff then
-                  apply_fills ~date ~eff ~clamped
+                let () =
+                  if differs eff then
+                    apply_fills ~bar_index:t ~date ~eff ~clamped
+                      (fun i -> close_at i t)
+                in
+                if not !bankrupt then
+                  rollover_matured ~bar_index:t ~date
                     (fun i -> close_at i t)
           | Open_next ->
               if t > 0 then
@@ -1189,15 +1470,28 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
                 in
                 let () =
                   if !pending_liquidation then
-                    let () = liquidate ~date (fun i -> open_at i t) in
+                    let () =
+                      liquidate ~bar_index:t ~date (fun i -> open_at i t)
+                    in
                     pending_liquidation := false
                 in
                 let () =
-                  guard_solvency ~date (fun i -> open_at i t)
+                  guard_solvency ~bar_index:t ~date
+                    (fun i -> open_at i t)
                 in
                 let () =
                   if not !bankrupt && scheduled then
-                    apply_fills ~date ~eff ~clamped
+                    apply_fills ~bar_index:t ~date ~eff ~clamped
+                      (fun i -> open_at i t)
+                in
+                let () =
+                  if not !bankrupt then
+                    rollover_matured ~bar_index:t ~date
+                      (fun i -> open_at i t)
+                in
+                let () =
+                  if not !bankrupt then
+                    guard_solvency ~bar_index:t ~date
                       (fun i -> open_at i t)
                 in
                 scale_values
@@ -1205,7 +1499,7 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
       in
       let () =
         if not !bankrupt then
-          guard_solvency ~date (fun i -> close_at i t)
+          guard_solvency ~bar_index:t ~date (fun i -> close_at i t)
       in
       let () =
         if not !bankrupt then
@@ -1223,15 +1517,14 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
       walk_bars (t + 1)
   in
   let () = walk_bars 0 in
-  let last = length - 1 in
   let closed_any =
     fold_assets
       (fun closed_any index ->
         if total_value index > 0. then
           let () =
-            sell_inventory index ~margin_only:false
-              ~date:(snd assets.(index)).(last).Data.date
-              ~price:(close_at index last)
+            sell_inventory index ~margin_only:false ~bar_index:last_index
+              ~date:(snd assets.(index)).(last_index).Data.date
+              ~price:(close_at index last_index)
           in
           true
         else closed_any)
@@ -1243,7 +1536,7 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
       match !equity_curve with
       | _ :: rest ->
           equity_curve :=
-            ((snd assets.(0)).(last).Data.date, equity ()) :: rest
+            ((snd assets.(0)).(last_index).Data.date, equity ()) :: rest
       | [] -> ()
   in
   { equity_curve = List.rev !equity_curve;
