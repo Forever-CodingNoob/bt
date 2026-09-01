@@ -757,6 +757,181 @@ let test_engine_zero_value_exit_preserves_liability () =
    | Some ratio -> assert_close ~tolerance:1e-12 (4. /. 3.) ratio
    | None -> assert false)
 
+let dividend ex_date cash_per_share pay_date : Data.dividend =
+  { ex_date; cash_per_share; pay_date }
+
+let run_with_dividends ~stock bars target costs margin dividends dividend_tax =
+  Engine.run ~dividends:[| dividends |] ~dividend_tax
+    [| (stock, bars) |] { Engine.targets = [| target |] }
+    [| costs |] ~margin ~capital:None ~fill:Engine.Close_same
+
+let test_tw_dividend_receivable () =
+  let bars =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 90. 90.;
+       bar "2020-01-03" 90. 90.;
+       bar "2020-01-04" 90. 90. |]
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.; maintenance_ratio = 0.; ratios = [| 0.6 |];
+      loan_term_months = None }
+  in
+  let result =
+    run_with_dividends ~stock:"tw/TEST" bars
+      [| 2.; 2.; 2.; 2. |] zero_costs margin
+      [| dividend "2020-01-02" 10. "2020-02-01" |] 0.
+  in
+  (* Entry has cash inventory 1/3, margin inventory 5/3, and loan 1.
+     The 10% ex-date drop makes them 3/10 and 3/2. Their 1/50 shares
+     book a 1/5 receivable, so equity remains 3/10 + 3/2 - 1 + 1/5
+     = 1 on every bar, including the final force-close. *)
+  assert_float_array [| 1.; 1.; 1.; 1. |]
+    (Array.of_list (List.map snd result.equity_curve));
+  (* Receivables are not collateral: maintenance falls from 5/3 at
+     entry to (3/2) / 1 = 3/2 between the ex-date and pay date. *)
+  match result.margin_stats.Engine.min_maintenance with
+  | Some ratio -> assert_close ~tolerance:1e-12 (3. /. 2.) ratio
+  | None -> assert false
+
+let test_tw_dividend_paydown_interest () =
+  let bars =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 100. 100.;
+       bar "2020-01-03" 100. 100.;
+       bar "2020-01-04" 100. 100.;
+       bar "2020-01-05" 100. 100. |]
+  in
+  let margin : Engine.margin =
+    { financing_rate = 3.65; maintenance_ratio = 0.; ratios = [| 0.6 |];
+      loan_term_months = None }
+  in
+  let result =
+    run_with_dividends ~stock:"tw/TEST" bars
+      [| 2.; 2.; 2.; 4. /. 3.; 4. /. 3. |] zero_costs margin
+      [| dividend "2020-01-02" 25.5 "2020-01-04" |] 0.
+  in
+  (* The 2x entry has cash shares 1/300 and margin shares 1/60.
+     The dividend creates 17/200 cash and 17/40 margin receivables.
+     One interest day makes the lot due 101/100 on the pay date, so
+     the 17/40 payment leaves fraction 117/202 of both its principal
+     and 1/100 accrued interest. One later day adds principal/100.
+     Target 4/3 exactly matches inventory 2 / equity 3/2 at payment. *)
+  let remaining = 117. /. 202. in
+  let expected =
+    17. /. 200. +. 2.
+    -. remaining -. (remaining /. 100.) -. (remaining /. 100.)
+  in
+  assert_close ~tolerance:1e-12 expected (final_equity result)
+
+let test_tw_dividend_excess_spill () =
+  let bars =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 100. 100.;
+       bar "2020-01-03" 100. 100.;
+       bar "2020-01-04" 100. 100. |]
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.; maintenance_ratio = 0.; ratios = [| 0.6 |];
+      loan_term_months = None }
+  in
+  let result =
+    run_with_dividends ~stock:"tw/TEST" bars
+      [| 2.5; 2.5; 2.5; 2.5 |] zero_costs margin
+      [| dividend "2020-01-02" 100. "2020-01-03" |] 0.
+  in
+  (* The 2.5x entry is all margin inventory with 1.5 debt and 1/40
+     shares. Its 5/2 dividend clears the 3/2 loan and spills 1 to
+     cash. Flat prices and zero costs preserve equity 1 + 5/2 = 7/2
+     through the pay-date re-fill and final close. *)
+  assert_close ~tolerance:1e-12 (7. /. 2.) (final_equity result)
+
+let test_us_dividend_refill_cost () =
+  let bars =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 100. 100.;
+       bar "2020-01-03" 100. 100. |]
+  in
+  let costs : Engine.costs =
+    { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0. }
+  in
+  let result =
+    run_with_dividends ~stock:"us/TEST" bars
+      [| 1.; 1.; 1. |] costs (no_margin 1)
+      [| dividend "2020-01-02" 10. "2020-01-02" |] 0.
+  in
+  (* Entry inventory is 1/1.01. The ex-date cash credit is 1/10 of
+     it. Re-fill equity x solves x = 110/101 - 0.01(x - 100/101),
+     hence x = 11100/10201. The final 1% sale leaves 10989/10201. *)
+  assert_close ~tolerance:1e-12 (10989. /. 10201.)
+    (final_equity result);
+  (* One entry, one dividend-triggered re-fill, and one final close. *)
+  assert (List.length result.fills = 3)
+
+let test_dividend_tax () =
+  let bars =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 100. 100.;
+       bar "2020-01-03" 100. 100. |]
+  in
+  let result =
+    run_with_dividends ~stock:"us/TEST" bars
+      [| 1.; 1.; 1. |] zero_costs (no_margin 1)
+      [| dividend "2020-01-02" 10. "2020-01-02" |] 0.25
+  in
+  (* One share-equivalent position receives 0.1 gross. A 25% tax
+     leaves 0.075, so zero-cost re-fill and close end at 1.075. *)
+  assert_close ~tolerance:1e-12 1.075 (final_equity result)
+
+let test_frozen_dividend_reduces_debt () =
+  let bars =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 40. 40.;
+       bar "2020-01-03" 40. 40.;
+       bar "2020-01-04" 40. 40. |]
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.; maintenance_ratio = 0.; ratios = [| 0.6 |];
+      loan_term_months = None }
+  in
+  let result =
+    run_with_dividends ~stock:"tw/TEST" bars
+      [| 2.5; 2.5; 2.5; 2.5 |] zero_costs margin
+      [| dividend "2020-01-02" 10. "2020-01-03" |] 0.
+  in
+  (* The ex-date value is 1 against a 1.5 loan. Its 1/40 shares book
+     1/4, so liquidation freezes at 1 + 1/4 - 3/2 = -1/4. On pay
+     date the receivable removes 1/4 of residual debt; the asset and
+     liability fall together, so frozen equity stays -1/4 thereafter. *)
+  assert_float_array [| 1.; -0.25; -0.25; -0.25 |]
+    (Array.of_list (List.map snd result.equity_curve));
+  (* Bankruptcy performs the entry and liquidation only; it never
+     re-enters when the frozen receivable converts. *)
+  assert (List.length result.fills = 2)
+
+let test_no_dividend_events_identity () =
+  let bars =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 105. 110.;
+       bar "2020-01-03" 115. 121. |]
+  in
+  let target = [| 0.5; 0.5; 0.5 |] in
+  let without_events =
+    Engine.run ~dividend_tax:0.
+      [| ("tw/TEST", bars) |] { Engine.targets = [| target |] }
+      [| zero_costs |] ~margin:(no_margin 1) ~capital:None
+      ~fill:Engine.Close_same
+  in
+  let with_empty_events =
+    Engine.run ~dividends:[| [||] |] ~dividend_tax:0.
+      [| ("tw/TEST", bars) |] { Engine.targets = [| target |] }
+      [| zero_costs |] ~margin:(no_margin 1) ~capital:None
+      ~fill:Engine.Close_same
+  in
+  (* Empty dividend input executes the identical floating-point path,
+     so every dated equity value must be structurally equal. *)
+  assert (with_empty_events.equity_curve = without_events.equity_curve)
+
+
 let test_engine_buyhold_costs () =
   (* Entry solves E1 = E0 - fee * E1, so E1 = E0 / (1 + fee).
      The last close force-closes the position. *)
@@ -1446,7 +1621,8 @@ let test_prepend_rows () =
       Sys.rename cache stock_path;
       write dividend_path "date,factor\n2020-01-04,0.5\n";
       let adjusted =
-        Data.load ~market:"tw" ~symbol ~from_:None ~to_:None ~data_dir
+        (Data.load_asset ~market:"tw" ~symbol ~from_:None ~to_:None
+           ~data_dir).Data.signal
       in
       assert (adjusted.(0).Data.date = "2020-01-01");
       assert_close (1. *. 0.5) adjusted.(0).Data.c;
@@ -1510,6 +1686,114 @@ let read_file path =
   Fun.protect
     ~finally:(fun () -> close_in input)
     (fun () -> really_input_string input (in_channel_length input))
+
+let test_dividend_tax_cli () =
+  let root = Filename.temp_file "bt-test-dividend-tax-" "" in
+  let () = Sys.remove root in
+  let () = Unix.mkdir root 0o700 in
+  let tw_dir = Filename.concat root "tw" in
+  let out_dir = Filename.concat root "out" in
+  let remove_flat_dir path =
+    if Sys.file_exists path then
+      let () =
+        Array.iter
+          (fun name -> Sys.remove (Filename.concat path name))
+          (Sys.readdir path)
+      in
+      Unix.rmdir path
+  in
+  Fun.protect
+    ~finally:(fun () ->
+      remove_flat_dir out_dir;
+      remove_flat_dir tw_dir;
+      Array.iter
+        (fun name -> Sys.remove (Filename.concat root name))
+        (Sys.readdir root);
+      Unix.rmdir root)
+    (fun () ->
+      let () = Unix.mkdir tw_dir 0o700 in
+      let write path contents =
+        let output = open_out path in
+        Fun.protect
+          ~finally:(fun () -> close_out output)
+          (fun () -> output_string output contents)
+      in
+      let () =
+        write (Filename.concat tw_dir "AA.csv")
+          "date,open,high,low,close,volume\n\
+           2020-01-01,100,100,100,100,1000\n\
+           2020-01-02,90,90,90,90,1000\n\
+           2020-01-03,90,90,90,90,1000\n"
+      in
+      let () =
+        write (Filename.concat tw_dir "AA.div.csv")
+          "date,factor\n2020-01-02,0.9\n"
+      in
+      let () =
+        write (Filename.concat tw_dir "AA.events.csv") "date,factor\n"
+      in
+      let () =
+        write (Filename.concat tw_dir "AA.cashdiv.csv")
+          "ex_date,cash_per_share,pay_date\n\
+           2020-01-02,10,2020-01-02\n"
+      in
+      let strategy_path = Filename.concat root "tax.strat" in
+      let () =
+        write strategy_path "stock \"tw/AA\"\ntarget 1.0\n"
+      in
+      let binary =
+        locate ["_build/default/bin/bt.exe"; "../bin/bt.exe"]
+      in
+      let command =
+        String.concat " "
+          [ Filename.quote binary;
+            "run";
+            Filename.quote strategy_path;
+            "--data-dir";
+            Filename.quote root;
+            "--out-dir";
+            Filename.quote out_dir;
+            "--out-name";
+            "tax";
+            "--no-plot";
+            "--dividend-tax";
+            "25";
+            "--financing-rate";
+            "0";
+            "--financing-ratio";
+            "0";
+            "--loan-term-months";
+            "0";
+            "--fee-bps";
+            "0";
+            "--tax-bps";
+            "0";
+            "--slip-bps";
+            "0";
+            "--min-fee";
+            "0";
+            ">/dev/null";
+            "2>&1" ]
+      in
+      (* The CLI must accept the valid 25% tax flag and finish the run. *)
+      assert (Sys.command command = 0);
+      let rows =
+        read_file (Filename.concat out_dir "tax.csv")
+        |> String.split_on_char '\n'
+      in
+      (* The 100 to 90 ex-date drop loses 0.1. A 25%-taxed 0.1
+         dividend restores 0.075, so the final CSV equity is 0.975. *)
+      match rows with
+      | [_; _; _; final; ""] ->
+          begin
+            match String.split_on_char ',' final with
+            | ["2020-01-03"; value] ->
+                assert_close ~tolerance:1e-12 0.975
+                  (float_of_string value)
+            | _ -> assert false
+          end
+      | _ -> assert false)
+
 
 let test_multi_stock_cli () =
   let root = Filename.temp_file "bt-test-multi-" "" in
@@ -1943,8 +2227,8 @@ let test_load_adjustments () =
       write (Filename.concat tw "MIXED.events.csv")
         "date,factor\n2025-06-18,0.25\n";
       let mixed =
-        Data.load ~market:"tw" ~symbol:"MIXED" ~from_:None ~to_:None
-          ~data_dir:root
+        (Data.load_asset ~market:"tw" ~symbol:"MIXED" ~from_:None
+           ~to_:None ~data_dir:root).Data.signal
       in
       (* Before both events, 400 * 0.25 * 0.98 = 98. *)
       assert_close 98. mixed.(0).Data.c;
@@ -1970,8 +2254,8 @@ let test_load_adjustments () =
         "date,factor\n2020-01-02,0.9\n";
       write (Filename.concat tw "DIV.events.csv") "date,factor\n";
       let dividend =
-        Data.load ~market:"tw" ~symbol:"DIV" ~from_:None ~to_:None
-          ~data_dir:root
+        (Data.load_asset ~market:"tw" ~symbol:"DIV" ~from_:None
+           ~to_:None ~data_dir:root).Data.signal
       in
       (* Before the dividend, 100 * 0.9 = 90. *)
       assert_close 90. dividend.(0).Data.c;
@@ -1988,8 +2272,8 @@ let test_load_adjustments () =
       write (Filename.concat tw "SPLIT.events.csv")
         "date,factor\n2026-06-30,0.5\n";
       let split =
-        Data.load ~market:"tw" ~symbol:"SPLIT" ~from_:None ~to_:None
-          ~data_dir:root
+        (Data.load_asset ~market:"tw" ~symbol:"SPLIT" ~from_:None
+           ~to_:None ~data_dir:root).Data.signal
       in
       (* Before the 1:2 split, 100 * 0.5 = 50. *)
       assert_close 50. split.(0).Data.c;
@@ -2825,6 +3109,14 @@ let () =
   test_engine_insolvent_min_fee ();
   test_engine_exit_fee_bankruptcy ();
   test_engine_zero_value_exit_preserves_liability ();
+  test_tw_dividend_receivable ();
+  test_tw_dividend_paydown_interest ();
+  test_tw_dividend_excess_spill ();
+  test_us_dividend_refill_cost ();
+  test_dividend_tax ();
+  test_dividend_tax_cli ();
+  test_frozen_dividend_reduces_debt ();
+  test_no_dividend_events_identity ();
   test_engine_buyhold_costs ();
   test_exact_cash_funding ();
   test_engine_no_borrow_stats ();

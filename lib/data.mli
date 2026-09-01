@@ -44,14 +44,6 @@ val load_asset :
   data_dir:string ->
   loaded_asset
 
-(** Load, adjust, and date-filter cached market data. *)
-val load :
-  market:string ->
-  symbol:string ->
-  from_:string option ->
-  to_:string option ->
-  data_dir:string ->
-  bar array
 
 (** Retain bars whose dates satisfy the supplied predicate. *)
 val filter_dates : keep:(string -> bool) -> bar array -> bar array

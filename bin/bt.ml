@@ -104,7 +104,7 @@ let apply_cost_overrides defaults fee_bps tax_bps slip_bps min_fee :
     min_fee =
       (match min_fee with Some value -> value | None -> defaults.Btlib.Engine.min_fee) }
 
-let load_bars ~market ~symbol ~from_ ~to_ ~data_dir =
+let load_asset ~market ~symbol ~from_ ~to_ ~data_dir =
   let cache_path =
     Filename.concat (Filename.concat data_dir market) (symbol ^ ".csv")
   in
@@ -121,14 +121,14 @@ let load_bars ~market ~symbol ~from_ ~to_ ~data_dir =
     failwith
       (Printf.sprintf "%s not found; run %s" cache_path (Buffer.contents command))
   end;
-  Btlib.Data.load ~market ~symbol ~from_ ~to_ ~data_dir
+  Btlib.Data.load_asset ~market ~symbol ~from_ ~to_ ~data_dir
 
 type strategy_input = {
   name : string;
   stocks : (string option * string * string) list;
   ast : Btlib.Ast.file;
   declarations : (string * float) list;
-  bars : Btlib.Data.bar array list;
+  assets : Btlib.Data.loaded_asset list;
 }
 
 let strategy_name path =
@@ -168,6 +168,7 @@ let run argv =
   let tax_bps = ref None in
   let slip_bps = ref None in
   let min_fee = ref None in
+  let dividend_tax = ref 0. in
   let financing_rate = ref 6.35 in
   let maintenance_ratio = ref 130. in
   let financing_ratio = ref None in
@@ -202,6 +203,9 @@ let run argv =
       ("--slip-bps", Arg.Float (fun value -> slip_bps := Some value), "slippage basis points");
       ("--min-fee", Arg.Float (fun value -> min_fee := Some value),
        "minimum fee per order in TWD");
+      ("--dividend-tax",
+       Arg.Set_float dividend_tax,
+       "dividend tax percent (default 0)");
       ("--financing-rate",
        Arg.Float (fun value -> financing_rate := value),
        "annual financing rate percent");
@@ -254,10 +258,10 @@ let run argv =
       (fun path name ->
         let ast = Btlib.Dsl.parse_file path in
         let stocks = Btlib.Dsl.stocks_of ~filename:path ast in
-        let bars =
+        let assets =
           List.map
             (fun (_, market, symbol) ->
-              load_bars ~market ~symbol
+              load_asset ~market ~symbol
                 ~from_:!from_ ~to_:!to_ ~data_dir:!data_dir)
             stocks
         in
@@ -265,23 +269,30 @@ let run argv =
           stocks;
           ast;
           declarations = Btlib.Dsl.declared_params_ast ast;
-          bars })
+          assets })
       strategy_files names
   in
-  let baseline_bars =
+  let baseline_asset =
     match !baseline with
     | None -> None
     | Some (market, symbol) ->
         Some
           (market, symbol,
-           load_bars ~market ~symbol
+           load_asset ~market ~symbol
              ~from_:!from_ ~to_:!to_ ~data_dir:!data_dir)
   in
-  let arrays = List.concat_map (fun input -> input.bars) inputs in
   let arrays =
-    match baseline_bars with
+    List.concat_map
+      (fun input ->
+        List.map
+          (fun asset -> asset.Btlib.Data.signal)
+          input.assets)
+      inputs
+  in
+  let arrays =
+    match baseline_asset with
     | None -> arrays
-    | Some (_, _, bars) -> arrays @ [bars]
+    | Some (_, _, asset) -> arrays @ [asset.Btlib.Data.signal]
   in
   let dates = common_dates arrays in
   if List.length dates < 2 then
@@ -291,15 +302,22 @@ let run argv =
   let filter bars =
     Btlib.Data.filter_dates ~keep:(fun date -> Hashtbl.mem keep date) bars
   in
+  let filter_asset (asset : Btlib.Data.loaded_asset) =
+    { asset with
+      money = filter asset.money;
+      signal = filter asset.signal }
+  in
   let inputs =
     List.map
-      (fun input -> { input with bars = List.map filter input.bars })
+      (fun input ->
+        { input with assets = List.map filter_asset input.assets })
       inputs
   in
-  let baseline_bars =
-    match baseline_bars with
+  let baseline_asset =
+    match baseline_asset with
     | None -> None
-    | Some (market, symbol, bars) -> Some (market, symbol, filter bars)
+    | Some (market, symbol, asset) ->
+        Some (market, symbol, filter_asset asset)
   in
   List.iter
     (fun (name, _) ->
@@ -327,8 +345,9 @@ let run argv =
         in
         let assets_for_compile =
           List.map2
-            (fun (alias, _, _) bars -> alias, bars)
-            input.stocks input.bars
+            (fun (alias, _, _) asset ->
+              alias, asset.Btlib.Data.signal)
+            input.stocks input.assets
         in
         let strategy =
           Btlib.Dsl.compile_ast input.ast ~params ~assets:assets_for_compile
@@ -340,7 +359,15 @@ let run argv =
         in
         let engine_assets =
           Array.of_list
-            (List.map2 (fun label bars -> label, bars) labels input.bars)
+            (List.map2
+               (fun label asset -> label, asset.Btlib.Data.money)
+               labels input.assets)
+        in
+        let dividends =
+          Array.of_list
+            (List.map
+               (fun asset -> asset.Btlib.Data.dividends)
+               input.assets)
         in
         let costs =
           Array.of_list
@@ -367,16 +394,19 @@ let run argv =
               else None }
         in
         let result =
-          Btlib.Engine.run engine_assets strategy costs
+          Btlib.Engine.run ~dividends
+            ~dividend_tax:(!dividend_tax /. 100.)
+            engine_assets strategy costs
             ~margin:margin_config ~capital:!capital ~fill:!fill
         in
         (input.name, String.concat "+" labels, result))
       inputs
   in
   let baseline_result =
-    match baseline_bars with
+    match baseline_asset with
     | None -> None
-    | Some (market, symbol, bars) ->
+    | Some (market, symbol, asset) ->
+        let bars = asset.Btlib.Data.money in
         let defaults = Btlib.Engine.default_costs ~market ~symbol in
         let costs =
           apply_cost_overrides defaults !fee_bps !tax_bps !slip_bps !min_fee
@@ -389,7 +419,9 @@ let run argv =
               if market = "tw" then configured_loan_term else None }
         in
         Some
-          (Btlib.Engine.run [| (market ^ "/" ^ symbol, bars) |]
+          (Btlib.Engine.run ~dividends:[| asset.Btlib.Data.dividends |]
+             ~dividend_tax:(!dividend_tax /. 100.)
+             [| (market ^ "/" ^ symbol, bars) |]
              (baseline_strategy (Array.length bars)) [| costs |]
              ~margin:margin_config
              ~capital:!capital ~fill:!fill)

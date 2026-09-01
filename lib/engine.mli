@@ -56,8 +56,11 @@ type result = {
 (** Return the default transaction costs for a market and symbol. *)
 val default_costs : market:string -> symbol:string -> costs
 
-(** Run a synchronized multi-asset backtest. *)
+(** Run a synchronized multi-asset backtest. [dividends] defaults to
+    no events. [dividend_tax] is the fraction withheld at creation. *)
 val run :
+  ?dividends:Data.dividend array array ->
+  ?dividend_tax:float ->
   (string * Data.bar array) array ->
   strategy ->
   costs array ->

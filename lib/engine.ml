@@ -82,6 +82,13 @@ type fill_plan = {
   planned_funding_clamp : bool;
 }
 
+type receivable = {
+  receivable_pay_date : string;
+  receivable_cash : float;
+  receivable_margin : float;
+}
+
+
 let default_costs ~market ~symbol =
   match String.lowercase_ascii market with
   | "us" -> { fee_bps = 0.; tax_bps = 0.; slip_bps = 0.; min_fee = 0. }
@@ -134,7 +141,8 @@ let add_months_clamped date months =
   let target_day = min day (days_in_month target_year target_month) in
   Printf.sprintf "%04d-%02d-%02d" target_year target_month target_day
 
-let run (assets : (string * Data.bar array) array) (strategy : strategy)
+let run ?dividends ?(dividend_tax = 0.)
+    (assets : (string * Data.bar array) array) (strategy : strategy)
     (costs : costs array) ~(margin : margin)
     ~capital:(capital : float option) ~fill =
   let asset_count = Array.length assets in
@@ -152,6 +160,16 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
   let () =
     if Array.length margin.ratios <> asset_count then
       invalid_arg "Engine.run: margin ratios/assets mismatch"
+  in
+  let dividends =
+    match dividends with
+    | None -> Array.make asset_count [||]
+    | Some events ->
+        let () =
+          if Array.length events <> asset_count then
+            invalid_arg "Engine.run: dividends/assets mismatch"
+        in
+        events
   in
   let length = Array.length (snd assets.(0)) in
   let () =
@@ -184,6 +202,8 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
   let cash_values = Array.make asset_count 0. in
   let margin_values = Array.make asset_count 0. in
   let margin_lots = Array.make asset_count [] in
+  let dividend_indices = Array.make asset_count 0 in
+  let receivables = Array.make asset_count [] in
   let debt = ref 0. in
   let prev_eff = Array.make asset_count 0. in
   let pending_liquidation = ref false in
@@ -278,8 +298,114 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
     Array.exists (fun value -> value > 0.) cash_values
     || Array.exists (fun value -> value > 0.) margin_values
   in
+  let total_receivables () =
+    fold_assets
+      (fun total index ->
+        List.fold_left
+          (fun total receivable ->
+            total +. receivable.receivable_cash
+            +. receivable.receivable_margin)
+          total receivables.(index))
+      0.
+  in
   let equity () =
     !cash +. total_assets () -. total_liabilities ()
+    +. total_receivables ()
+  in
+  let is_us index =
+    let stock = fst assets.(index) in
+    String.length stock >= 3
+    && stock.[0] = 'u' && stock.[1] = 's' && stock.[2] = '/'
+  in
+  let settle_debt_from_cash () =
+    if !cash > 0. && !debt > 0. then
+      let payment = Float.min !cash !debt in
+      let () = cash := !cash -. payment in
+      debt := !debt -. payment
+  in
+  let repay_margin_receivable index amount =
+    let due = loan_at index +. interest_at index in
+    if due > 0. then
+      let payment = Float.min amount due in
+      let remaining = 1. -. payment /. due in
+      let () = scale_lots index remaining in
+      cash := !cash +. amount -. payment
+    else cash := !cash +. amount
+  in
+  let process_dividends ~date price_at =
+    let landed = ref false in
+    let () =
+      iter_assets (fun index ->
+        let events = dividends.(index) in
+        let rec book event_index =
+          if event_index = Array.length events then event_index
+          else
+            let event = events.(event_index) in
+            let comparison = String.compare event.Data.ex_date date in
+            if comparison > 0 then event_index
+            else if comparison < 0 then book (event_index + 1)
+            else
+              let price = price_at index in
+              let net_per_share =
+                event.Data.cash_per_share *. (1. -. dividend_tax)
+              in
+              let cash_amount =
+                if price > 0. then
+                  cash_values.(index) /. price *. net_per_share
+                else 0.
+              in
+              let margin_amount =
+                if price > 0. then
+                  margin_values.(index) /. price *. net_per_share
+                else 0.
+              in
+              let total = cash_amount +. margin_amount in
+              let () =
+                if total > 0. then
+                  if is_us index then
+                    let () = cash := !cash +. total in
+                    landed := true
+                  else
+                    receivables.(index) <-
+                      { receivable_pay_date = event.Data.pay_date;
+                        receivable_cash = cash_amount;
+                        receivable_margin = margin_amount }
+                      :: receivables.(index)
+              in
+              book (event_index + 1)
+        in
+        let () =
+          dividend_indices.(index) <- book dividend_indices.(index)
+        in
+        let rec settle kept = function
+          | [] -> List.rev kept
+          | receivable :: rest ->
+              if
+                String.compare date receivable.receivable_pay_date >= 0
+              then
+                let amount =
+                  receivable.receivable_cash
+                  +. receivable.receivable_margin
+                in
+                let () =
+                  if amount > 0. then landed := true
+                in
+                let () =
+                  cash := !cash +. receivable.receivable_cash
+                in
+                let () =
+                  repay_margin_receivable index
+                    receivable.receivable_margin
+                in
+                settle kept rest
+              else settle (receivable :: kept) rest
+        in
+        receivables.(index) <- settle [] receivables.(index))
+    in
+    let () =
+      if !landed then settle_debt_from_cash ()
+    in
+    !landed
   in
   let charge index ~equity_before ~delta =
     let costs = costs.(index) in
@@ -682,7 +808,7 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
                  *. float_of_int days /. 365.)
         margin_lots.(index))
   in
-  let apply_fills ~bar_index ~date ~eff ~clamped price_at =
+  let apply_fills ~bar_index ~date ~eff ~clamped ~force price_at =
     let e0 = equity () in
     let current_loans = Array.init asset_count loan_at in
     let current_interests = Array.init asset_count interest_at in
@@ -697,7 +823,7 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
         let equity_basis = abs_float e1 in
         let changed =
           Array.init asset_count
-            (fun index -> eff.(index) <> prev_eff.(index))
+            (fun index -> force || eff.(index) <> prev_eff.(index))
         in
         let scaled_buys = Array.make asset_count false in
         let final_values = Array.make asset_count 0. in
@@ -1423,7 +1549,10 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
     else
       let date = (snd assets.(0)).(t).Data.date in
       let () =
-        if not !bankrupt then
+        if !bankrupt then
+          ignore
+            (process_dividends ~date (fun i -> close_at i t))
+        else
           let () =
             if t > 0 then
               accrue_interest ~bar_index:t ~date
@@ -1431,21 +1560,31 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
           in
           match fill with
           | Close_same ->
-              let () =
+              let cash_landed =
                 if t > 0 && !pending_liquidation then
                   let () =
                     scale_values (fun i -> open_at i t)
                       (fun i -> close_at i (t - 1))
                   in
+                  let cash_landed =
+                    process_dividends ~date (fun i -> open_at i t)
+                  in
                   let () =
                     liquidate ~bar_index:t ~date (fun i -> open_at i t)
                   in
                   let () = pending_liquidation := false in
-                  scale_values
-                    (fun i -> close_at i t) (fun i -> open_at i t)
-                else if t > 0 then
-                  scale_values (fun i -> close_at i t)
-                    (fun i -> close_at i (t - 1))
+                  let () =
+                    scale_values
+                      (fun i -> close_at i t) (fun i -> open_at i t)
+                  in
+                  cash_landed
+                else
+                  let () =
+                    if t > 0 then
+                      scale_values (fun i -> close_at i t)
+                        (fun i -> close_at i (t - 1))
+                  in
+                  process_dividends ~date (fun i -> close_at i t)
               in
               let () =
                 guard_solvency ~bar_index:t ~date (fun i -> close_at i t)
@@ -1453,9 +1592,9 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
               if not !bankrupt then
                 let eff, clamped = effective t in
                 let () =
-                  if differs eff then
+                  if cash_landed || differs eff then
                     apply_fills ~bar_index:t ~date ~eff ~clamped
-                      (fun i -> close_at i t)
+                      ~force:cash_landed (fun i -> close_at i t)
                 in
                 if not !bankrupt then
                   rollover_matured ~bar_index:t ~date
@@ -1467,6 +1606,9 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
                 let () =
                   scale_values (fun i -> open_at i t)
                     (fun i -> close_at i (t - 1))
+                in
+                let cash_landed =
+                  process_dividends ~date (fun i -> open_at i t)
                 in
                 let () =
                   if !pending_liquidation then
@@ -1480,9 +1622,9 @@ let run (assets : (string * Data.bar array) array) (strategy : strategy)
                     (fun i -> open_at i t)
                 in
                 let () =
-                  if not !bankrupt && scheduled then
+                  if not !bankrupt && (cash_landed || scheduled) then
                     apply_fills ~bar_index:t ~date ~eff ~clamped
-                      (fun i -> open_at i t)
+                      ~force:cash_landed (fun i -> open_at i t)
                 in
                 let () =
                   if not !bankrupt then

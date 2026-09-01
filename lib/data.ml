@@ -1352,8 +1352,3 @@ let load_asset ~market ~symbol ~from_ ~to_ ~data_dir =
         cache_path market symbol
   in
   { money; signal; dividends }
-
-(* Transitional Task 1 entry point. Task 2 rewires bin/bt.ml to load_asset
-   and deletes load in the same commit. *)
-let load ~market ~symbol ~from_ ~to_ ~data_dir =
-  (load_asset ~market ~symbol ~from_ ~to_ ~data_dir).signal
