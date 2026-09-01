@@ -15,7 +15,6 @@
   - [Cost defaults](#cost-defaults)
   - [Fill modes](#fill-modes)
 - [Run outputs](#run-outputs)
-- [Help](#help)
 - [Exit codes](#exit-codes)
 
 ## Command syntax
@@ -248,20 +247,6 @@ copy the script into the output directory. `python3` and matplotlib are
 optional. If either is unavailable or plotting otherwise fails, the command
 prints `warning: plot failed; skipping <stem>.png` to standard error and exits
 with code 0 after it saves the CSV files.
-
-## Help
-
-Use any of these top-level forms:
-
-```text
-bt --help
-bt -h
-bt help
-```
-
-Each form prints the command summary to standard output and exits with code 0. Run `bt` with no arguments to print the same summary to standard error and exit with code 2.
-
-Use `-h`, `-help`, or `--help` after `bt fetch` or `bt run`. Each form lists all options for that subcommand and exits with code 0.
 
 ## Exit codes
 
