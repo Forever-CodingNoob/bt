@@ -6,6 +6,18 @@ type bar = {
   c : float;
   v : float;
 }
+type dividend = {
+  ex_date : string;
+  cash_per_share : float;
+  pay_date : string;
+}
+
+type loaded_asset = {
+  money : bar array;
+  signal : bar array;
+  dividends : dividend array;
+}
+
 
 let failf fmt = Printf.ksprintf failwith fmt
 
@@ -72,6 +84,14 @@ let previous_date value =
       (days_in_month year previous_month)
   else
     Printf.sprintf "%04d-12-31" (year - 1)
+let add_one_month value =
+  let year, month, day = parse_date "cash dividend" value in
+  let next_year, next_month =
+    if month = 12 then year + 1, 1 else year, month + 1
+  in
+  Printf.sprintf "%04d-%02d-%02d" next_year next_month
+    (min day (days_in_month next_year next_month))
+
 
 let validate_range from_ to_ =
   let () = ignore (parse_date "from" from_) in
@@ -202,6 +222,16 @@ let jq_message json_path =
     in
     if process_ok status then String.trim (read_text output)
     else "unknown API error")
+let jq_status json_path =
+  with_temp ".status" (fun output ->
+    let status =
+      run_to_file "/usr/bin/jq"
+        ["-r"; ".status // empty | tostring"; json_path]
+        output
+    in
+    if process_ok status then Some (String.trim (read_text output))
+    else None)
+
 
 let check_api_response json_path =
   match run_quiet "/usr/bin/jq" ["-e"; ".status == 200"; json_path] with
@@ -636,44 +666,12 @@ let fetch_stockinfo ~token ~symbol ~cache_path =
               rewrite_rows ~header:"stock_id,type,date"
                 ~rows_path:merged_path ~cache_path)))
 
-let fetch ~market ~symbol ~from_ ~to_ ~data_dir =
-  let market = market_name market in
-  let () = check_symbol symbol in
-  let () =
-    match from_ with
-    | None -> ignore (parse_date "to" to_)
-    | Some date -> validate_range date to_
-  in
-  let token =
-    match Sys.getenv_opt "FINMIND_TOKEN" with
-    | Some token when String.trim token <> "" -> token
-    | _ -> failwith "export FINMIND_TOKEN=\"your_token_here\""
-  in
-  let directory = Filename.concat data_dir market in
-  let () = mkdir_p directory in
-  let cache_path = Filename.concat directory (symbol ^ ".csv") in
-  let () = fetch_prices ~token ~market ~symbol ~from_ ~to_ ~cache_path in
-  if market = "tw" then
-    let () =
-      fetch_dividends ~token ~symbol ~to_
-        ~cache_path:(Filename.concat directory (symbol ^ ".div.csv"))
-    in
-    let () =
-      fetch_events ~token ~symbol ~to_
-        ~cache_path:(Filename.concat directory (symbol ^ ".events.csv"))
-    in
-    fetch_stockinfo ~token ~symbol
-      ~cache_path:(Filename.concat directory "stockinfo.csv")
 
 let float_field path line_number name value =
   try float_of_string value with Failure _ ->
     failf "%s:%d: invalid %s value %S" path line_number name value
 
-let read_bars ~market path =
-  let expected_header =
-    if market = "tw" then "date,open,high,low,close,volume"
-    else "date,open,high,low,close,adj_close,volume"
-  in
+let read_us_planes path =
   let input = open_in path in
   Fun.protect
     ~finally:(fun () -> close_in input)
@@ -684,42 +682,123 @@ let read_bars ~market path =
         | exception End_of_file -> ""
       in
       let () =
-        if header <> expected_header then
-          failf "%s: expected header %s" path expected_header
+        if header <> "date,open,high,low,close,adj_close,volume" then
+          failf "%s: expected header date,open,high,low,close,adj_close,volume"
+            path
       in
-      let rec loop line_number acc =
+      let rec read_rows line_number rows =
         match input_line input with
-        | line when line = "" -> loop (line_number + 1) acc
+        | line when line = "" -> read_rows (line_number + 1) rows
         | line ->
             let fields = String.split_on_char ',' line in
-            let bar =
-              match market, fields with
-              | "tw", [date; o; h; l; c; v] ->
-                  { date = unquote date;
-                    o = float_field path line_number "open" o;
-                    h = float_field path line_number "high" h;
-                    l = float_field path line_number "low" l;
-                    c = float_field path line_number "close" c;
-                    v = float_field path line_number "volume" v }
-              | "us", [date; o; h; l; c; adj_close; v] ->
-                  let raw_close = float_field path line_number "close" c in
-                  let scale = float_field path line_number "adj_close" adj_close /. raw_close in
-                  { date = unquote date;
-                    o = float_field path line_number "open" o *. scale;
-                    h = float_field path line_number "high" h *. scale;
-                    l = float_field path line_number "low" l *. scale;
-                    c = raw_close *. scale;
-                    v = float_field path line_number "volume" v }
+            let money_bar, signal_bar, adjusted_close, ratio =
+              match fields with
+              | [date; o; h; l; c; adj_close; v] ->
+                  let date = unquote date in
+                  let o = float_field path line_number "open" o in
+                  let h = float_field path line_number "high" h in
+                  let l = float_field path line_number "low" l in
+                  let c = float_field path line_number "close" c in
+                  let v = float_field path line_number "volume" v in
+                  let adjusted_close =
+                    float_field path line_number "adj_close" adj_close
+                  in
+                  let ratio = adjusted_close /. c in
+                  { date; o; h; l; c; v },
+                  { date; o = o *. ratio; h = h *. ratio;
+                    l = l *. ratio; c = c *. ratio; v },
+                  adjusted_close, ratio
               | _ -> failf "%s:%d: malformed CSV row" path line_number
             in
             (* FinMind emits all-zero rows on non-trading days; skip them *)
-            if bar.o > 0. && bar.h > 0. && bar.l > 0. && bar.c > 0. then
-              loop (line_number + 1) (bar :: acc)
+            if money_bar.o > 0. && money_bar.h > 0. &&
+               money_bar.l > 0. && money_bar.c > 0. &&
+               signal_bar.c > 0. then
+              read_rows (line_number + 1)
+                ((money_bar, signal_bar, adjusted_close, ratio) :: rows)
             else
-              loop (line_number + 1) acc
-        | exception End_of_file -> Array.of_list (List.rev acc)
+              read_rows (line_number + 1) rows
+        | exception End_of_file -> rows
       in
-      loop 2 [])
+      let rows =
+        List.sort
+          (fun (left, _, _, _) (right, _, _, _) ->
+            String.compare left.date right.date)
+          (read_rows 2 [])
+      in
+      let rec derive previous money signal dividends = function
+        | [] ->
+            Array.of_list (List.rev money),
+            Array.of_list (List.rev signal),
+            Array.of_list (List.rev dividends)
+        | (money_bar, signal_bar, adjusted_close, ratio) :: rest ->
+            let dividends =
+              match previous with
+              | Some (previous_close, previous_adjusted, previous_ratio) ->
+                  (* Adj_Close is cent-rounded. Overlapping ratio intervals
+                     are rounding noise, not an observable dividend. *)
+                  let previous_high =
+                    (previous_adjusted +. 0.005) /. previous_close
+                  in
+                  let current_low =
+                    (adjusted_close -. 0.005) /. money_bar.c
+                  in
+                  if current_low > previous_high then
+                    let cash_per_share =
+                      previous_close *. (1. -. previous_ratio /. ratio)
+                    in
+                    { ex_date = money_bar.date; cash_per_share;
+                      pay_date = money_bar.date } :: dividends
+                  else
+                    dividends
+              | None -> dividends
+            in
+            derive (Some (money_bar.c, adjusted_close, ratio))
+              (money_bar :: money) (signal_bar :: signal) dividends rest
+      in
+      derive None [] [] [] rows)
+
+let read_bars ~market path =
+  if market = "us" then
+    let _, signal, _ = read_us_planes path in
+    signal
+  else
+    let input = open_in path in
+    Fun.protect
+      ~finally:(fun () -> close_in input)
+      (fun () ->
+        let header =
+          match input_line input with
+          | line -> line
+          | exception End_of_file -> ""
+        in
+        let () =
+          if header <> "date,open,high,low,close,volume" then
+            failf "%s: expected header date,open,high,low,close,volume" path
+        in
+        let rec loop line_number acc =
+          match input_line input with
+          | line when line = "" -> loop (line_number + 1) acc
+          | line ->
+              let bar =
+                match String.split_on_char ',' line with
+                | [date; o; h; l; c; v] ->
+                    { date = unquote date;
+                      o = float_field path line_number "open" o;
+                      h = float_field path line_number "high" h;
+                      l = float_field path line_number "low" l;
+                      c = float_field path line_number "close" c;
+                      v = float_field path line_number "volume" v }
+                | _ -> failf "%s:%d: malformed CSV row" path line_number
+              in
+              (* FinMind emits all-zero rows on non-trading days; skip them *)
+              if bar.o > 0. && bar.h > 0. && bar.l > 0. && bar.c > 0. then
+                loop (line_number + 1) (bar :: acc)
+              else
+                loop (line_number + 1) acc
+          | exception End_of_file -> Array.of_list (List.rev acc)
+        in
+        loop 2 [])
 
 let read_dividends path =
   let input = open_in path in
@@ -749,6 +828,296 @@ let read_dividends path =
         | exception End_of_file -> Array.of_list (List.rev acc)
       in
       loop 2 [])
+let read_cash_dividends path =
+  let input = open_in path in
+  Fun.protect
+    ~finally:(fun () -> close_in input)
+    (fun () ->
+      let header =
+        match input_line input with
+        | line -> line
+        | exception End_of_file -> ""
+      in
+      let () =
+        if header <> "ex_date,cash_per_share,pay_date" then
+          failf "%s: expected header ex_date,cash_per_share,pay_date" path
+      in
+      let rec loop line_number acc =
+        match input_line input with
+        | line when line = "" -> loop (line_number + 1) acc
+        | line ->
+            let dividend =
+              match String.split_on_char ',' line with
+              | [ex_date; cash_per_share; pay_date] ->
+                  let ex_date = unquote ex_date in
+                  let () = ignore (parse_date "cash dividend ex" ex_date) in
+                  let cash_per_share =
+                    float_field path line_number "cash_per_share"
+                      cash_per_share
+                  in
+                  let pay_date = unquote pay_date in
+                  let pay_date =
+                    if pay_date = "" then add_one_month ex_date
+                    else
+                      let () =
+                        ignore (parse_date "cash dividend pay" pay_date)
+                      in
+                      pay_date
+                  in
+                  { ex_date; cash_per_share; pay_date }
+              | _ ->
+                  failf "%s:%d: malformed cash dividend CSV row" path
+                    line_number
+            in
+            let acc =
+              if dividend.cash_per_share <> 0. then dividend :: acc else acc
+            in
+            loop (line_number + 1) acc
+        | exception End_of_file -> Array.of_list (List.rev acc)
+      in
+      loop 2 [])
+
+let derive_cash_dividends bars factors =
+  let bars = Array.copy bars in
+  let factors = Array.copy factors in
+  let () =
+    Array.sort (fun left right -> String.compare left.date right.date) bars
+  in
+  let () =
+    Array.sort
+      (fun (left, _) (right, _) -> String.compare left right)
+      factors
+  in
+  let rec advance bar_index previous_close ex_date =
+    if bar_index < Array.length bars &&
+       String.compare bars.(bar_index).date ex_date < 0 then
+      advance (bar_index + 1) (Some bars.(bar_index).c) ex_date
+    else
+      bar_index, previous_close
+  in
+  let rec collect factor_index bar_index previous_close acc =
+    if factor_index = Array.length factors then
+      Array.of_list (List.rev acc)
+    else
+      let ex_date, factor = factors.(factor_index) in
+      let bar_index, previous_close =
+        advance bar_index previous_close ex_date
+      in
+      let acc =
+        match previous_close with
+        | Some close ->
+            let cash_per_share = (1. -. factor) *. close in
+            if cash_per_share > 0. then
+              { ex_date; cash_per_share;
+                pay_date = add_one_month ex_date } :: acc
+            else
+              acc
+        | None -> acc
+      in
+      collect (factor_index + 1) bar_index previous_close acc
+  in
+  collect 0 0 None []
+let money_dividend_factors bars factors dividends =
+  let bars = Array.copy bars in
+  let factors = Array.copy factors in
+  let () =
+    Array.sort (fun left right -> String.compare left.date right.date) bars
+  in
+  let () =
+    Array.sort
+      (fun (left, _) (right, _) -> String.compare left right)
+      factors
+  in
+  let cash_by_date = Hashtbl.create (Array.length dividends) in
+  let () =
+    Array.iter
+      (fun dividend ->
+        let total =
+          match Hashtbl.find_opt cash_by_date dividend.ex_date with
+          | Some amount -> amount +. dividend.cash_per_share
+          | None -> dividend.cash_per_share
+        in
+        Hashtbl.replace cash_by_date dividend.ex_date total)
+      dividends
+  in
+  let rec multiply_same_date date index factor =
+    if index < Array.length factors && fst factors.(index) = date then
+      multiply_same_date date (index + 1) (factor *. snd factors.(index))
+    else
+      index, factor
+  in
+  let rec group index acc =
+    if index = Array.length factors then List.rev acc
+    else
+      let date, factor = factors.(index) in
+      let next, factor = multiply_same_date date (index + 1) factor in
+      group next ((date, factor) :: acc)
+  in
+  let rec advance bar_index previous_close ex_date =
+    if bar_index < Array.length bars &&
+       String.compare bars.(bar_index).date ex_date < 0 then
+      advance (bar_index + 1) (Some bars.(bar_index).c) ex_date
+    else
+      bar_index, previous_close
+  in
+  let rec decompose bar_index previous_close acc = function
+    | [] -> Array.of_list (List.rev acc)
+    | (ex_date, full_factor) :: rest ->
+        let bar_index, previous_close =
+          advance bar_index previous_close ex_date
+        in
+        let money_factor =
+          match previous_close, Hashtbl.find_opt cash_by_date ex_date with
+          | Some close, Some cash_per_share ->
+              let cash_factor = (close -. cash_per_share) /. close in
+              if cash_factor > 0. then full_factor /. cash_factor
+              else full_factor
+          | _ -> full_factor
+        in
+        decompose bar_index previous_close
+          ((ex_date, money_factor) :: acc) rest
+  in
+  decompose 0 None [] (group 0 [])
+
+let merge_cash_dividend_cache dividends ~cache_path =
+  let derived_dates = Hashtbl.create (Array.length dividends) in
+  let derived_rows =
+    Array.to_list
+      (Array.map
+         (fun dividend ->
+           Hashtbl.replace derived_dates dividend.ex_date ();
+           Printf.sprintf "%s,%.17g," dividend.ex_date
+             dividend.cash_per_share)
+         dividends)
+  in
+  let cached_rows =
+    if not (Sys.file_exists cache_path) then []
+    else
+      match non_empty_lines cache_path with
+      | "ex_date,cash_per_share,pay_date" :: rows ->
+          List.filter
+            (fun row -> not (Hashtbl.mem derived_dates (row_date row)))
+            rows
+      | _ ->
+          failf "%s: expected header ex_date,cash_per_share,pay_date"
+            cache_path
+  in
+  let rows =
+    List.sort
+      (fun left right -> String.compare (row_date left) (row_date right))
+      (cached_rows @ derived_rows)
+  in
+  with_temp ".rows" (fun rows_path ->
+    let output = open_out rows_path in
+    let () =
+      Fun.protect
+        ~finally:(fun () -> close_out output)
+        (fun () ->
+          List.iter (fun row -> output_string output (row ^ "\n")) rows)
+    in
+    rewrite_rows ~header:"ex_date,cash_per_share,pay_date"
+      ~rows_path ~cache_path)
+
+let fetch_cash_dividends ~token ~symbol ~to_ ~price_cache ~factor_cache
+    ~cache_path =
+  let keep reason =
+    Printf.eprintf "warning: cash dividend fetch failed (%s); %s\n" reason
+      (if Sys.file_exists cache_path then
+         "keeping cached cash dividend data"
+       else
+         "cash dividend data is unavailable")
+  in
+  let derive reason =
+    Printf.eprintf
+      "warning: TaiwanStockDividend unavailable (%s); deriving cash dividends from cached price factors and treating every factor as cash-only\n"
+      reason;
+    try
+      let bars = read_bars ~market:"tw" price_cache in
+      let factors = read_dividends factor_cache in
+      let dividends = derive_cash_dividends bars factors in
+      merge_cash_dividend_cache dividends ~cache_path
+    with Failure message | Sys_error message ->
+      keep (reason ^ "; factor derivation failed: " ^ message)
+  in
+  with_temp ".json" (fun json_path ->
+    let url =
+      api_url ~dataset:"TaiwanStockDividend" ~symbol
+        ~from_:"1900-01-01" ~to_
+    in
+    let process_status, http_code = curl_get ~token ~url ~output:json_path in
+    let tier_failure =
+      match http_code with
+      | "400" | "402" | "403" -> Some ("HTTP " ^ http_code)
+      | "200" when process_ok process_status ->
+          (match jq_status json_path with
+           | Some ("400" | "402" | "403" as status) ->
+               Some ("API status " ^ status)
+           | _ -> None)
+      | _ -> None
+    in
+    match tier_failure with
+    | Some reason -> derive reason
+    | None when not (process_ok process_status) || http_code <> "200" ->
+        keep
+          ("HTTP " ^
+           (if http_code = "" || http_code = "000" then "unavailable"
+            else http_code))
+    | None ->
+        (match check_api_response json_path with
+         | `Error message -> keep message
+         | `Ok ->
+             with_temp ".rows" (fun rows_path ->
+               let () =
+                 transform_json ~args:[]
+                   ~expression:(
+                     ".data[] " ^
+                     "| select((.CashExDividendTradingDate // \"\") != \"\") " ^
+                     "| [.CashExDividendTradingDate, " ^
+                     "(((.CashEarningsDistribution // 0) | tonumber) + " ^
+                     "((.CashStatutorySurplus // 0) | tonumber)), " ^
+                     "(.CashDividendPaymentDate // \"\")] " ^
+                     "| select(.[1] != 0) | @csv")
+                   ~json_path ~rows_path
+               in
+               rewrite_rows ~header:"ex_date,cash_per_share,pay_date"
+                 ~rows_path ~cache_path)))
+
+let fetch ~market ~symbol ~from_ ~to_ ~data_dir =
+  let market = market_name market in
+  let () = check_symbol symbol in
+  let () =
+    match from_ with
+    | None -> ignore (parse_date "to" to_)
+    | Some date -> validate_range date to_
+  in
+  let token =
+    match Sys.getenv_opt "FINMIND_TOKEN" with
+    | Some token when String.trim token <> "" -> token
+    | _ -> failwith "export FINMIND_TOKEN=\"your_token_here\""
+  in
+  let directory = Filename.concat data_dir market in
+  let () = mkdir_p directory in
+  let price_cache = Filename.concat directory (symbol ^ ".csv") in
+  let factor_cache = Filename.concat directory (symbol ^ ".div.csv") in
+  let cash_cache = Filename.concat directory (symbol ^ ".cashdiv.csv") in
+  let () =
+    fetch_prices ~token ~market ~symbol ~from_ ~to_ ~cache_path:price_cache
+  in
+  if market = "tw" then
+    let () =
+      fetch_dividends ~token ~symbol ~to_ ~cache_path:factor_cache
+    in
+    let () =
+      fetch_cash_dividends ~token ~symbol ~to_ ~price_cache ~factor_cache
+        ~cache_path:cash_cache
+    in
+    let () =
+      fetch_events ~token ~symbol ~to_
+        ~cache_path:(Filename.concat directory (symbol ^ ".events.csv"))
+    in
+    fetch_stockinfo ~token ~symbol
+      ~cache_path:(Filename.concat directory "stockinfo.csv")
+
 
 let financing_ratio ~data_dir ~symbol =
   let path =
@@ -878,7 +1247,7 @@ let filter_dates ~keep bars =
   |> List.rev
   |> Array.of_list
 
-let load ~market ~symbol ~from_ ~to_ ~data_dir =
+let load_asset ~market ~symbol ~from_ ~to_ ~data_dir =
   let market = market_name market in
   let () = check_symbol symbol in
   let () =
@@ -904,19 +1273,19 @@ let load ~market ~symbol ~from_ ~to_ ~data_dir =
       failf "%s not found; run bt fetch --market %s --symbol %s"
         cache_path market symbol
   in
-  let bars = read_bars ~market cache_path in
-  let () =
-    Array.sort (fun left right -> String.compare left.date right.date) bars
-  in
-  let () =
-    if market = "tw" then
+  let money, signal, dividends =
+    if market = "us" then
+      read_us_planes cache_path
+    else
+      let signal = read_bars ~market cache_path in
+      let money = Array.copy signal in
       let read_factors path warning =
         if Sys.file_exists path then read_dividends path
         else
           let () = prerr_endline warning in
           [||]
       in
-      let dividends =
+      let dividend_factors =
         read_factors
           (Filename.concat directory (symbol ^ ".div.csv"))
           "warning: prices unadjusted for dividends"
@@ -926,16 +1295,65 @@ let load ~market ~symbol ~from_ ~to_ ~data_dir =
           (Filename.concat directory (symbol ^ ".events.csv"))
           "warning: prices unadjusted for splits/reductions"
       in
-      let factors = Array.append dividends events in
-      let () =
-        if Array.length factors > 0 then back_adjust bars factors
+      let cash_path = Filename.concat directory (symbol ^ ".cashdiv.csv") in
+      let cash_dividends =
+        if Sys.file_exists cash_path then read_cash_dividends cash_path
+        else
+          let () =
+            prerr_endline
+              "warning: cash dividend data unavailable; run bt fetch"
+          in
+          [||]
       in
-      if Array.length events > 0 then back_adjust_volume bars events
+      let signal_factors = Array.append dividend_factors events in
+      let money_factors =
+        Array.append
+          (money_dividend_factors money dividend_factors cash_dividends)
+          events
+      in
+      let () =
+        if Array.length signal_factors > 0 then
+          back_adjust signal signal_factors
+      in
+      let () =
+        if Array.length money_factors > 0 then back_adjust money money_factors
+      in
+      let () =
+        if Array.length events > 0 then back_adjust_volume signal events
+      in
+      let () =
+        if Array.length events > 0 then back_adjust_volume money events
+      in
+      money, signal, cash_dividends
   in
-  let selected = filter_range ~from_ ~to_ bars in
   let () =
-    if Array.length selected < 2 then
+    Array.sort (fun left right -> String.compare left.date right.date) money
+  in
+  let () =
+    Array.sort (fun left right -> String.compare left.date right.date) signal
+  in
+  let () =
+    Array.sort
+      (fun left right -> String.compare left.ex_date right.ex_date)
+      dividends
+  in
+  let money = filter_range ~from_ ~to_ money in
+  let signal = filter_range ~from_ ~to_ signal in
+  let dividends =
+    dividends
+    |> Array.to_list
+    |> List.filter (fun dividend ->
+      in_range ~from_ ~to_ dividend.ex_date)
+    |> Array.of_list
+  in
+  let () =
+    if Array.length signal < 2 then
       failf "%s contains fewer than 2 bars in the requested range; run bt fetch --market %s --symbol %s"
         cache_path market symbol
   in
-  selected
+  { money; signal; dividends }
+
+(* Transitional Task 1 entry point. Task 2 rewires bin/bt.ml to load_asset
+   and deletes load in the same commit. *)
+let load ~market ~symbol ~from_ ~to_ ~data_dir =
+  (load_asset ~market ~symbol ~from_ ~to_ ~data_dir).signal

@@ -8,6 +8,21 @@ type bar = {
   v : float;
 }
 
+(** One dated cash dividend. *)
+type dividend = {
+  ex_date : string;
+  cash_per_share : float;
+  pay_date : string;
+}
+
+(** The execution, signal, and cash-event planes for one asset. *)
+type loaded_asset = {
+  money : bar array;
+  signal : bar array;
+  dividends : dividend array;
+}
+
+
 (** Create a directory and any missing parents. *)
 val mkdir_p : string -> unit
 
@@ -19,6 +34,15 @@ val fetch :
   to_:string ->
   data_dir:string ->
   unit
+
+(** Load both price planes and dated dividend cash events. *)
+val load_asset :
+  market:string ->
+  symbol:string ->
+  from_:string option ->
+  to_:string option ->
+  data_dir:string ->
+  loaded_asset
 
 (** Load, adjust, and date-filter cached market data. *)
 val load :
@@ -48,6 +72,23 @@ val prepend_rows :
 
 (** Read cached price bars for a normalized market name. *)
 val read_bars : market:string -> string -> bar array
+
+(** Read a TW cash-dividend cache, filling missing pay dates. *)
+val read_cash_dividends : string -> dividend array
+
+(** Derive TW cash dividends from raw bars and signal factors. *)
+val derive_cash_dividends :
+  bar array ->
+  (string * float) array ->
+  dividend array
+
+(** Merge derived rows into a TW cash-dividend cache by ex-date. *)
+val merge_cash_dividend_cache :
+  dividend array ->
+  cache_path:string ->
+  unit
+
+
 
 (** Back-adjust bars in place using dated multiplicative factors. *)
 val back_adjust : bar array -> (string * float) array -> unit

@@ -1769,6 +1769,148 @@ let test_back_adjust_events () =
   in
   Data.back_adjust combined [| ("2020-01-02", 0.9); ("2020-01-02", 0.5) |];
   assert_close 45. combined.(0).c
+let test_cash_dividend_parse () =
+  with_temp_strategy
+    "ex_date,cash_per_share,pay_date\n\
+     2025-11-15,2.5,2025-12-20\n\
+     2025-12-31,1.25,\n"
+    (fun path ->
+      let dividends = Data.read_cash_dividends path in
+      (* The two nonzero fixture rows each produce one cash event. *)
+      assert (Array.length dividends = 2);
+      (* A source pay date is preserved verbatim. *)
+      assert (dividends.(0).Data.pay_date = "2025-12-20");
+      (* One calendar month after 2025-12-31 is 2026-01-31. *)
+      assert (dividends.(1).Data.pay_date = "2026-01-31"))
+
+let test_cash_dividend_fallback_derivation () =
+  let bars =
+    [| bar "2025-12-30" 100. 100.;
+       bar "2025-12-31" 90. 90. |]
+  in
+  let dividends =
+    Data.derive_cash_dividends bars [| "2025-12-31", 0.9 |]
+  in
+  (* One factor row has one previous raw close, so it yields one event. *)
+  assert (Array.length dividends = 1);
+  (* The factor date is the cash ex-date. *)
+  assert (dividends.(0).Data.ex_date = "2025-12-31");
+  (* (1 - 0.9) * the previous raw close of 100 = 10 per share. *)
+  assert_close 10. dividends.(0).Data.cash_per_share;
+  (* The derived cache has no pay date, so the loader adds one month. *)
+  assert (dividends.(0).Data.pay_date = "2026-01-31");
+  with_temp_strategy
+    "ex_date,cash_per_share,pay_date\n2020-01-02,3,2020-02-03\n"
+    (fun cache_path ->
+      Data.merge_cash_dividend_cache dividends ~cache_path;
+      let merged = Data.read_cash_dividends cache_path in
+      (* A partial factor derivation retains the older cached event. *)
+      assert (Array.length merged = 2);
+      (* The retained direct-source row keeps its original pay date. *)
+      assert (merged.(0).Data.pay_date = "2020-02-03");
+      (* The newly derived row is added after the retained history. *)
+      assert (merged.(1).Data.ex_date = "2025-12-31"))
+
+let with_temp_market market function_ =
+  let root = Filename.temp_file "bt-test-dividend-" "" in
+  Sys.remove root;
+  Unix.mkdir root 0o700;
+  let directory = Filename.concat root market in
+  Unix.mkdir directory 0o700;
+  Fun.protect
+    ~finally:(fun () ->
+      Array.iter
+        (fun name -> Sys.remove (Filename.concat directory name))
+        (Sys.readdir directory);
+      Unix.rmdir directory;
+      Unix.rmdir root)
+    (fun () -> function_ root directory)
+
+let test_us_dividend_derivation () =
+  with_temp_market "us" (fun root us ->
+    let path = Filename.concat us "CASH.csv" in
+    let output = open_out path in
+    let () =
+      Fun.protect
+        ~finally:(fun () -> close_out output)
+        (fun () ->
+          output_string output
+            "date,open,high,low,close,adj_close,volume\n\
+             2025-01-02,98,98,98,98,98,1100\n\
+             2025-01-03,99,99,99,99,99,1200\n\
+             2025-01-01,100,100,100,100,98,1000\n")
+    in
+    let loaded =
+      Data.load_asset ~market:"us" ~symbol:"CASH" ~from_:None ~to_:None
+        ~data_dir:root
+    in
+    (* Only the 0.98-to-1.00 ratio change is a dividend event. *)
+    assert (Array.length loaded.Data.dividends = 1);
+    (* The ratio change occurs on 2025-01-02, so that is the ex-date. *)
+    assert (loaded.Data.dividends.(0).Data.ex_date = "2025-01-02");
+    (* US cash is credited on its ex-date by the zero-lag convention. *)
+    assert (loaded.Data.dividends.(0).Data.pay_date = "2025-01-02");
+    (* 100 * (1 - 0.98 / 1.00) = 2 cash per share. *)
+    assert_close 2. loaded.Data.dividends.(0).Data.cash_per_share;
+    (* An unchanged ratio on 2025-01-03 adds no second event. *)
+    assert (Array.length loaded.Data.dividends = 1))
+
+let test_two_price_planes () =
+  with_temp_market "tw" (fun root tw ->
+    let write name contents =
+      let output = open_out (Filename.concat tw name) in
+      Fun.protect
+        ~finally:(fun () -> close_out output)
+        (fun () -> output_string output contents)
+    in
+    let () =
+      write "CASH.csv"
+        "date,open,high,low,close,volume\n\
+         2025-12-28,400,400,400,400,250\n\
+         2025-12-29,200,200,200,200,500\n\
+         2025-12-30,100,100,100,100,1000\n\
+         2025-12-31,90,90,90,90,1100\n"
+    in
+    let () =
+      write "CASH.div.csv"
+        "date,factor\n2025-12-30,0.5\n2025-12-31,0.9\n"
+    in
+    let () =
+      write "CASH.events.csv" "date,factor\n2025-12-29,0.5\n"
+    in
+    let () =
+      write "CASH.cashdiv.csv"
+        "ex_date,cash_per_share,pay_date\n2025-12-31,10,2026-01-31\n"
+    in
+    let loaded =
+      Data.load_asset ~market:"tw" ~symbol:"CASH" ~from_:None ~to_:None
+        ~data_dir:root
+    in
+    let expected_signal : Data.bar array =
+      [| { date = "2025-12-28"; o = 90.; h = 90.; l = 90.; c = 90.;
+           v = 500. };
+         { date = "2025-12-29"; o = 90.; h = 90.; l = 90.; c = 90.;
+           v = 500. };
+         { date = "2025-12-30"; o = 90.; h = 90.; l = 90.; c = 90.;
+           v = 1000. };
+         { date = "2025-12-31"; o = 90.; h = 90.; l = 90.; c = 90.;
+           v = 1100. } |]
+    in
+    (* The signal OHLCV bytes match the legacy full-factor derivation. *)
+    assert
+      (Marshal.to_bytes loaded.Data.signal [Marshal.No_sharing] =
+       Marshal.to_bytes expected_signal [Marshal.No_sharing]);
+    (* Event and stock-dividend factors leave pre-event money at 100. *)
+    assert_close 100. loaded.Data.money.(0).Data.c;
+    (* The corporate-event factor doubles pre-event volume in money. *)
+    assert_close 500. loaded.Data.money.(0).Data.v;
+    (* The same corporate-event factor doubles pre-event signal volume. *)
+    assert_close 500. loaded.Data.signal.(0).Data.v;
+    (* Removing only the cash factor leaves the stock factor in money. *)
+    assert_close 100. loaded.Data.money.(2).Data.c;
+    (* The ex-date raw close falls from adjusted 100 to money price 90. *)
+    assert_close 90. loaded.Data.money.(3).Data.c)
+
 
 let test_load_adjustments () =
   let root = Filename.temp_file "bt-test-data-" "" in
@@ -2711,6 +2853,10 @@ let () =
   test_head_probe_gate ();
   test_plot_script ();
   test_back_adjust_events ();
+  test_cash_dividend_parse ();
+  test_cash_dividend_fallback_derivation ();
+  test_us_dividend_derivation ();
+  test_two_price_planes ();
   test_load_adjustments ();
   test_financing_ratio ();
   test_event_transform ();
