@@ -931,6 +931,70 @@ let test_no_dividend_events_identity () =
      so every dated equity value must be structurally equal. *)
   assert (with_empty_events.equity_curve = without_events.equity_curve)
 
+let test_receivable_not_duplicated_on_force_close () =
+  let bars =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 90. 90. |]
+  in
+  let result =
+    run_with_dividends ~stock:"tw/TEST" bars [| 1.; 1. |]
+      zero_costs (no_margin 1)
+      [| dividend "2020-01-02" 10. "2020-02-01" |] 0.
+  in
+  (* The ex-date position is worth 0.9 and owns 1/100 share, so its
+     unpaid receivable is 0.1. Final force-close converts only the
+     0.9 inventory to cash; cash plus receivable must remain 1.0. *)
+  assert_close ~tolerance:1e-12 1. (final_equity result)
+
+let test_receivable_not_available_to_planner () =
+  let bars =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 100. 100.;
+       bar "2020-01-03" 100. 100. |]
+  in
+  let result =
+    run_with_dividends ~stock:"tw/TEST" bars
+      [| 0.96; 1.; 1. |] zero_costs (no_margin 1)
+      [| dividend "2020-01-02" 6.25 "2020-02-01" |] 0.
+  in
+  (* Entry leaves 0.04 cash. Its 0.0096 shares book a 0.06
+     receivable, raising equity to 1.06. Reaching target 1 needs a
+     0.10 buy: 0.04 cash plus a 0.06 financed lot. The receivable
+     must not masquerade as the 0.06 cash allocation, so the re-fill
+     reaches exposure 1 rather than stopping at inventory 1.00. *)
+  match result.fills with
+  | _entry :: refill :: _ ->
+      assert_close ~tolerance:1e-12 1. refill.Engine.to_e
+  | _ -> assert false
+
+let test_intersected_ex_date () =
+  let bars =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-03" 90. 90.;
+       bar "2020-01-04" 90. 90. |]
+  in
+  let result =
+    run_with_dividends ~stock:"tw/TEST" bars
+      [| 1.; 1.; 1. |] zero_costs (no_margin 1)
+      [| dividend "2020-01-02" 10. "2020-01-02" |] 0.
+  in
+  (* The omitted Jan 2 bar lies between retained Jan 1 and Jan 3.
+     The Jan 3 inventory still represents 1/100 share, so booking
+     and immediately settling 0.1 restores the 0.9 inventory to
+     equity 1 and triggers one re-fill before the final close. *)
+  assert_close ~tolerance:1e-12 1. (final_equity result);
+  (* Entry, intersected-date re-fill, and final force-close. *)
+  assert (List.length result.fills = 3);
+  let before_range =
+    run_with_dividends ~stock:"tw/TEST" bars
+      [| 1.; 1.; 1. |] zero_costs (no_margin 1)
+      [| dividend "2019-12-31" 10. "2019-12-31" |] 0.
+  in
+  (* An event before the first retained bar has no pre-run holdings.
+     It is discarded, so only the 100-to-90 price return remains. *)
+  assert_close ~tolerance:1e-12 0.9 (final_equity before_range)
+
+
 
 let test_engine_buyhold_costs () =
   (* Entry solves E1 = E0 - fee * E1, so E1 = E0 / (1 + fee).
@@ -3117,6 +3181,9 @@ let () =
   test_dividend_tax_cli ();
   test_frozen_dividend_reduces_debt ();
   test_no_dividend_events_identity ();
+  test_receivable_not_duplicated_on_force_close ();
+  test_receivable_not_available_to_planner ();
+  test_intersected_ex_date ();
   test_engine_buyhold_costs ();
   test_exact_cash_funding ();
   test_engine_no_borrow_stats ();

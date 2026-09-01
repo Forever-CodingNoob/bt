@@ -332,45 +332,50 @@ let run ?dividends ?(dividend_tax = 0.)
       cash := !cash +. amount -. payment
     else cash := !cash +. amount
   in
-  let process_dividends ~date price_at =
+  let process_dividends ~previous_date ~date price_at =
     let landed = ref false in
     let () =
       iter_assets (fun index ->
         let events = dividends.(index) in
+        let book_event event =
+          let price = price_at index in
+          let net_per_share =
+            event.Data.cash_per_share *. (1. -. dividend_tax)
+          in
+          let cash_amount =
+            if price > 0. then
+              cash_values.(index) /. price *. net_per_share
+            else 0.
+          in
+          let margin_amount =
+            if price > 0. then
+              margin_values.(index) /. price *. net_per_share
+            else 0.
+          in
+          let total = cash_amount +. margin_amount in
+          if total > 0. then
+            if is_us index then
+              let () = cash := !cash +. total in
+              landed := true
+            else
+              receivables.(index) <-
+                { receivable_pay_date = event.Data.pay_date;
+                  receivable_cash = cash_amount;
+                  receivable_margin = margin_amount }
+                :: receivables.(index)
+        in
         let rec book event_index =
           if event_index = Array.length events then event_index
           else
             let event = events.(event_index) in
-            let comparison = String.compare event.Data.ex_date date in
-            if comparison > 0 then event_index
-            else if comparison < 0 then book (event_index + 1)
+            if String.compare event.Data.ex_date date > 0 then event_index
             else
-              let price = price_at index in
-              let net_per_share =
-                event.Data.cash_per_share *. (1. -. dividend_tax)
-              in
-              let cash_amount =
-                if price > 0. then
-                  cash_values.(index) /. price *. net_per_share
-                else 0.
-              in
-              let margin_amount =
-                if price > 0. then
-                  margin_values.(index) /. price *. net_per_share
-                else 0.
-              in
-              let total = cash_amount +. margin_amount in
               let () =
-                if total > 0. then
-                  if is_us index then
-                    let () = cash := !cash +. total in
-                    landed := true
-                  else
-                    receivables.(index) <-
-                      { receivable_pay_date = event.Data.pay_date;
-                        receivable_cash = cash_amount;
-                        receivable_margin = margin_amount }
-                      :: receivables.(index)
+                match previous_date with
+                | Some previous
+                  when String.compare event.Data.ex_date previous > 0 ->
+                    book_event event
+                | None | Some _ -> ()
               in
               book (event_index + 1)
         in
@@ -542,7 +547,9 @@ let run ?dividends ?(dividend_tax = 0.)
           in
           let equity_after = equity_now *. (1. -. fraction) in
           let () = cash_values.(index) <- 0. in
-          let cash_after = equity_after -. total_assets () in
+          let cash_after =
+            equity_after -. total_assets () -. total_receivables ()
+          in
           if cash_after < 0. then
             let () = debt := !debt -. cash_after in
             cash := 0.
@@ -915,7 +922,10 @@ let run ?dividends ?(dividend_tax = 0.)
         in
         let post_assets = sum post_cash_values +. sum post_margin_values in
         let post_liabilities = sum post_loans +. sum post_interests in
-        let available = e1 -. post_assets +. post_liabilities +. !debt in
+        let available =
+          e1 -. post_assets +. post_liabilities +. !debt
+          -. total_receivables ()
+        in
         let cash_refinance_capacities = Array.make asset_count 0. in
         let margin_refinance_rates = Array.make asset_count 0. in
         let margin_refinance_capacities = Array.make asset_count 0. in
@@ -1548,10 +1558,15 @@ let run ?dividends ?(dividend_tax = 0.)
     if t = length then ()
     else
       let date = (snd assets.(0)).(t).Data.date in
+      let previous_date =
+        if t = 0 then None
+        else Some ((snd assets.(0)).(t - 1).Data.date)
+      in
       let () =
         if !bankrupt then
           ignore
-            (process_dividends ~date (fun i -> close_at i t))
+            (process_dividends ~previous_date ~date
+               (fun i -> close_at i t))
         else
           let () =
             if t > 0 then
@@ -1567,7 +1582,8 @@ let run ?dividends ?(dividend_tax = 0.)
                       (fun i -> close_at i (t - 1))
                   in
                   let cash_landed =
-                    process_dividends ~date (fun i -> open_at i t)
+                    process_dividends ~previous_date ~date
+                      (fun i -> open_at i t)
                   in
                   let () =
                     liquidate ~bar_index:t ~date (fun i -> open_at i t)
@@ -1584,7 +1600,8 @@ let run ?dividends ?(dividend_tax = 0.)
                       scale_values (fun i -> close_at i t)
                         (fun i -> close_at i (t - 1))
                   in
-                  process_dividends ~date (fun i -> close_at i t)
+                  process_dividends ~previous_date ~date
+                    (fun i -> close_at i t)
               in
               let () =
                 guard_solvency ~bar_index:t ~date (fun i -> close_at i t)
@@ -1608,7 +1625,8 @@ let run ?dividends ?(dividend_tax = 0.)
                     (fun i -> close_at i (t - 1))
                 in
                 let cash_landed =
-                  process_dividends ~date (fun i -> open_at i t)
+                  process_dividends ~previous_date ~date
+                    (fun i -> open_at i t)
                 in
                 let () =
                   if !pending_liquidation then
