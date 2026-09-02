@@ -1,8 +1,8 @@
 # bt
 
 `bt` is a command-line backtest tool written in OCaml. It downloads daily
-prices from the FinMind API and runs one or more strategy scripts. A run can
-compare all strategies with an optional buy-and-hold baseline.
+prices from FinMind (Taiwan) and Tiingo (US) and runs one or more strategy
+scripts. A run can compare all strategies with an optional buy-and-hold baseline.
 
 ## Contents
 
@@ -22,7 +22,7 @@ compare all strategies with an optional buy-and-hold baseline.
 - opam 2.x (the toolchain installs into a project-local switch)
 - `curl` and `jq` in `/usr/bin`
 - `python3` with matplotlib (optional; used by `scripts/plot.py` for the equity graph)
-- A FinMind API token
+- A FinMind API token (for TW data) and/or a Tiingo API token (for US data)
 
 For plotting, `bt` runs `scripts/plot.py` directly. If `python3` or matplotlib
 is unavailable, it prints `warning: plot failed; skipping <stem>.png` and
@@ -152,12 +152,13 @@ per-market costs, margin financing, dividend accounting, and simulation gaps.
 ## Data notes
 
 - TW prices are cached raw. `data/tw/<symbol>.cashdiv.csv` stores cash ex-dates, cash per share, and pay dates. If a pay date is absent, the loader uses one calendar month after the ex-date.
-- The loader builds a dividend-adjusted signal series and a money series that keeps cash-dividend price drops. Both series keep exact split, capital-reduction, par-value-change, and stock-dividend adjustments. Volume changes only for share-count events.
-- If FinMind denies the cash-dividend table with HTTP or API status 400, 402, or 403, `bt fetch` derives cash from the legacy `<symbol>.div.csv` factors and treats every factor as cash-only. This is exact for cash-only TW ETFs. It can misprice stocks that also pay stock dividends.
-- US caches keep raw close and adjusted close. The loader uses their daily ratio to derive ex-date cash dividends, builds the signal series from adjusted prices, and keeps cash-dividend drops in the money series.
-- A Taiwan fetch prepends rows when `--from` is earlier than the first
-  cached date. It also appends rows after the last cached date. Cached
-  dates are not added again, so repeated fetches are idempotent.
+- US prices come from Tiingo. `bt fetch` stores raw OHLCV bars, split events, cash dividends, and signal-plane dividend factors in four files per symbol. The split factor is snapped to the nearest small rational to remove floating-point noise.
+- One unified loader builds both planes for TW and US. The signal plane adjusts for dividends and all corporate events. The money plane adjusts for splits and share-count events but keeps cash-dividend drops.
+- If FinMind denies the TW cash-dividend table with HTTP or API status 400, 402, or 403, `bt fetch` derives cash from the legacy `<symbol>.div.csv` factors and treats every factor as cash-only. This is exact for cash-only TW ETFs. It can misprice stocks that also pay stock dividends.
+- For both markets, `bt fetch` prepends rows when `--from` is earlier
+  than the first cached date. It also appends rows after the last
+  cached date. Cached dates are not added again, so repeated fetches
+  are idempotent.
 
 ## Contributing
 

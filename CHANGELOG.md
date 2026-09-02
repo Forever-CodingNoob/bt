@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Tiingo end-of-day US data source with canonical four-file cache layout (raw OHLCV, events, cash dividends, dividend factors).
+- Split-factor snap to nearest small rational p/q (p,q at most 50) for exact price and volume restatement.
+
+### Changed
+
+- US cache format uses raw prices without adj_close; one unified two-plane loader serves both TW and US markets.
+- Incremental US fetch with append and head-gap backfill (same as TW).
+
+### Removed
+
+- FinMind USStockPrice fetch path and close/adjClose derivation heuristics.
 ## [0.6.0] - 2026-09-02
 
 ### Added

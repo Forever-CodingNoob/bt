@@ -7,7 +7,7 @@
 - [Command syntax](#command-syntax)
 - [`bt fetch`](#bt-fetch)
   - [Fetch options](#fetch-options)
-  - [FinMind token](#finmind-token)
+  - [API tokens](#api-tokens)
   - [Cache files](#cache-files)
   - [Price adjustments](#price-adjustments)
 - [`bt run`](#bt-run)
@@ -32,7 +32,7 @@ bt run STRAT... [--baseline M/SYM] [--from D] [--to D]
 
 ## `bt fetch`
 
-Downloads price data from FinMind and stores it in a local CSV cache. Use the positional form for new commands. The separate `--market` and `--symbol` options are an equivalent form.
+Downloads price data and stores it in a local CSV cache. Taiwan data comes from FinMind. US data comes from Tiingo. Use the positional form for new commands. The separate `--market` and `--symbol` options are an equivalent form.
 
 ### Fetch options
 
@@ -40,21 +40,22 @@ Downloads price data from FinMind and stores it in a local CSV cache. Use the po
 |---|---|---|
 | `MARKET/SYMBOL` | — | Select one market and symbol, for example `tw/0050`. The market must be `tw` or `us`. Use this argument or use both options below. |
 | `--market tw\|us` | — | Select the Taiwan or US market when you do not use the positional argument. |
-| `--symbol SYM` | — | Select the FinMind symbol when you do not use the positional argument. |
+| `--symbol SYM` | — | Select the symbol when you do not use the positional argument. |
 | `--from YYYY-MM-DD` | `1994-10-01` | Set the first date to request. |
 | `--to YYYY-MM-DD` | today | Set the last date to request. |
 | `--data-dir DIR` | `data/` | Set the cache directory. |
 | `-h`, `-help`, `--help` | — | Print the fetch options to standard output and exit with code 0. |
 
-### FinMind token
+### API tokens
 
-Set `FINMIND_TOKEN` before you use `bt fetch`.
+Set the environment variable for the market you use before running `bt fetch`.
 
 ```sh
-export FINMIND_TOKEN="your_token_here"
+export FINMIND_TOKEN="your_finmind_token"   # for tw
+export TIINGO_TOKEN="your_tiingo_api_token" # for us
 ```
 
-The command stops with code 1 if the variable is missing or empty.
+The command stops with code 1 if the required token is missing or empty.
 
 ### Cache files
 
@@ -64,14 +65,17 @@ The command stops with code 1 if the variable is missing or empty.
 | Taiwan | `data/tw/SYM.div.csv` | `date,factor` |
 | Taiwan | `data/tw/SYM.cashdiv.csv` | `ex_date,cash_per_share,pay_date` |
 | Taiwan | `data/tw/stockinfo.csv` | `stock_id,type,date` |
-| US | `data/us/SYM.csv` | `date,open,high,low,close,adj_close,volume` |
+| US | `data/us/SYM.csv` | `date,open,high,low,close,volume` |
+| US | `data/us/SYM.events.csv` | `date,factor` |
+| US | `data/us/SYM.cashdiv.csv` | `ex_date,cash_per_share,pay_date` |
+| US | `data/us/SYM.div.csv` | `date,factor` |
 
 Replace `data/` with the value of `--data-dir` when you set that option.
 
 > [!TIP]
 > A plain fetch updates an existing TW cache forward only. Pass an explicit `--from` earlier than the cache start to backfill.
 
-For Taiwan prices, `bt fetch` adds data at both ends of the cache. If `--from` is earlier than the first cached date, it fetches the missing earlier range and prepends it. It also fetches dates after the last cached date and appends them. Cached rows win at both boundaries. A repeated fetch is idempotent.
+For both markets, `bt fetch` adds data at both ends of the cache. If `--from` is earlier than the first cached date, it fetches the missing earlier range and prepends it. It also fetches dates after the last cached date and appends them. Cached rows win at both boundaries. A repeated fetch is idempotent.
 
 The command fetches the full Taiwan dividend-factor history and rewrites `SYM.div.csv` on each run. It also fetches cash dividends into `SYM.cashdiv.csv`. If the source omits a pay date, the loader uses one calendar month after the ex-date.
 

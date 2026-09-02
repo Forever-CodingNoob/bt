@@ -15,6 +15,7 @@ This document describes how the bt engine simulates trades, computes equity, and
   - [Dividends](#dividends)
   - [Gap between simulation and the real market](#gap-between-simulation-and-the-real-market)
 - [United States market (us)](#united-states-market-us)
+  - [Data source](#data-source)
   - [Costs](#costs)
   - [Dividends](#dividends-1)
   - [Open-ended margin](#open-ended-margin)
@@ -114,15 +115,21 @@ Stock-dividend and share-count factors restate per-share cash amounts and volume
 
 ## United States market (us)
 
+### Data source
+
+US market data comes from Tiingo end-of-day prices. The Tiingo response provides raw OHLCV bars, per-row cash dividends (`divCash`), and per-row split factors (`splitFactor`). The fetcher stores raw prices in `<SYM>.csv`, split events in `<SYM>.events.csv` (factor = 1/splitFactor), cash dividends in `<SYM>.cashdiv.csv`, and signal-plane dividend factors in `<SYM>.div.csv`. The adjusted columns from Tiingo are not cached.
+
+Split factors are snapped to the nearest small rational p/q (p and q at most 50) when the relative difference is below 1e-4. This removes Tiingo's floating-point noise (e.g., 7.000007 becomes 7) and keeps price, volume, and cash restatement exact.
+
 ### Costs
 
 US costs and slippage default to zero. Override with `--fee-bps`, `--tax-bps`, and `--slip-bps`.
 
 ### Dividends
 
-US dividends use the adjusted-close ratio. A ratio change that matches the inverse raw-price jump is a share-count event (split), not cash. It restates money prices and both volume planes.
+US dividends use the same two-plane architecture as TW. The signal plane adjusts for both dividends and splits. The money plane adjusts for splits only.
 
-US dividends become cash on their ex-date with no receivable period. This zero-lag treatment is a simplification. When dividend cash arrives, the engine runs one normal cost-bearing fill pass toward the current targets.
+US dividends become cash on their ex-date with no receivable period. When dividend cash arrives, the engine runs one normal cost-bearing fill pass toward the current targets.
 
 ### Open-ended margin
 
@@ -130,7 +137,5 @@ US loan lots are always open-ended. The engine does not model Reg T initial marg
 
 ### Gap between simulation and the real market
 
-- The split-detection heuristic uses the adjusted-close ratio. Rounding noise in adjusted prices can misidentify small dividends as splits or vice versa.
-- No short selling is modeled.
-- No borrow costs are modeled.
+- No short selling or borrow costs are modeled.
 - No US regulatory margin rules (Reg T, FINRA maintenance) are modeled.
