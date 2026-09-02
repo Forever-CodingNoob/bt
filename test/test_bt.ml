@@ -823,6 +823,40 @@ let test_tw_dividend_paydown_interest () =
   in
   assert_close ~tolerance:1e-12 expected (final_equity result)
 
+let test_tw_dividend_pure_paydown_preserves_drift () =
+  let bars =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 100. 100.;
+       bar "2020-01-03" 120. 120.;
+       bar "2020-01-04" 120. 120. |]
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.; maintenance_ratio = 0.; ratios = [| 0.6 |];
+      loan_term_months = None }
+  in
+  let result =
+    run_with_dividends ~stock:"tw/TEST" bars
+      [| 2.5; 2.5; 2.5; 2.5 |] zero_costs margin
+      [| dividend "2020-01-02" 20. "2020-01-03" |] 0.
+  in
+  (* Entry owns 1/40 margin-funded share. Its 20-per-share dividend is
+     1/2, below the 3/2 loan, so payment reduces the loan to 1 and puts
+     no cash in the planner. The pay date therefore records no fill. *)
+  assert
+    (not
+       (List.exists
+          (fun fill -> fill.Engine.date = "2020-01-03")
+          result.fills));
+  (* The price drift raises inventory from 5/2 to 3. With the loan now
+     1, final equity is 3 - 1 = 2. *)
+  assert_close ~tolerance:1e-12 2. (final_equity result);
+  (* With no pay-date rebalance, the final close starts from the drifted
+     exposure 3 / 2 rather than the requested 5 / 2. *)
+  match result.fills with
+  | [_entry; close] ->
+      assert_close ~tolerance:1e-12 (3. /. 2.) close.Engine.from_e
+  | _ -> assert false
+
 let test_tw_dividend_excess_spill () =
   let bars =
     [| bar "2020-01-01" 100. 100.;
@@ -843,7 +877,13 @@ let test_tw_dividend_excess_spill () =
      shares. Its 5/2 dividend clears the 3/2 loan and spills 1 to
      cash. Flat prices and zero costs preserve equity 1 + 5/2 = 7/2
      through the pay-date re-fill and final close. *)
-  assert_close ~tolerance:1e-12 (7. /. 2.) (final_equity result)
+  assert_close ~tolerance:1e-12 (7. /. 2.) (final_equity result);
+  (* The 5/2 margin receipt exceeds the 3/2 loan by 1. That spill
+     reaches cash, so the planner must record a pay-date re-fill. *)
+  assert
+    (List.exists
+       (fun fill -> fill.Engine.date = "2020-01-03")
+       result.fills)
 
 let test_us_dividend_refill_cost () =
   let bars =
@@ -3297,6 +3337,7 @@ let () =
   test_engine_zero_value_exit_preserves_liability ();
   test_tw_dividend_receivable ();
   test_tw_dividend_paydown_interest ();
+  test_tw_dividend_pure_paydown_preserves_drift ();
   test_tw_dividend_excess_spill ();
   test_us_dividend_refill_cost ();
   test_dividend_tax ();

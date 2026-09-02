@@ -328,9 +328,13 @@ let run ?dividends ?(dividend_tax = 0.)
     if due > 0. then
       let payment = Float.min amount due in
       let remaining = 1. -. payment /. due in
+      let spill = amount -. payment in
       let () = scale_lots index remaining in
-      cash := !cash +. amount -. payment
-    else cash := !cash +. amount
+      let () = cash := !cash +. spill in
+      spill
+    else
+      let () = cash := !cash +. amount in
+      amount
   in
   let process_dividends ~previous_date ~date price_at =
     let landed = ref false in
@@ -388,19 +392,16 @@ let run ?dividends ?(dividend_tax = 0.)
               if
                 String.compare date receivable.receivable_pay_date >= 0
               then
-                let amount =
-                  receivable.receivable_cash
-                  +. receivable.receivable_margin
-                in
-                let () =
-                  if amount > 0. then landed := true
-                in
                 let () =
                   cash := !cash +. receivable.receivable_cash
                 in
-                let () =
+                let margin_spill =
                   repay_margin_receivable index
                     receivable.receivable_margin
+                in
+                let () =
+                  if receivable.receivable_cash +. margin_spill > 0. then
+                    landed := true
                 in
                 settle kept rest
               else settle (receivable :: kept) rest

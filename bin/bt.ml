@@ -5,7 +5,7 @@ let usage =
    \  bt run STRAT... [--baseline M/SYM] [--from D] [--to D]\n\
    \         [-p name=value ...] [--fill open|close]\n\
    \         [--fee-bps F] [--tax-bps F] [--slip-bps F] [--min-fee F]\n\
-   \         [--financing-rate PCT] [--maintenance-ratio PCT] [--financing-ratio PCT]\n\
+   \         [--dividend-tax PCT] [--financing-rate PCT] [--maintenance-ratio PCT] [--financing-ratio PCT]\n\
    \         [--loan-term-months N]\n\
    \         [--capital TWD] [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]"
 
