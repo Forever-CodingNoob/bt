@@ -1267,7 +1267,6 @@ let financing_ratio ~data_dir ~symbol =
         match read_best None with
         | Some (_, "twse") -> 0.6
         | Some (_, "tpex") ->
-            (* The TPEX maximum became 60% on 2014-11-10; use --financing-ratio 50 for earlier backtests. *)
             0.6
         | _ -> fallback ())
 

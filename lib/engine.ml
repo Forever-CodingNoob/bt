@@ -99,7 +99,6 @@ let default_costs ~market ~symbol =
       in
       let is_etf = starts_with_zero '0' in
       let tax_bps =
-        (* The 2017-01-01 through 2026-12-31 temporary exemption covers ordinary bond ETFs; leveraged/inverse L/R classes remain taxed. *)
         if is_etf && symbol.[length - 1] = 'B' then 0.
         else if is_etf || starts_with_zero '2' then 10.
         else 30.
