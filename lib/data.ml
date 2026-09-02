@@ -36,6 +36,9 @@ let check_symbol symbol =
       symbol
   then failf "invalid symbol %S" symbol
 
+let symbol_directory ~data_dir ~market ~symbol =
+  Filename.concat (Filename.concat data_dir market) symbol
+
 let leap_year year =
   year mod 400 = 0 || (year mod 4 = 0 && year mod 100 <> 0)
 
@@ -1314,7 +1317,7 @@ let fetch ~market ~symbol ~from_ ~to_ ~data_dir =
     | None -> ignore (parse_date "to" to_)
     | Some date -> validate_range date to_
   in
-  let directory = Filename.concat data_dir market in
+  let directory = symbol_directory ~data_dir ~market ~symbol in
   let () = mkdir_p directory in
   match market with
   | "us" ->
@@ -1340,8 +1343,9 @@ let fetch ~market ~symbol ~from_ ~to_ ~data_dir =
         fetch_events ~token ~symbol ~to_
           ~cache_path:(Filename.concat directory (symbol ^ ".events.csv"))
       in
+      let market_dir = Filename.concat data_dir market in
       fetch_stockinfo ~token ~symbol
-        ~cache_path:(Filename.concat directory "stockinfo.csv")
+        ~cache_path:(Filename.concat market_dir "stockinfo.csv")
   | _ -> failf "invalid market %S (expected tw or us)" market
 
 
@@ -1436,7 +1440,7 @@ let load_asset ~market ~symbol ~from_ ~to_ ~data_dir =
         failf "from date %s is after to date %s" first last
     | _ -> ()
   in
-  let directory = Filename.concat data_dir market in
+  let directory = symbol_directory ~data_dir ~market ~symbol in
   let cache_path = Filename.concat directory (symbol ^ ".csv") in
   let () =
     if not (Sys.file_exists cache_path) then

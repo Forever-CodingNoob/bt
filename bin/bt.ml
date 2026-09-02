@@ -107,7 +107,9 @@ let apply_cost_overrides defaults fee_bps tax_bps slip_bps min_fee :
 
 let load_asset ~market ~symbol ~from_ ~to_ ~data_dir =
   let cache_path =
-    Filename.concat (Filename.concat data_dir market) (symbol ^ ".csv")
+    Filename.concat
+      (Filename.concat (Filename.concat data_dir market) symbol)
+      (symbol ^ ".csv")
   in
   if not (Sys.file_exists cache_path) then begin
     let command = Buffer.create 96 in

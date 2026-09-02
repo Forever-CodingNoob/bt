@@ -1742,6 +1742,14 @@ let test_baseline_output_header () =
       assert (not (Sys.file_exists
         (Filename.concat out_dir "baseline.trades.csv"))))
 
+let rec remove_tree path =
+  if Sys.is_directory path then begin
+    Array.iter
+      (fun name -> remove_tree (Filename.concat path name))
+      (Sys.readdir path);
+    Unix.rmdir path
+  end else
+    Sys.remove path
 let test_prepend_rows () =
   let cache = Filename.temp_file "bt-test-cache" ".csv" in
   let rows = Filename.temp_file "bt-test-rows" ".csv" in
@@ -1767,15 +1775,14 @@ let test_prepend_rows () =
   let tw_dir = Filename.concat data_dir "tw" in
   Unix.mkdir tw_dir 0o700;
   let symbol = "SEAM" in
-  let stock_path = Filename.concat tw_dir (symbol ^ ".csv") in
-  let dividend_path = Filename.concat tw_dir (symbol ^ ".div.csv") in
+  let sym_dir = Filename.concat tw_dir symbol in
+  Unix.mkdir sym_dir 0o700;
+  let stock_path = Filename.concat sym_dir (symbol ^ ".csv") in
+  let dividend_path = Filename.concat sym_dir (symbol ^ ".div.csv") in
   Fun.protect
     ~finally:(fun () ->
       (try Sys.remove cache with Sys_error _ -> ());
-      (try Sys.remove stock_path with Sys_error _ -> ());
-      (try Sys.remove dividend_path with Sys_error _ -> ());
-      Unix.rmdir tw_dir;
-      Unix.rmdir data_dir)
+      remove_tree data_dir)
     (fun () ->
       Sys.rename cache stock_path;
       write dividend_path "date,factor\n2020-01-04,0.5\n";
@@ -1852,25 +1859,12 @@ let test_dividend_tax_cli () =
   let () = Unix.mkdir root 0o700 in
   let tw_dir = Filename.concat root "tw" in
   let out_dir = Filename.concat root "out" in
-  let remove_flat_dir path =
-    if Sys.file_exists path then
-      let () =
-        Array.iter
-          (fun name -> Sys.remove (Filename.concat path name))
-          (Sys.readdir path)
-      in
-      Unix.rmdir path
-  in
   Fun.protect
-    ~finally:(fun () ->
-      remove_flat_dir out_dir;
-      remove_flat_dir tw_dir;
-      Array.iter
-        (fun name -> Sys.remove (Filename.concat root name))
-        (Sys.readdir root);
-      Unix.rmdir root)
+    ~finally:(fun () -> remove_tree root)
     (fun () ->
       let () = Unix.mkdir tw_dir 0o700 in
+      let aa_dir = Filename.concat tw_dir "AA" in
+      let () = Unix.mkdir aa_dir 0o700 in
       let write path contents =
         let output = open_out path in
         Fun.protect
@@ -1878,21 +1872,21 @@ let test_dividend_tax_cli () =
           (fun () -> output_string output contents)
       in
       let () =
-        write (Filename.concat tw_dir "AA.csv")
+        write (Filename.concat aa_dir "AA.csv")
           "date,open,high,low,close,volume\n\
            2020-01-01,100,100,100,100,1000\n\
            2020-01-02,90,90,90,90,1000\n\
            2020-01-03,90,90,90,90,1000\n"
       in
       let () =
-        write (Filename.concat tw_dir "AA.div.csv")
+        write (Filename.concat aa_dir "AA.div.csv")
           "date,factor\n2020-01-02,0.9\n"
       in
       let () =
-        write (Filename.concat tw_dir "AA.events.csv") "date,factor\n"
+        write (Filename.concat aa_dir "AA.events.csv") "date,factor\n"
       in
       let () =
-        write (Filename.concat tw_dir "AA.cashdiv.csv")
+        write (Filename.concat aa_dir "AA.cashdiv.csv")
           "ex_date,cash_per_share,pay_date\n\
            2020-01-02,10,2020-01-02\n"
       in
@@ -1960,37 +1954,27 @@ let test_multi_stock_cli () =
   Unix.mkdir root 0o700;
   let tw_dir = Filename.concat root "tw" in
   let out_dir = Filename.concat root "out" in
-  let remove_flat_dir path =
-    if Sys.file_exists path then begin
-      Array.iter
-        (fun name -> Sys.remove (Filename.concat path name))
-        (Sys.readdir path);
-      Unix.rmdir path
-    end
-  in
   Fun.protect
-    ~finally:(fun () ->
-      remove_flat_dir out_dir;
-      remove_flat_dir tw_dir;
-      Array.iter
-        (fun name -> Sys.remove (Filename.concat root name))
-        (Sys.readdir root);
-      Unix.rmdir root)
+    ~finally:(fun () -> remove_tree root)
     (fun () ->
       Unix.mkdir tw_dir 0o700;
+      let aa_dir = Filename.concat tw_dir "AA" in
+      Unix.mkdir aa_dir 0o700;
+      let bb_dir = Filename.concat tw_dir "BB" in
+      Unix.mkdir bb_dir 0o700;
       let write path contents =
         let output = open_out path in
         Fun.protect
           ~finally:(fun () -> close_out output)
           (fun () -> output_string output contents)
       in
-      write (Filename.concat tw_dir "AA.csv")
+      write (Filename.concat aa_dir "AA.csv")
         "date,open,high,low,close,volume\n\
          2020-01-01,100,101,99,100,1000\n\
          2020-01-02,110,111,109,110,1000\n\
          2020-01-03,121,122,120,121,1000\n\
          2020-01-06,130,131,129,130,1000\n";
-      write (Filename.concat tw_dir "BB.csv")
+      write (Filename.concat bb_dir "BB.csv")
         "date,open,high,low,close,volume\n\
          2020-01-01,50,51,49,50,1000\n\
          2020-01-02,55,56,54,55,1000\n\
@@ -2076,37 +2060,27 @@ let test_margin_cli () =
   Unix.mkdir root 0o700;
   let tw_dir = Filename.concat root "tw" in
   let out_dir = Filename.concat root "out" in
-  let remove_flat_dir path =
-    if Sys.file_exists path then begin
-      Array.iter
-        (fun name -> Sys.remove (Filename.concat path name))
-        (Sys.readdir path);
-      Unix.rmdir path
-    end
-  in
   Fun.protect
-    ~finally:(fun () ->
-      remove_flat_dir out_dir;
-      remove_flat_dir tw_dir;
-      Array.iter
-        (fun name -> Sys.remove (Filename.concat root name))
-        (Sys.readdir root);
-      Unix.rmdir root)
+    ~finally:(fun () -> remove_tree root)
     (fun () ->
       Unix.mkdir tw_dir 0o700;
+      let aa_dir = Filename.concat tw_dir "AA" in
+      Unix.mkdir aa_dir 0o700;
+      let bb_dir = Filename.concat tw_dir "BB" in
+      Unix.mkdir bb_dir 0o700;
       let write path contents =
         let output = open_out path in
         Fun.protect
           ~finally:(fun () -> close_out output)
           (fun () -> output_string output contents)
       in
-      write (Filename.concat tw_dir "AA.csv")
+      write (Filename.concat aa_dir "AA.csv")
         "date,open,high,low,close,volume\n\
          2020-01-01,100,101,99,100,1000\n\
          2020-01-02,110,111,109,110,1000\n\
          2020-01-03,121,122,120,121,1000\n\
          2020-01-06,130,131,129,130,1000\n";
-      write (Filename.concat tw_dir "BB.csv")
+      write (Filename.concat bb_dir "BB.csv")
         "date,open,high,low,close,volume\n\
          2020-01-01,50,51,49,50,1000\n\
          2020-01-02,55,56,54,55,1000\n\
@@ -2254,6 +2228,7 @@ let test_cash_dividend_fallback_derivation () =
       (* The newly derived row is added after the retained history. *)
       assert (merged.(1).Data.ex_date = "2025-12-31"))
 
+
 let with_temp_market market function_ =
   let root = Filename.temp_file "bt-test-dividend-" "" in
   Sys.remove root;
@@ -2261,12 +2236,7 @@ let with_temp_market market function_ =
   let directory = Filename.concat root market in
   Unix.mkdir directory 0o700;
   Fun.protect
-    ~finally:(fun () ->
-      Array.iter
-        (fun name -> Sys.remove (Filename.concat directory name))
-        (Sys.readdir directory);
-      Unix.rmdir directory;
-      Unix.rmdir root)
+    ~finally:(fun () -> remove_tree root)
     (fun () -> function_ root directory)
 
 let test_tiingo_snap () =
@@ -2374,8 +2344,10 @@ let test_tiingo_append_seam () =
   (* Verify that appending to an existing US cache produces 6-field rows
      and the seam between old and new data is contiguous. *)
   with_temp_market "us" (fun root us ->
+    let sym = Filename.concat us "TEST" in
+    Unix.mkdir sym 0o700;
     let write name contents =
-      let output = open_out (Filename.concat us name) in
+      let output = open_out (Filename.concat sym name) in
       Fun.protect
         ~finally:(fun () -> close_out output)
         (fun () -> output_string output contents)
@@ -2406,23 +2378,23 @@ let test_tiingo_append_seam () =
               (* Append the new price rows. *)
               Data.append_rows ~header:"date,open,high,low,close,volume"
                 ~rows_path:pp
-                ~cache_path:(Filename.concat us "TEST.csv")
+                ~cache_path:(Filename.concat sym "TEST.csv")
                 ~after:(Some "2024-01-03");
               (* Append cashdiv. *)
               Data.append_rows ~header:"ex_date,cash_per_share,pay_date"
                 ~rows_path:cp
-                ~cache_path:(Filename.concat us "TEST.cashdiv.csv")
+                ~cache_path:(Filename.concat sym "TEST.cashdiv.csv")
                 ~after:(Some "2024-01-03");
               (* Append div. *)
               Data.append_rows ~header:"date,factor"
                 ~rows_path:dp
-                ~cache_path:(Filename.concat us "TEST.div.csv")
+                ~cache_path:(Filename.concat sym "TEST.div.csv")
                 ~after:(Some "2024-01-03"))))));
     (* Read the merged cache and verify row shape. *)
     let lines =
       List.filter (fun l -> l <> "")
         (String.split_on_char '\n'
-           (read_file (Filename.concat us "TEST.csv")))
+           (read_file (Filename.concat sym "TEST.csv")))
     in
     (* Header + 2 old + 2 new = 5 lines. *)
     assert (List.length lines = 5);
@@ -2449,8 +2421,10 @@ let test_tiingo_append_seam () =
 
 let test_two_price_planes () =
   with_temp_market "tw" (fun root tw ->
+    let sym = Filename.concat tw "CASH" in
+    Unix.mkdir sym 0o700;
     let write name contents =
-      let output = open_out (Filename.concat tw name) in
+      let output = open_out (Filename.concat sym name) in
       Fun.protect
         ~finally:(fun () -> close_out output)
         (fun () -> output_string output contents)
@@ -2505,8 +2479,12 @@ let test_two_price_planes () =
     assert_close 90. loaded.Data.money.(3).Data.c)
 let test_dividend_cash_split_restatement () =
   with_temp_market "tw" (fun root tw ->
-    let write name contents =
-      let output = open_out (Filename.concat tw name) in
+    let direct_dir = Filename.concat tw "DIRECT" in
+    Unix.mkdir direct_dir 0o700;
+    let fallback_dir = Filename.concat tw "FALLBACK" in
+    Unix.mkdir fallback_dir 0o700;
+    let write_to dir name contents =
+      let output = open_out (Filename.concat dir name) in
       Fun.protect
         ~finally:(fun () -> close_out output)
         (fun () -> output_string output contents)
@@ -2528,11 +2506,11 @@ let test_dividend_cash_split_restatement () =
        2025-01-04,0.9555555555555556\n"
     in
     let events = "date,factor\n2025-01-03,0.25\n" in
-    let () = write "DIRECT.csv" prices in
-    let () = write "DIRECT.div.csv" factor_csv in
-    let () = write "DIRECT.events.csv" events in
+    let () = write_to direct_dir "DIRECT.csv" prices in
+    let () = write_to direct_dir "DIRECT.div.csv" factor_csv in
+    let () = write_to direct_dir "DIRECT.events.csv" events in
     let () =
-      write "DIRECT.cashdiv.csv"
+      write_to direct_dir "DIRECT.cashdiv.csv"
         "ex_date,cash_per_share,pay_date\n\
          2025-01-02,10,2025-02-02\n\
          2025-01-04,1,2025-02-04\n"
@@ -2547,17 +2525,17 @@ let test_dividend_cash_split_restatement () =
     assert_close 2.5 direct.Data.dividends.(0).Data.cash_per_share;
     (* No share-count event follows the second dividend, so 1 stays 1. *)
     assert_close 1. direct.Data.dividends.(1).Data.cash_per_share;
-    let () = write "FALLBACK.csv" prices in
-    let () = write "FALLBACK.div.csv" factor_csv in
-    let () = write "FALLBACK.events.csv" events in
+    let () = write_to fallback_dir "FALLBACK.csv" prices in
+    let () = write_to fallback_dir "FALLBACK.div.csv" factor_csv in
+    let () = write_to fallback_dir "FALLBACK.events.csv" events in
     let derived =
       Data.derive_cash_dividends
-        (Data.read_bars ~market:"tw" (Filename.concat tw "FALLBACK.csv"))
+        (Data.read_bars ~market:"tw" (Filename.concat fallback_dir "FALLBACK.csv"))
         factors
     in
     let () =
       Data.merge_cash_dividend_cache derived
-        ~cache_path:(Filename.concat tw "FALLBACK.cashdiv.csv")
+        ~cache_path:(Filename.concat fallback_dir "FALLBACK.cashdiv.csv")
     in
     let fallback =
       Data.load_asset ~market:"tw" ~symbol:"FALLBACK" ~from_:None ~to_:None
@@ -2574,8 +2552,10 @@ let test_dividend_cash_split_restatement () =
 
 let test_cash_restatement_through_stock_dividend () =
   with_temp_market "tw" (fun root tw ->
+    let sym = Filename.concat tw "CASH_STOCK" in
+    Unix.mkdir sym 0o700;
     let write name contents =
-      let output = open_out (Filename.concat tw name) in
+      let output = open_out (Filename.concat sym name) in
       Fun.protect
         ~finally:(fun () -> close_out output)
         (fun () -> output_string output contents)
@@ -2601,8 +2581,10 @@ let test_cash_restatement_through_stock_dividend () =
 
 let test_same_day_unit_factor_restates_cash () =
   with_temp_market "tw" (fun root tw ->
+    let sym = Filename.concat tw "SAME_DAY" in
+    Unix.mkdir sym 0o700;
     let write name contents =
-      let output = open_out (Filename.concat tw name) in
+      let output = open_out (Filename.concat sym name) in
       Fun.protect
         ~finally:(fun () -> close_out output)
         (fun () -> output_string output contents)
@@ -2628,8 +2610,10 @@ let test_us_loader_parity () =
   (* Build a US cache in the canonical four-file layout and verify the
      unified loader produces the expected two-plane result. *)
   with_temp_market "us" (fun root us ->
+    let sym = Filename.concat us "TEST" in
+    Unix.mkdir sym 0o700;
     let write name contents =
-      let output = open_out (Filename.concat us name) in
+      let output = open_out (Filename.concat sym name) in
       Fun.protect
         ~finally:(fun () -> close_out output)
         (fun () -> output_string output contents)
@@ -2704,8 +2688,10 @@ let test_fallback_preserves_direct_overlap () =
 
 let test_stock_dividend_restates_volume () =
   with_temp_market "tw" (fun root tw ->
+    let sym = Filename.concat tw "STOCK_VOLUME" in
+    Unix.mkdir sym 0o700;
     let write name contents =
-      let output = open_out (Filename.concat tw name) in
+      let output = open_out (Filename.concat sym name) in
       Fun.protect
         ~finally:(fun () -> close_out output)
         (fun () -> output_string output contents)
@@ -2734,31 +2720,28 @@ let test_load_adjustments () =
   let tw = Filename.concat root "tw" in
   Unix.mkdir tw 0o700;
   Fun.protect
-    ~finally:(fun () ->
-      Array.iter
-        (fun name -> Sys.remove (Filename.concat tw name))
-        (Sys.readdir tw);
-      Unix.rmdir tw;
-      Unix.rmdir root)
+    ~finally:(fun () -> remove_tree root)
     (fun () ->
-      let write path contents =
-        let output = open_out path in
+      let write dir name contents =
+        let output = open_out (Filename.concat dir name) in
         Fun.protect
           ~finally:(fun () -> close_out output)
           (fun () -> output_string output contents)
       in
-      write (Filename.concat tw "MIXED.csv")
+      let mixed_dir = Filename.concat tw "MIXED" in
+      Unix.mkdir mixed_dir 0o700;
+      write mixed_dir "MIXED.csv"
         "date,open,high,low,close,volume\n\
          2025-06-17,400,400,400,400,100\n\
          2025-06-18,100,100,100,100,500\n\
          2025-07-20,100,100,100,100,600\n\
          2025-07-21,98,98,98,98,700\n";
-      write (Filename.concat tw "MIXED.div.csv")
+      write mixed_dir "MIXED.div.csv"
         "date,factor\n2025-07-21,0.98\n";
-      write (Filename.concat tw "MIXED.cashdiv.csv")
+      write mixed_dir "MIXED.cashdiv.csv"
         "ex_date,cash_per_share,pay_date\n\
          2025-07-21,2,2025-08-21\n";
-      write (Filename.concat tw "MIXED.events.csv")
+      write mixed_dir "MIXED.events.csv"
         "date,factor\n2025-06-18,0.25\n";
       let mixed =
         (Data.load_asset ~market:"tw" ~symbol:"MIXED" ~from_:None
@@ -2780,16 +2763,18 @@ let test_load_adjustments () =
       assert_close 600. mixed.(2).Data.v;
       (* A dividend does not restate volume, so raw volume 700 stays 700. *)
       assert_close 700. mixed.(3).Data.v;
-      write (Filename.concat tw "DIV.csv")
+      let div_dir = Filename.concat tw "DIV" in
+      Unix.mkdir div_dir 0o700;
+      write div_dir "DIV.csv"
         "date,open,high,low,close,volume\n\
          2020-01-01,100,100,100,100,111\n\
          2020-01-02,90,90,90,90,222\n";
-      write (Filename.concat tw "DIV.div.csv")
+      write div_dir "DIV.div.csv"
         "date,factor\n2020-01-02,0.9\n";
-      write (Filename.concat tw "DIV.cashdiv.csv")
+      write div_dir "DIV.cashdiv.csv"
         "ex_date,cash_per_share,pay_date\n\
          2020-01-02,10,2020-02-02\n";
-      write (Filename.concat tw "DIV.events.csv") "date,factor\n";
+      write div_dir "DIV.events.csv" "date,factor\n";
       let dividend =
         (Data.load_asset ~market:"tw" ~symbol:"DIV" ~from_:None
            ~to_:None ~data_dir:root).Data.signal
@@ -2800,13 +2785,15 @@ let test_load_adjustments () =
       assert_close 111. dividend.(0).Data.v;
       (* Strict-before excludes the dividend date, leaving raw volume 222. *)
       assert_close 222. dividend.(1).Data.v;
-      write (Filename.concat tw "SPLIT.csv")
+      let split_dir = Filename.concat tw "SPLIT" in
+      Unix.mkdir split_dir 0o700;
+      write split_dir "SPLIT.csv"
         "date,open,high,low,close,volume\n\
          2026-06-29,100,100,100,100,10\n\
          2026-06-30,50,50,50,50,20\n\
          2026-07-01,55,55,55,55,30\n";
-      write (Filename.concat tw "SPLIT.div.csv") "date,factor\n";
-      write (Filename.concat tw "SPLIT.events.csv")
+      write split_dir "SPLIT.div.csv" "date,factor\n";
+      write split_dir "SPLIT.events.csv"
         "date,factor\n2026-06-30,0.5\n";
       let split =
         (Data.load_asset ~market:"tw" ~symbol:"SPLIT" ~from_:None
@@ -3599,6 +3586,45 @@ let test_margin_term_disabled () =
       assert (List.length result.fills = 2))
     [us; disabled]
 
+let test_nested_cache_layout () =
+  (* Per-symbol subdirectory: data/<market>/<SYMBOL>/<SYMBOL>.csv *)
+  let root = Filename.temp_file "bt-test-nested-" "" in
+  Sys.remove root;
+  Unix.mkdir root 0o700;
+  let tw = Filename.concat root "tw" in
+  Unix.mkdir tw 0o700;
+  let sym_dir = Filename.concat tw "NEST" in
+  Unix.mkdir sym_dir 0o700;
+  Fun.protect
+    ~finally:(fun () ->
+      Array.iter
+        (fun name -> Sys.remove (Filename.concat sym_dir name))
+        (Sys.readdir sym_dir);
+      Unix.rmdir sym_dir;
+      Unix.rmdir tw;
+      Unix.rmdir root)
+    (fun () ->
+      let write name contents =
+        let output = open_out (Filename.concat sym_dir name) in
+        Fun.protect
+          ~finally:(fun () -> close_out output)
+          (fun () -> output_string output contents)
+      in
+      write "NEST.csv"
+        "date,open,high,low,close,volume\n\
+         2020-01-01,100,101,99,100,1000\n\
+         2020-01-02,101,102,100,101,1100\n";
+      write "NEST.div.csv" "date,factor\n";
+      write "NEST.events.csv" "date,factor\n";
+      write "NEST.cashdiv.csv" "ex_date,cash_per_share,pay_date\n";
+      let loaded =
+        Data.load_asset ~market:"tw" ~symbol:"NEST" ~from_:None
+          ~to_:None ~data_dir:root
+      in
+      assert (Array.length loaded.Data.signal = 2);
+      assert_close 100. loaded.Data.signal.(0).Data.c;
+      assert_close 101. loaded.Data.signal.(1).Data.c)
+
 let () =
   test_parser ();
   test_default_costs ();
@@ -3704,5 +3730,6 @@ let () =
   test_stock_dividend_restates_volume ();
   test_load_adjustments ();
   test_financing_ratio ();
+  test_nested_cache_layout ();
   test_event_transform ();
   print_endline "ok"
