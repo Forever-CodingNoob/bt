@@ -7,15 +7,14 @@ docs/cli.md for the CLI flags.
 ## Contents
 
 - [Strategy styles](#strategy-styles)
+  - [Target exposure](#target-exposure)
+  - [Partial orders](#partial-orders)
+  - [Legacy entry and exit](#legacy-entry-and-exit)
 - [Multi-stock strategies](#multi-stock-strategies)
 - [Grammar (BNF)](#grammar-bnf)
 - [Statements](#statements)
 - [Values and types](#values-and-types)
 - [Builtin functions](#builtin-functions)
-
-> [!IMPORTANT]
-> Statements are one per line. Each stock uses exactly one of the three
-> styles below. Do not mix styles for one stock.
 
 ## Strategy styles
 

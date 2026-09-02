@@ -1,5 +1,17 @@
 # Contributing
 
+## Contents
+
+- [Module layout](#module-layout)
+- [Documentation map](#documentation-map)
+- [Build and test](#build-and-test)
+- [Style rules](#style-rules)
+- [Tests](#tests)
+- [Fetching test data](#fetching-test-data)
+- [Data cache layout](#data-cache-layout)
+- [Fixed contracts](#fixed-contracts)
+- [How to add an indicator](#how-to-add-an-indicator)
+
 ## Module layout
 
 ```

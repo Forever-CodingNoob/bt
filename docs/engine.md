@@ -2,6 +2,24 @@
 
 This document describes how the bt engine simulates trades, computes equity, and handles market-specific rules. For CLI flags see [cli.md](./cli.md). For the strategy DSL see [strategy.md](./strategy.md).
 
+## Contents
+
+- [Core engine](#core-engine)
+  - [Targets and drift](#targets-and-drift)
+  - [Fill planner](#fill-planner)
+  - [Equity accounting](#equity-accounting)
+  - [End-of-data close](#end-of-data-close)
+- [Taiwan market (tw)](#taiwan-market-tw)
+  - [Costs and taxes](#costs-and-taxes)
+  - [Margin financing](#margin-financing)
+  - [Dividends](#dividends)
+  - [Gap between simulation and the real market](#gap-between-simulation-and-the-real-market)
+- [United States market (us)](#united-states-market-us)
+  - [Costs](#costs)
+  - [Dividends](#dividends-1)
+  - [Open-ended margin](#open-ended-margin)
+  - [Gap between simulation and the real market](#gap-between-simulation-and-the-real-market-1)
+
 ## Core engine
 
 ### Targets and drift
