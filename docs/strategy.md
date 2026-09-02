@@ -13,8 +13,9 @@ docs/cli.md for the CLI flags.
 - [Values and types](#values-and-types)
 - [Builtin functions](#builtin-functions)
 
-Statements are one per line. Each stock uses exactly one of the three
-styles below. Do not mix styles for one stock.
+> [!IMPORTANT]
+> Statements are one per line. Each stock uses exactly one of the three
+> styles below. Do not mix styles for one stock.
 
 ## Strategy styles
 
