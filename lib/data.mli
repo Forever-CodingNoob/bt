@@ -62,10 +62,10 @@ val prepend_rows :
   before:string ->
   unit
 
-(** Read cached price bars for a normalized market name. *)
+(** Read cached price bars (date,open,high,low,close,volume). *)
 val read_bars : market:string -> string -> bar array
 
-(** Read a TW cash-dividend cache, filling missing pay dates. *)
+(** Read a cash-dividend cache, filling missing pay dates. *)
 val read_cash_dividends : string -> dividend array
 
 (** Derive TW cash dividends from raw bars and signal factors. *)
@@ -80,6 +80,18 @@ val merge_cash_dividend_cache :
   cache_path:string ->
   unit
 
+(** Snap a split factor to the nearest p/q with p,q at most 50 when within 1e-4. *)
+val snap_split_factor : float -> float
+
+(** Parse a Tiingo CSV response and write the four canonical cache files. *)
+val write_tiingo_rows :
+  csv_path:string ->
+  prev_close:float option ->
+  prices_path:string ->
+  events_path:string ->
+  cashdiv_path:string ->
+  div_path:string ->
+  unit
 
 
 (** Back-adjust bars in place using dated multiplicative factors. *)
