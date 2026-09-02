@@ -11,7 +11,7 @@ compare all strategies with an optional buy-and-hold baseline.
 - [Quick start](#quick-start)
 - [Commands](#commands)
 - [Strategy language (DSL)](#strategy-language-dsl)
-- [How the engine trades](#how-the-engine-trades)
+- [Engine overview](#engine-overview)
 - [Data notes](#data-notes)
 - [Contributing](#contributing)
 - [License](#license)
@@ -141,37 +141,13 @@ indicator functions, and scalar/series arithmetic. See
 [docs/strategy.md](./docs/strategy.md) for the complete reference:
 styles, grammar, statements, types, and every builtin.
 
-## How the engine trades
+## Engine overview
 
-- In `close` mode, the engine reads a decision at the bar close and fills
-  it at that close. This mode is the default.
-- In `open` mode, the engine reads a decision at the bar close and fills
-  it at the next bar open.
-- A strategy states a target exposure per bar. The engine trades the
-  difference and charges costs on the traded fraction.
-- Default costs: a TW trade pays the online commission of 0.0399% on each side, with a 20 TWD minimum per order.
-  The minimum applies only when `--capital` is given.
-  Through 2026-12-31, an ordinary bond ETF (a symbol that starts with `00` and ends with `B`) pays no sell tax.
-  Other `00` ETFs and `02` ETNs pay 0.1%; other Taiwan symbols pay 0.3%.
-  US costs and slippage are zero.
-  Override these with the cost flags (0.0399% = 3.99 basis points).
-- An open position at the end of the data is closed at the last close.
-
-Targets fill only when they change, so positions drift between fills. Each asset has separate cash and margin inventories. A buy uses available cash first. Each margin purchase creates a separate loan lot. A new lot borrows 60% of its value for both TWSE and TPEX stocks. The TPEX maximum became 60% on 2014-11-10; use `--financing-ratio 50` for earlier TPEX backtests.
-
-If required down payments exceed available cash, the engine can refinance existing inventory with a sell and buy pair. Both legs charge full trading costs. Financing interest is a liability at 6.35% per year by default. It starts on the second trading bar after a loan lot originates. Repayment settles interest through the second trading bar after repayment. The engine caps this tail at the last bar instead of extrapolating beyond the data. This cap is a simplification. Interest does not reduce cash each day. Equity is cash plus both inventories, less loan principal, accrued interest, and residual debt.
-
-TW loan lots mature after 18 calendar months by default. The maturity keeps the origination day of the month and clamps to the month end when needed. The engine rolls a mature lot by selling its margin inventory and buying back the fundable part on margin. Both legs pay normal costs. Appreciation can free cash. An underwater lot uses available cash, and any unfundable part stays sold. The rollover increments the refinance count. Use `--loan-term-months 0` to disable the TW term. US loan lots are always open-ended.
-
-Maintenance is total margin inventory value divided by total loan principal. It starts at 166.7% for both TWSE and TPEX margin entries, independent of total exposure. The default threshold is 130%. A call sells all margin inventories at the next open, but cash inventories remain. If equity is zero or less at a close, the engine sells everything, keeps any unpaid debt, and freezes the account.
-
-The engine uses two price series for each asset. The signal series keeps dividend and corporate-event adjustments, so indicators and rules keep their existing meaning. The money series keeps split, capital-reduction, par-value-change, and stock-dividend adjustments but leaves cash-dividend drops in place. Fills, inventory, loans, collateral, and equity use the money series.
-
-On a TW ex-date, the engine books net cash dividends as receivables for the shares in the cash and margin inventories. Receivables count in equity but not in maintenance or fill-planner liquidity. On the first bar on or after the pay date, the cash-inventory receivable becomes cash. The margin-inventory receivable repays that asset's loan lots pro rata with matching accrued interest, and any excess becomes cash. A frozen account still applies paid receivables to residual debt.
-
-US dividends become cash on the ex-date. This zero-lag treatment is a simplification. Whenever dividend cash arrives, the engine makes one normal fill pass toward the current targets for every asset and charges normal costs. `--dividend-tax PCT` reduces the dividend when it is booked and defaults to 0.
-
-The engine assumes every Taiwan symbol is marginable at the standard exchange ratio. It does not check broker eligibility or reduced financing ratios. Leveraged ETFs such as 00685L have historically been excluded from margin financing or assigned reduced ratios, so live margin trading can be unavailable.
+The engine reads each bar's target exposure and trades only the difference.
+Positions drift between fills. Each asset has separate cash and margin
+inventories with lot-level loan tracking. See
+[docs/engine.md](./docs/engine.md) for the complete engine guide, including
+per-market costs, margin financing, dividend accounting, and simulation gaps.
 
 ## Data notes
 
@@ -186,7 +162,6 @@ The engine assumes every Taiwan symbol is marginable at the standard exchange ra
 ## Contributing
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md).
-
 
 ## License
 The project is licensed under GPU LGPL v2.1. See [LICENSE](./LICENSE).
