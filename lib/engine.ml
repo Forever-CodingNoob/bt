@@ -110,7 +110,6 @@ let default_costs ~market ~symbol =
         min_fee = 20. }
   | _ -> invalid_arg "Engine.default_costs: market must be tw or us"
 
-(* NaN means flat; short exposure is out of scope *)
 let clamp_target value =
   if Float.is_nan value || value < 0. then 0. else value
 

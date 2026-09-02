@@ -193,9 +193,7 @@ let api_url_no_id ~dataset ~from_ ~to_ =
     "https://api.finmindtrade.com/api/v4/data?dataset=%s&start_date=%s&end_date=%s"
     (url_encode dataset) (url_encode from_) (url_encode to_)
 
-(* curl+jq pipeline; native HTTP+JSON client if fetch ever needs to be self-contained *)
 let curl_get ~token ~url ~output =
-  (* the header travels in a 0600 temp file so the token never shows in argv *)
   with_temp ".hdr" (fun header_path ->
     let channel = open_out header_path in
     let () =
@@ -441,7 +439,6 @@ let fetch_rows ~token ~dataset ~symbol ~from_ ~to_ ~expression ~consume =
 let fetch_prices ~token ~market ~symbol ~from_ ~to_ ~cache_path =
   let default_from = "1994-10-01" in
   if market = "tw" then
-    (* raw TW prices never change retroactively; cached rows win at both seams *)
     let tw_expression =
       ".data[] | [.date, .open, .max, .min, .close, .Trading_Volume] | @csv"
     in
@@ -477,9 +474,6 @@ let fetch_prices ~token ~market ~symbol ~from_ ~to_ ~cache_path =
     in
     ()
   else
-    (* US Adj_Close is rewritten retroactively by upstream dividends and
-       splits; appending fresh rows to old ones would mix adjustment
-       baselines, so the US cache is refetched in full and rewritten *)
     let first = first_cached_date cache_path in
     let start_date =
       match from_, first with
@@ -503,9 +497,6 @@ let fetch_dividends ~token ~symbol ~to_ ~cache_path =
         ~from_:"1900-01-01" ~to_
     in
     let process_status, http_code = curl_get ~token ~url ~output:json_path in
-    (* a failed dividend fetch never destroys previously cached factors;
-       stale factors beat none, and transient 402/429/5xx would otherwise
-       silently flip later runs to unadjusted prices *)
     let keep reason =
       Printf.eprintf "warning: dividend fetch failed (%s); %s\n" reason
         (if Sys.file_exists cache_path then "keeping cached dividend data"
@@ -531,8 +522,6 @@ let fetch_dividends ~token ~symbol ~to_ ~cache_path =
             in
             rewrite_rows ~header:"date,factor" ~rows_path ~cache_path))
 
-(* factor = after / before; back_adjust applies it to bars strictly
-   before the event date, matching the ex-date convention *)
 let event_expression ~before ~after =
   ".data[] | select(.stock_id == $sym) " ^
   "| select(." ^ before ^ " != null and ." ^ after ^ " != null) " ^
@@ -553,8 +542,6 @@ let non_empty_lines path =
     (String.split_on_char '\n' (read_text path))
 
 let fetch_events ~token ~symbol ~to_ ~cache_path =
-  (* a failed events fetch never destroys previously cached factors;
-     stale factors beat none, same policy as fetch_dividends *)
   let keep reason =
     Printf.eprintf "warning: events fetch failed (%s); %s\n" reason
       (if Sys.file_exists cache_path then "keeping cached event data"
@@ -812,7 +799,6 @@ let read_us_planes path =
                   adjusted_close, ratio
               | _ -> failf "%s:%d: malformed CSV row" path line_number
             in
-            (* FinMind emits all-zero rows on non-trading days; skip them *)
             if money_bar.o > 0. && money_bar.h > 0. &&
                money_bar.l > 0. && money_bar.c > 0. &&
                signal_bar.c > 0. then
@@ -848,8 +834,6 @@ let read_us_planes path =
             let dividends, units =
               match previous with
               | Some (previous_close, previous_adjusted, previous_ratio) ->
-                  (* Adj_Close is cent-rounded. Overlapping ratio intervals
-                     are rounding noise, not an observable corporate action. *)
                   let previous_high =
                     (previous_adjusted +. 0.005) /. previous_close
                   in
@@ -910,7 +894,6 @@ let read_bars ~market path =
                       v = float_field path line_number "volume" v }
                 | _ -> failf "%s:%d: malformed CSV row" path line_number
               in
-              (* FinMind emits all-zero rows on non-trading days; skip them *)
               if bar.o > 0. && bar.h > 0. && bar.l > 0. && bar.c > 0. then
                 loop (line_number + 1) (bar :: acc)
               else
