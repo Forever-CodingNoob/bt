@@ -2298,9 +2298,35 @@ let test_tiingo_transform () =
           with_temp_strategy "" (fun div_path ->
             Data.write_tiingo_rows ~csv_path ~prev_close:None
               ~prices_path ~events_path ~cashdiv_path ~div_path;
-            (* Prices: six rows, OHLCV reordered from Tiingo column order. *)
-            let prices = String.split_on_char '\n' (read_file prices_path) in
-            assert (List.length (List.filter (fun l -> l <> "") prices) = 6);
+            (* All four output files must be non-empty or at least exist. *)
+            assert (Sys.file_exists prices_path);
+            assert (Sys.file_exists events_path);
+            assert (Sys.file_exists cashdiv_path);
+            assert (Sys.file_exists div_path);
+            (* Prices: six rows, each with exactly 6 comma-separated fields. *)
+            let price_lines =
+              List.filter (fun l -> l <> "")
+                (String.split_on_char '\n' (read_file prices_path))
+            in
+            assert (List.length price_lines = 6);
+            List.iter (fun line ->
+              let fields = String.split_on_char ',' line in
+              (* Exactly date,open,high,low,close,volume = 6 fields. *)
+              assert (List.length fields = 6))
+              price_lines;
+            (* First price row: date reordered to date,open,high,low,close,vol.
+               Tiingo columns: date=2020-08-27, close=503.43, high=507.73,
+               low=501.06, open=506.09, volume=3477380.
+               Expected: 2020-08-27,506.09,507.73,501.06,503.43,3477380 *)
+            (match String.split_on_char ',' (List.hd price_lines) with
+             | [d; o; h; l; c; v] ->
+                 assert (d = "2020-08-27");
+                 assert_close 506.09 (float_of_string o);
+                 assert_close 503.43 (float_of_string c);
+                 assert_close 507.73 (float_of_string h);
+                 assert_close 501.06 (float_of_string l);
+                 assert_close 3477380. (float_of_string v)
+             | _ -> assert false);
             (* Events: the 4:1 split produces one event factor = 1/4 = 0.25. *)
             let events = read_file events_path in
             assert (contains events "2020-08-31");
@@ -2316,11 +2342,7 @@ let test_tiingo_transform () =
             assert (contains cashdiv "2024-03-15");
             assert (contains cashdiv "1.594937");
             (* Div factor: (prev_close - divCash) / prev_close.
-               prev_close on 2024-03-14 is the close on 2024-03-15's
-               predecessor in our fixture = 134.18 (2020-09-01 is last
-               before the dividend row; but our fixture is sparse).
-               Actually, the prev row is 2024-03-15's predecessor in
-               the file: 2020-09-01 close 134.18. So:
+               prev row is 2020-09-01 close 134.18.
                (134.18 - 1.594937) / 134.18 *)
             let div = read_file div_path in
             assert (contains div "2024-03-15");
@@ -2330,6 +2352,83 @@ let test_tiingo_transform () =
               | _ -> failwith "expected one div row"
             in
             assert_close ((134.18 -. 1.594937) /. 134.18) div_factor)))))
+
+let test_tiingo_append_seam () =
+  (* Verify that appending to an existing US cache produces 6-field rows
+     and the seam between old and new data is contiguous. *)
+  with_temp_market "us" (fun root us ->
+    let write name contents =
+      let output = open_out (Filename.concat us name) in
+      Fun.protect
+        ~finally:(fun () -> close_out output)
+        (fun () -> output_string output contents)
+    in
+    (* Seed a cache truncated to two bars. *)
+    write "TEST.csv"
+      "date,open,high,low,close,volume\n\
+       2024-01-02,100,101,99,100.5,1000\n\
+       2024-01-03,101,102,100,101.5,2000\n";
+    write "TEST.events.csv" "date,factor\n";
+    write "TEST.cashdiv.csv" "ex_date,cash_per_share,pay_date\n";
+    write "TEST.div.csv" "date,factor\n";
+    (* Build a Tiingo CSV fragment for two NEW rows (after the cache). *)
+    let csv =
+      "date,close,high,low,open,volume,adjClose,adjHigh,adjLow,adjOpen,adjVolume,divCash,splitFactor\n\
+       2024-01-04,103,104,102,102.5,3000,103,104,102,102.5,3000,0,1\n\
+       2024-01-05,104,105,103,103.5,4000,104,105,103,103.5,4000,0.5,1\n"
+    in
+    with_temp_strategy csv (fun csv_path ->
+      with_temp_strategy "" (fun pp ->
+        with_temp_strategy "" (fun ep ->
+          with_temp_strategy "" (fun cp ->
+            with_temp_strategy "" (fun dp ->
+              Data.write_tiingo_rows ~csv_path
+                ~prev_close:(Some 101.5)
+                ~prices_path:pp ~events_path:ep
+                ~cashdiv_path:cp ~div_path:dp;
+              (* Append the new price rows. *)
+              Data.append_rows ~header:"date,open,high,low,close,volume"
+                ~rows_path:pp
+                ~cache_path:(Filename.concat us "TEST.csv")
+                ~after:(Some "2024-01-03");
+              (* Append cashdiv. *)
+              Data.append_rows ~header:"ex_date,cash_per_share,pay_date"
+                ~rows_path:cp
+                ~cache_path:(Filename.concat us "TEST.cashdiv.csv")
+                ~after:(Some "2024-01-03");
+              (* Append div. *)
+              Data.append_rows ~header:"date,factor"
+                ~rows_path:dp
+                ~cache_path:(Filename.concat us "TEST.div.csv")
+                ~after:(Some "2024-01-03"))))));
+    (* Read the merged cache and verify row shape. *)
+    let lines =
+      List.filter (fun l -> l <> "")
+        (String.split_on_char '\n'
+           (read_file (Filename.concat us "TEST.csv")))
+    in
+    (* Header + 2 old + 2 new = 5 lines. *)
+    assert (List.length lines = 5);
+    (* Every data row has exactly 6 fields. *)
+    List.iter (fun line ->
+      if line <> "date,open,high,low,close,volume" then
+        assert (List.length (String.split_on_char ',' line) = 6))
+      lines;
+    (* The seam: last old row is 2024-01-03, first new row is 2024-01-04. *)
+    let dates = List.map (fun l ->
+      match String.split_on_char ',' l with d :: _ -> d | [] -> "")
+      (List.tl lines)
+    in
+    assert (dates = ["2024-01-02"; "2024-01-03"; "2024-01-04"; "2024-01-05"]);
+    (* Cashdiv: 0.5 dividend on 2024-01-05 appended.
+       Div factor: (101.5 - 0.5) / 101.5 from prev_close 101.5. *)
+    let loaded =
+      Data.load_asset ~market:"us" ~symbol:"TEST" ~from_:None ~to_:None
+        ~data_dir:root
+    in
+    assert (Array.length loaded.Data.dividends = 1);
+    assert (loaded.Data.dividends.(0).Data.ex_date = "2024-01-05");
+    assert_close 0.5 loaded.Data.dividends.(0).Data.cash_per_share)
 
 let test_two_price_planes () =
   with_temp_market "tw" (fun root tw ->
@@ -3575,6 +3674,7 @@ let () =
   test_cash_dividend_fallback_derivation ();
   test_tiingo_snap ();
   test_tiingo_transform ();
+  test_tiingo_append_seam ();
   test_two_price_planes ();
   test_dividend_cash_split_restatement ();
   test_cash_restatement_through_stock_dividend ();

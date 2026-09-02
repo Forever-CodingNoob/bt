@@ -62,6 +62,14 @@ val prepend_rows :
   before:string ->
   unit
 
+(** Append fetched CSV rows after an existing cache tail. *)
+val append_rows :
+  header:string ->
+  rows_path:string ->
+  cache_path:string ->
+  after:string option ->
+  unit
+
 (** Read cached price bars (date,open,high,low,close,volume). *)
 val read_bars : market:string -> string -> bar array
 

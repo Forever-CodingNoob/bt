@@ -1083,8 +1083,17 @@ let snap_split_factor value =
   in
   search 1 1 value infinity
 
-let tiingo_expected_header =
-  "date,close,high,low,open,volume,adjClose,adjHigh,adjLow,adjOpen,adjVolume,divCash,splitFactor"
+let tiingo_required_columns =
+  ["date"; "close"; "high"; "low"; "open"; "volume"; "divCash"; "splitFactor"]
+
+let find_tiingo_columns header_line =
+  let columns = String.split_on_char ',' (String.trim header_line) in
+  let rec index_of name i = function
+    | [] -> failf "Tiingo: missing column %S in header" name
+    | col :: rest ->
+        if col = name then i else index_of name (i + 1) rest
+  in
+  List.map (fun name -> name, index_of name 0 columns) tiingo_required_columns
 
 let write_tiingo_rows ~csv_path ~prev_close
     ~prices_path ~events_path ~cashdiv_path ~div_path =
@@ -1092,15 +1101,22 @@ let write_tiingo_rows ~csv_path ~prev_close
   Fun.protect
     ~finally:(fun () -> close_in csv)
     (fun () ->
-      let header =
+      let header_line =
         match input_line csv with
-        | line -> String.trim line
+        | line -> line
         | exception End_of_file -> ""
       in
-      let () =
-        if header <> tiingo_expected_header then
-          failf "Tiingo: unexpected CSV header %S" header
-      in
+      let col_map = find_tiingo_columns header_line in
+      let idx name = List.assoc name col_map in
+      let i_date = idx "date" in
+      let i_close = idx "close" in
+      let i_high = idx "high" in
+      let i_low = idx "low" in
+      let i_open = idx "open" in
+      let i_volume = idx "volume" in
+      let i_div_cash = idx "divCash" in
+      let i_split_factor = idx "splitFactor" in
+      let field fields i = List.nth fields i in
       let p = open_out prices_path in
       let e = open_out events_path in
       let c = open_out cashdiv_path in
@@ -1116,39 +1132,43 @@ let write_tiingo_rows ~csv_path ~prev_close
                 let line = String.trim line in
                 if line = "" then loop prev
                 else
-                  (match String.split_on_char ',' line with
-                   | [date; close; high; low; open_; volume;
-                      _; _; _; _; _; div_cash; split_factor] ->
-                       let date =
-                         let raw = unquote date in
-                         if String.length raw > 10 then String.sub raw 0 10
-                         else raw
-                       in
-                       let close_f = float_of_string close in
-                       let div_cash_f = float_of_string div_cash in
-                       let split_factor_f = float_of_string split_factor in
-                       let () =
-                         Printf.fprintf p "%s,%s,%s,%s,%s,%s\n"
-                           date open_ high low close volume
-                       in
-                       let () =
-                         if split_factor_f <> 1. then
-                           Printf.fprintf e "%s,%.17g\n" date
-                             (1. /. snap_split_factor split_factor_f)
-                       in
-                       let () =
-                         if div_cash_f > 0. then
-                           Printf.fprintf c "%s,%.17g,\n" date div_cash_f
-                       in
-                       let () =
-                         match prev with
-                         | Some pc when div_cash_f > 0. && pc > 0. ->
-                             Printf.fprintf d "%s,%.17g\n"
-                               date ((pc -. div_cash_f) /. pc)
-                         | _ -> ()
-                       in
-                       loop (Some close_f)
-                   | _ -> failf "Tiingo: malformed CSV row")
+                  let fields = String.split_on_char ',' line in
+                  let date =
+                    let raw = unquote (field fields i_date) in
+                    if String.length raw > 10 then String.sub raw 0 10
+                    else raw
+                  in
+                  let open_v = field fields i_open in
+                  let high_v = field fields i_high in
+                  let low_v = field fields i_low in
+                  let close_v = field fields i_close in
+                  let volume_v = field fields i_volume in
+                  let close_f = float_of_string close_v in
+                  let div_cash_f = float_of_string (field fields i_div_cash) in
+                  let split_factor_f =
+                    float_of_string (field fields i_split_factor)
+                  in
+                  let () =
+                    Printf.fprintf p "%s,%s,%s,%s,%s,%s\n"
+                      date open_v high_v low_v close_v volume_v
+                  in
+                  let () =
+                    if split_factor_f <> 1. then
+                      Printf.fprintf e "%s,%.17g\n" date
+                        (1. /. snap_split_factor split_factor_f)
+                  in
+                  let () =
+                    if div_cash_f > 0. then
+                      Printf.fprintf c "%s,%.17g,\n" date div_cash_f
+                  in
+                  let () =
+                    match prev with
+                    | Some pc when div_cash_f > 0. && pc > 0. ->
+                        Printf.fprintf d "%s,%.17g\n"
+                          date ((pc -. div_cash_f) /. pc)
+                    | _ -> ()
+                  in
+                  loop (Some close_f)
           in
           loop prev_close))
 
