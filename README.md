@@ -151,8 +151,8 @@ per-market costs, margin financing, dividend accounting, and simulation gaps.
 
 ## Data notes
 
-- TW prices are cached raw. `data/tw/<symbol>.cashdiv.csv` stores cash ex-dates, cash per share, and pay dates. If a pay date is absent, the loader uses one calendar month after the ex-date.
-- US prices come from Tiingo. `bt fetch` stores raw OHLCV bars, split events, cash dividends, and signal-plane dividend factors in four files per symbol. The split factor is snapped to the nearest small rational to remove floating-point noise.
+- TW prices are cached raw under `data/tw/<symbol>/`. Each symbol has its own subdirectory with `<symbol>.csv`, `<symbol>.div.csv`, `<symbol>.cashdiv.csv`, and `<symbol>.events.csv`. If a pay date is absent, the loader uses one calendar month after the ex-date.
+- US prices come from Tiingo. `bt fetch` stores raw OHLCV bars, split events, cash dividends, and signal-plane dividend factors in four files per symbol under `data/us/<symbol>/`. The split factor is snapped to the nearest small rational to remove floating-point noise.
 - One unified loader builds both planes for TW and US. The signal plane adjusts for dividends and all corporate events. The money plane adjusts for splits and share-count events but keeps cash-dividend drops.
 - If FinMind denies the TW cash-dividend table with HTTP or API status 400, 402, or 403, `bt fetch` derives cash from the legacy `<symbol>.div.csv` factors and treats every factor as cash-only. This is exact for cash-only TW ETFs. It can misprice stocks that also pay stock dividends.
 - For both markets, `bt fetch` prepends rows when `--from` is earlier

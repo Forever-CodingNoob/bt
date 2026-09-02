@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - US cache format uses raw prices without adj_close; one unified two-plane loader serves both TW and US markets.
 - Incremental US fetch with append and head-gap backfill (same as TW).
+- Cache files grouped into per-symbol subdirectories: `data/<market>/<SYMBOL>/<SYMBOL>.csv`. The shared `data/tw/stockinfo.csv` stays at the market level.
 
 ### Removed
 

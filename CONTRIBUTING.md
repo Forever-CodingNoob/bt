@@ -95,12 +95,15 @@ These binaries are gitignored.
 ## Data cache layout
 
 ```
-data/tw/<SYMBOL>.csv            Price bars (date,open,high,low,close,volume)
-data/tw/<SYMBOL>.div.csv        Dividend factors (date,factor)
-data/tw/<SYMBOL>.events.csv     Corporate-action factors (date,factor)
-data/tw/<SYMBOL>.cashdiv.csv    Cash dividends (ex_date,cash_per_share,pay_date)
-data/tw/stockinfo.csv           Financing ratio classification
-data/us/<SYMBOL>.csv            Price bars (date,open,high,low,close,adj_close,volume)
+data/tw/<SYMBOL>/<SYMBOL>.csv            Price bars (date,open,high,low,close,volume)
+data/tw/<SYMBOL>/<SYMBOL>.div.csv        Dividend factors (date,factor)
+data/tw/<SYMBOL>/<SYMBOL>.events.csv     Corporate-action factors (date,factor)
+data/tw/<SYMBOL>/<SYMBOL>.cashdiv.csv    Cash dividends (ex_date,cash_per_share,pay_date)
+data/tw/stockinfo.csv                    Financing ratio classification
+data/us/<SYMBOL>/<SYMBOL>.csv            Price bars (date,open,high,low,close,volume)
+data/us/<SYMBOL>/<SYMBOL>.events.csv     Corporate-action factors (date,factor)
+data/us/<SYMBOL>/<SYMBOL>.cashdiv.csv    Cash dividends (ex_date,cash_per_share,pay_date)
+data/us/<SYMBOL>/<SYMBOL>.div.csv        Dividend factors (date,factor)
 ```
 
 ## Fixed contracts

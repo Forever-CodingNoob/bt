@@ -61,14 +61,14 @@ The command stops with code 1 if the required token is missing or empty.
 
 | Market | File | Header |
 |---|---|---|
-| Taiwan | `data/tw/SYM.csv` | `date,open,high,low,close,volume` |
-| Taiwan | `data/tw/SYM.div.csv` | `date,factor` |
-| Taiwan | `data/tw/SYM.cashdiv.csv` | `ex_date,cash_per_share,pay_date` |
+| Taiwan | `data/tw/SYM/SYM.csv` | `date,open,high,low,close,volume` |
+| Taiwan | `data/tw/SYM/SYM.div.csv` | `date,factor` |
+| Taiwan | `data/tw/SYM/SYM.cashdiv.csv` | `ex_date,cash_per_share,pay_date` |
 | Taiwan | `data/tw/stockinfo.csv` | `stock_id,type,date` |
-| US | `data/us/SYM.csv` | `date,open,high,low,close,volume` |
-| US | `data/us/SYM.events.csv` | `date,factor` |
-| US | `data/us/SYM.cashdiv.csv` | `ex_date,cash_per_share,pay_date` |
-| US | `data/us/SYM.div.csv` | `date,factor` |
+| US | `data/us/SYM/SYM.csv` | `date,open,high,low,close,volume` |
+| US | `data/us/SYM/SYM.events.csv` | `date,factor` |
+| US | `data/us/SYM/SYM.cashdiv.csv` | `ex_date,cash_per_share,pay_date` |
+| US | `data/us/SYM/SYM.div.csv` | `date,factor` |
 
 Replace `data/` with the value of `--data-dir` when you set that option.
 
