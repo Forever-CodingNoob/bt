@@ -139,6 +139,11 @@ let add_months_clamped date months =
   let target_day = min day (days_in_month target_year target_month) in
   Printf.sprintf "%04d-%02d-%02d" target_year target_month target_day
 
+let market_of_label label =
+  match String.index_opt label '/' with
+  | Some i -> String.sub label 0 i
+  | None -> label
+
 let run ?dividends ?(dividend_tax = 0.)
     (assets : (string * Data.bar array) array) (strategy : strategy)
     (costs : costs array) ~(margin : margin)
@@ -598,9 +603,9 @@ let run ?dividends ?(dividend_tax = 0.)
           let () =
             iter_assets (fun index ->
               let stock = fst assets.(index) in
-              if String.length stock >= 3
-                 && stock.[0] = 't' && stock.[1] = 'w' && stock.[2] = '/'
-              then
+              match market_of_label stock with
+              | "tw" ->
+                (
                 let matured_reversed, live_reversed =
                   List.fold_left
                     (fun (matured, live) lot ->
@@ -641,7 +646,9 @@ let run ?dividends ?(dividend_tax = 0.)
                     let () = has_rollover := true in
                     let () = roll_values.(index) <- value in
                     let () = roll_dues.(index) <- due in
-                    remaining_lots.(index) <- List.rev live_reversed)
+                    remaining_lots.(index) <- List.rev live_reversed
+                )
+              | _ -> ())
           in
           if !has_rollover then
             let () = ignore (track_maintenance ()) in

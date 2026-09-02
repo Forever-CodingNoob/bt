@@ -72,8 +72,9 @@ let fetch argv =
        print_string message;
        exit 0);
   if !market = "" then usage_error "fetch: --market is required";
-  if !market <> "tw" && !market <> "us" then
-    usage_error "fetch: --market must be tw or us";
+  (match !market with
+   | "tw" | "us" -> ()
+   | _ -> usage_error "fetch: --market must be tw or us");
   if !symbol = "" then usage_error "fetch: --symbol is required";
   Btlib.Data.fetch ~market:!market ~symbol:!symbol ~from_:!from_ ~to_:!to_
     ~data_dir:!data_dir
@@ -240,9 +241,8 @@ let run argv =
   if !loan_term_months < 0 then
     usage_error "run: --loan-term-months must be 0 or greater";
   (match !baseline with
-   | Some (market, _) when market <> "tw" && market <> "us" ->
-       usage_error "run: --baseline market must be tw or us"
-   | _ -> ());
+   | Some (("tw" | "us"), _) | None -> ()
+   | Some _ -> usage_error "run: --baseline market must be tw or us");
   let names = List.map strategy_name strategy_files in
   let seen = Hashtbl.create (List.length names) in
   List.iter
@@ -388,7 +388,8 @@ let run argv =
             ratios;
             loan_term_months =
               if List.exists
-                   (fun (_, market, _) -> market = "tw")
+                   (fun (_, market, _) ->
+                     match market with "tw" -> true | _ -> false)
                    input.stocks
               then configured_loan_term
               else None }
@@ -416,7 +417,9 @@ let run argv =
             maintenance_ratio = !maintenance_ratio /. 100.;
             ratios = [| ratio_for market symbol |];
             loan_term_months =
-              if market = "tw" then configured_loan_term else None }
+              (match market with
+               | "tw" -> configured_loan_term
+               | _ -> None) }
         in
         Some
           (Btlib.Engine.run ~dividends:[| asset.Btlib.Data.dividends |]

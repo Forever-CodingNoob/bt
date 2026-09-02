@@ -437,43 +437,39 @@ let fetch_rows ~token ~dataset ~symbol ~from_ ~to_ ~expression ~consume =
       let () = transform_json ~args:[] ~expression ~json_path ~rows_path in
       consume rows_path))
 
-let fetch_prices ~token ~market ~symbol ~from_ ~to_ ~cache_path =
+let fetch_tw_prices ~token ~symbol ~from_ ~to_ ~cache_path =
   let default_from = "1994-10-01" in
-  if market = "tw" then
-    let tw_expression =
-      ".data[] | [.date, .open, .max, .min, .close, .Trading_Volume] | @csv"
-    in
-    let tw_header = "date,open,high,low,close,volume" in
-    let () =
-      match from_, first_cached_date cache_path with
-      | Some start_date, Some first
-        when should_probe_head ~from_ ~first_cached:first ->
-          let day_before = previous_date first in
-          fetch_rows ~token ~dataset:"TaiwanStockPrice" ~symbol
-            ~from_:start_date ~to_:day_before
-            ~expression:tw_expression
-            ~consume:(fun rows_path ->
-              prepend_rows ~header:tw_header ~rows_path ~cache_path
-                ~before:first)
-      | _ -> ()
-    in
-    let last_date = last_cached_date cache_path in
-    let start_date =
-      match last_date, from_ with
-      | Some date, _ -> next_date date
-      | None, Some date -> date
-      | None, None -> default_from
-    in
-    let () =
-      if String.compare start_date to_ <= 0 then
+  let tw_expression =
+    ".data[] | [.date, .open, .max, .min, .close, .Trading_Volume] | @csv"
+  in
+  let tw_header = "date,open,high,low,close,volume" in
+  let () =
+    match from_, first_cached_date cache_path with
+    | Some start_date, Some first
+      when should_probe_head ~from_ ~first_cached:first ->
+        let day_before = previous_date first in
         fetch_rows ~token ~dataset:"TaiwanStockPrice" ~symbol
-          ~from_:start_date ~to_
+          ~from_:start_date ~to_:day_before
           ~expression:tw_expression
           ~consume:(fun rows_path ->
-            append_rows ~header:tw_header
-              ~rows_path ~cache_path ~after:last_date)
-    in
-    ()
+            prepend_rows ~header:tw_header ~rows_path ~cache_path
+              ~before:first)
+    | _ -> ()
+  in
+  let last_date = last_cached_date cache_path in
+  let start_date =
+    match last_date, from_ with
+    | Some date, _ -> next_date date
+    | None, Some date -> date
+    | None, None -> default_from
+  in
+  if String.compare start_date to_ <= 0 then
+    fetch_rows ~token ~dataset:"TaiwanStockPrice" ~symbol
+      ~from_:start_date ~to_
+      ~expression:tw_expression
+      ~consume:(fun rows_path ->
+        append_rows ~header:tw_header
+          ~rows_path ~cache_path ~after:last_date)
 
 let fetch_dividends ~token ~symbol ~to_ ~cache_path =
   with_temp ".json" (fun json_path ->
@@ -1320,37 +1316,40 @@ let fetch ~market ~symbol ~from_ ~to_ ~data_dir =
   in
   let directory = Filename.concat data_dir market in
   let () = mkdir_p directory in
-  if market = "us" then
-    let token = require_token "TIINGO_TOKEN" in
-    fetch_us ~token ~symbol ~from_ ~to_ ~directory
-  else
-    let token = require_token "FINMIND_TOKEN" in
-    let price_cache = Filename.concat directory (symbol ^ ".csv") in
-    let factor_cache = Filename.concat directory (symbol ^ ".div.csv") in
-    let cash_cache = Filename.concat directory (symbol ^ ".cashdiv.csv") in
-    let () =
-      fetch_prices ~token ~market ~symbol ~from_ ~to_
-        ~cache_path:price_cache
-    in
-    let () =
-      fetch_dividends ~token ~symbol ~to_ ~cache_path:factor_cache
-    in
-    let () =
-      fetch_cash_dividends ~token ~symbol ~to_ ~price_cache ~factor_cache
-        ~cache_path:cash_cache
-    in
-    let () =
-      fetch_events ~token ~symbol ~to_
-        ~cache_path:(Filename.concat directory (symbol ^ ".events.csv"))
-    in
-    fetch_stockinfo ~token ~symbol
-      ~cache_path:(Filename.concat directory "stockinfo.csv")
+  match market with
+  | "us" ->
+      let token = require_token "TIINGO_TOKEN" in
+      fetch_us ~token ~symbol ~from_ ~to_ ~directory
+  | "tw" ->
+      let token = require_token "FINMIND_TOKEN" in
+      let price_cache = Filename.concat directory (symbol ^ ".csv") in
+      let factor_cache = Filename.concat directory (symbol ^ ".div.csv") in
+      let cash_cache = Filename.concat directory (symbol ^ ".cashdiv.csv") in
+      let () =
+        fetch_tw_prices ~token ~symbol ~from_ ~to_
+          ~cache_path:price_cache
+      in
+      let () =
+        fetch_dividends ~token ~symbol ~to_ ~cache_path:factor_cache
+      in
+      let () =
+        fetch_cash_dividends ~token ~symbol ~to_ ~price_cache ~factor_cache
+          ~cache_path:cash_cache
+      in
+      let () =
+        fetch_events ~token ~symbol ~to_
+          ~cache_path:(Filename.concat directory (symbol ^ ".events.csv"))
+      in
+      fetch_stockinfo ~token ~symbol
+        ~cache_path:(Filename.concat directory "stockinfo.csv")
+  | _ -> failf "invalid market %S (expected tw or us)" market
 
 
 let financing_ratio ~market ~data_dir ~symbol =
   let market = market_name market in
-  if market = "us" then 0.5
-  else
+  match market with
+  | "us" -> 0.5
+  | "tw" ->
     let path =
       Filename.concat (Filename.concat data_dir "tw") "stockinfo.csv"
     in
@@ -1391,11 +1390,11 @@ let financing_ratio ~market ~data_dir ~symbol =
                 read_best best
             | exception End_of_file -> best
           in
-          match read_best None with
-          | Some (_, "twse") -> 0.6
-          | Some (_, "tpex") ->
-              0.6
-          | _ -> fallback ())
+          (match read_best None with
+           | Some (_, "twse") -> 0.6
+           | Some (_, "tpex") -> 0.6
+           | _ -> fallback ()))
+  | _ -> failf "invalid market %S (expected tw or us)" market
 
 
 
@@ -1466,9 +1465,10 @@ let load_asset ~market ~symbol ~from_ ~to_ ~data_dir =
   let cash_dividends =
     if Sys.file_exists cash_path then
       let raw = read_cash_dividends cash_path in
-      if market = "us" then
-        Array.map (fun d -> { d with pay_date = d.ex_date }) raw
-      else raw
+      (match market with
+       | "us" -> Array.map (fun d -> { d with pay_date = d.ex_date }) raw
+       | "tw" -> raw
+       | _ -> failf "invalid market %S (expected tw or us)" market)
     else
       let () =
         prerr_endline

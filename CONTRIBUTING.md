@@ -65,6 +65,7 @@ dune test --root . --force   # all asserts must pass
 
 - Use the OCaml standard library and `unix` only. Do not add opam package dependencies.
 - No `for` or `while` loops. Sequence side effects with `let () = e in`.
+- Branch on the market with `match` arms (`| "tw" -> ... | "us" -> ...`), never `if market = ...`. New markets must slot in as new arms.
 - Make list recursion tail-recursive. Use an accumulator and `List.rev`. Use `Array` index loops for series math.
 - Preserve floating-point operation order. Do not rewrite arithmetic that would change rounding.
 - A numeric series is a `float array`. Warmup values are `Float.nan`. A comparison with NaN gives `false`.

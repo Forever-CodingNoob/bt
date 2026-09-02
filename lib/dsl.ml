@@ -366,10 +366,11 @@ let split_spec ~filename spec =
       let symbol =
         String.sub spec (i + 1) (String.length spec - i - 1)
       in
-      if market <> "tw" && market <> "us" then
-        failwith (Printf.sprintf
-          "%s: market must be tw or us in stock \"%s\"" filename spec)
-      else market, symbol
+      (match market with
+       | "tw" | "us" -> market, symbol
+       | _ ->
+           failwith (Printf.sprintf
+             "%s: market must be tw or us in stock \"%s\"" filename spec))
   | _ ->
       failwith (Printf.sprintf
         "%s: stock expects \"market/symbol\", got \"%s\"" filename spec)
