@@ -22,7 +22,7 @@ lib/lexer.mll      Lexer (ocamllex)
 lib/parser.mly     Grammar (ocamlyacc)
 lib/dsl.ml         Evaluator; compiles a script to Engine.strategy
 lib/dsl.mli        DSL interface
-lib/data.ml        FinMind fetch, CSV cache, dividend and corporate-action adjustment
+lib/data.ml        FinMind/Tiingo fetch, CSV cache, two-plane adjustment
 lib/data.mli       Data interface
 lib/series.ml      Indicators on float arrays
 lib/series.mli     Series interface

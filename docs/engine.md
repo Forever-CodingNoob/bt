@@ -10,15 +10,16 @@ This document describes how the bt engine simulates trades, computes equity, and
   - [Equity accounting](#equity-accounting)
   - [End-of-data close](#end-of-data-close)
 - [Taiwan market (tw)](#taiwan-market-tw)
+  - [Data source](#data-source)
   - [Costs and taxes](#costs-and-taxes)
   - [Margin financing](#margin-financing)
   - [Dividends](#dividends)
   - [Gap between simulation and the real market](#gap-between-simulation-and-the-real-market)
 - [United States market (us)](#united-states-market-us)
-  - [Data source](#data-source)
-  - [Costs](#costs)
+  - [Data source](#data-source-1)
+  - [Costs and taxes](#costs-and-taxes-1)
+  - [Margin financing](#margin-financing-1)
   - [Dividends](#dividends-1)
-  - [Open-ended margin](#open-ended-margin)
   - [Gap between simulation and the real market](#gap-between-simulation-and-the-real-market-1)
 
 ## Core engine
@@ -61,6 +62,12 @@ At the end of the data, every open inventory is sold at its last close with norm
 
 ## Taiwan market (tw)
 
+### Data source
+
+TW market data comes from [FinMind](https://finmind.github.io). `bt fetch` stores raw prices in `<symbol>.csv`, signal-plane dividend factors in `<symbol>.div.csv`, cash dividends with ex and pay dates in `<symbol>.cashdiv.csv`, and split, capital-reduction, and par-value-change events in `<symbol>.events.csv`. The shared `TaiwanStockInfo` classification lands in `data/tw/stockinfo.csv`.
+
+If the FinMind cash-dividend table returns errors, the fetcher derives missing cash amounts from the legacy dividend factors; existing direct rows win on overlapping ex-dates.
+
 ### Costs and taxes
 
 A TW trade pays the online commission of 0.0399% on each side, with a 20 TWD minimum per order when `--capital` is given.
@@ -73,7 +80,7 @@ Sell-tax classes:
 | Other `00` ETFs and `02` ETNs | 0.1% |
 | All other Taiwan symbols | 0.3% |
 
-Override these with `--fee-bps`, `--tax-bps`, and `--slip-bps`. US costs and slippage default to zero.
+Override these with `--fee-bps`, `--tax-bps`, and `--slip-bps`.
 
 ### Margin financing
 
@@ -99,7 +106,7 @@ On a TW ex-date, the engine books net cash dividends as receivables for the shar
 
 If TW data omits a pay date, the loader uses one calendar month after the ex-date. Cash-side dividends and only the margin-side excess after loan paydown trigger one normal cost-bearing fill pass toward current targets. A margin dividend fully consumed by loan paydown preserves drift and does not trigger a fill. `--dividend-tax` defaults to 0%.
 
-Stock-dividend and share-count factors restate per-share cash amounts and volume. `bt fetch` writes TW cash events to `<symbol>.cashdiv.csv`. If the FinMind cash-dividend table returns errors, the fetcher derives missing cash from legacy dividend factors; existing direct rows win on overlapping ex-dates.
+Stock-dividend and share-count factors restate per-share cash amounts and volume.
 
 ### Gap between simulation and the real market
 
@@ -117,23 +124,23 @@ Stock-dividend and share-count factors restate per-share cash amounts and volume
 
 ### Data source
 
-US market data comes from Tiingo end-of-day prices. The Tiingo response provides raw OHLCV bars, per-row cash dividends (`divCash`), and per-row split factors (`splitFactor`). The fetcher stores raw prices in `<SYM>.csv`, split events in `<SYM>.events.csv` (factor = 1/splitFactor), cash dividends in `<SYM>.cashdiv.csv`, and signal-plane dividend factors in `<SYM>.div.csv`. The adjusted columns from Tiingo are not cached.
+US market data comes from [Tiingo](https://www.tiingo.com) end-of-day prices. The Tiingo response provides raw OHLCV bars, per-row cash dividends (`divCash`), and per-row split factors (`splitFactor`). The fetcher stores raw prices in `<symbol>.csv`, signal-plane dividend factors in `<symbol>.div.csv`, cash dividends in `<symbol>.cashdiv.csv`, and split events in `<symbol>.events.csv` (factor = 1/splitFactor). The adjusted columns from Tiingo are not cached.
 
 Split factors are snapped to the nearest small rational p/q (p and q at most 50) when the relative difference is below 1e-4. This removes Tiingo's floating-point noise (e.g., 7.000007 becomes 7) and keeps price, volume, and cash restatement exact.
 
-### Costs
+### Costs and taxes
 
-US costs and slippage default to zero. Override with `--fee-bps`, `--tax-bps`, and `--slip-bps`.
+A US trade pays no commission, tax, or slippage by default. Override with `--fee-bps`, `--tax-bps`, and `--slip-bps`.
+
+### Margin financing
+
+US margin defaults to the Reg T initial-margin ratio of 50%. US loan lots are always open-ended: there is no term maturity, and `--loan-term-months` does not apply. `--financing-ratio` overrides the default.
 
 ### Dividends
 
 US dividends use the same two-plane architecture as TW. The signal plane adjusts for both dividends and splits. The money plane adjusts for splits only.
 
 US dividends become cash on their ex-date with no receivable period. When dividend cash arrives, the engine runs one normal cost-bearing fill pass toward the current targets.
-
-### Open-ended margin
-
-US margin defaults to the Reg T initial-margin ratio of 50%. US loan lots are always open-ended (no term maturity). `--financing-ratio` overrides the default.
 
 ### Gap between simulation and the real market
 

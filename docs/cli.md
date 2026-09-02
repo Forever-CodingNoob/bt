@@ -32,7 +32,7 @@ bt run STRAT... [--baseline M/SYM] [--from D] [--to D]
 
 ## `bt fetch`
 
-Downloads price data and stores it in a local CSV cache. Taiwan data comes from FinMind. US data comes from Tiingo. Use the positional form for new commands. The separate `--market` and `--symbol` options are an equivalent form.
+Downloads price data and stores it in a local CSV cache. Taiwan data comes from [FinMind](https://finmind.github.io). US data comes from [Tiingo](https://www.tiingo.com). Use the positional form for new commands. The separate `--market` and `--symbol` options are an equivalent form.
 
 ### Fetch options
 
@@ -64,11 +64,12 @@ The command stops with code 1 if the required token is missing or empty.
 | Taiwan | `data/tw/SYM/SYM.csv` | `date,open,high,low,close,volume` |
 | Taiwan | `data/tw/SYM/SYM.div.csv` | `date,factor` |
 | Taiwan | `data/tw/SYM/SYM.cashdiv.csv` | `ex_date,cash_per_share,pay_date` |
+| Taiwan | `data/tw/SYM/SYM.events.csv` | `date,factor` |
 | Taiwan | `data/tw/stockinfo.csv` | `stock_id,type,date` |
 | US | `data/us/SYM/SYM.csv` | `date,open,high,low,close,volume` |
-| US | `data/us/SYM/SYM.events.csv` | `date,factor` |
-| US | `data/us/SYM/SYM.cashdiv.csv` | `ex_date,cash_per_share,pay_date` |
 | US | `data/us/SYM/SYM.div.csv` | `date,factor` |
+| US | `data/us/SYM/SYM.cashdiv.csv` | `ex_date,cash_per_share,pay_date` |
+| US | `data/us/SYM/SYM.events.csv` | `date,factor` |
 
 Replace `data/` with the value of `--data-dir` when you set that option.
 
@@ -77,7 +78,7 @@ Replace `data/` with the value of `--data-dir` when you set that option.
 
 For both markets, `bt fetch` adds data at both ends of the cache. If `--from` is earlier than the first cached date, it fetches the missing earlier range and prepends it. It also fetches dates after the last cached date and appends them. Cached rows win at both boundaries. A repeated fetch is idempotent.
 
-The command fetches the full Taiwan dividend-factor history and rewrites `SYM.div.csv` on each run. It also fetches cash dividends into `SYM.cashdiv.csv`. If the source omits a pay date, the loader uses one calendar month after the ex-date.
+For Taiwan, the command fetches the full dividend-factor history and rewrites `SYM.div.csv` on each run, fetches cash dividends into `SYM.cashdiv.csv`, and fetches split, capital-reduction, and par-value-change events into `SYM.events.csv`. If the source omits a pay date, the loader uses one calendar month after the ex-date.
 
 > [!WARNING]
 > If the FinMind cash-dividend API returns status 400, 402, or 403, `bt fetch` derives cash from the legacy dividend factors and treats every factor as cash-only. This is exact for cash-only TW ETFs but can misprice stocks that also pay stock dividends.
@@ -89,7 +90,7 @@ For every Taiwan fetch, the command also downloads the `TaiwanStockInfo` table a
 > [!WARNING]
 > The stock-info table selects the standard exchange ratio only. The engine assumes every Taiwan symbol is marginable and does not check broker eligibility or reduced ratios. Leveraged ETFs such as 00685L have historically been excluded from margin financing or assigned reduced ratios.
 
-For US prices, `bt fetch` rewrites `SYM.csv` on each run. If a cache exists, the request starts at the earlier of its first date and `--from`. This full rewrite keeps revised `Adj_Close` values consistent after dividends and splits.
+For US, the command derives all four files from one Tiingo response: raw prices, signal-plane dividend factors, cash dividends (credited at the ex-date; Tiingo provides no pay date), and split events. Split factors are snapped to the nearest small rational to remove vendor floating-point noise.
 
 ### Price adjustments
 
@@ -97,7 +98,7 @@ The engine loads two price series for every asset. The signal series includes ca
 
 For Taiwan, `<symbol>.div.csv` supplies the full dividend adjustment to the signal series and `<symbol>.cashdiv.csv` separates the cash component for the money series and ledger. `<symbol>.events.csv` supplies exact split, capital-reduction, and par-value-change factors to both price series. Share-count event factors also restate earlier volume to the post-event share basis. Cash-dividend factors do not change volume.
 
-For US assets, the cache contains raw close and adjusted close. The signal series uses the adjusted-close scale. The money series uses raw prices, and the loader derives each cash dividend from the daily change in the close-to-adjusted-close ratio.
+For US assets, `<symbol>.div.csv` supplies the dividend adjustment to the signal series and `<symbol>.cashdiv.csv` separates the cash component for the money series and ledger. `<symbol>.events.csv` supplies exact split factors to both price series and restates earlier volume to the post-split share basis.
 
 ## `bt run`
 
