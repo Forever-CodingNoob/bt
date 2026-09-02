@@ -193,14 +193,15 @@ let api_url_no_id ~dataset ~from_ ~to_ =
     "https://api.finmindtrade.com/api/v4/data?dataset=%s&start_date=%s&end_date=%s"
     (url_encode dataset) (url_encode from_) (url_encode to_)
 
-let curl_get ~token ~url ~output =
+let curl_get ~scheme ~token ~url ~output =
   with_temp ".hdr" (fun header_path ->
     let channel = open_out header_path in
     let () =
       Fun.protect
         ~finally:(fun () -> close_out channel)
         (fun () ->
-          output_string channel ("Authorization: Bearer " ^ token ^ "\n"))
+          output_string channel
+            ("Authorization: " ^ scheme ^ " " ^ token ^ "\n"))
     in
     with_temp ".status" (fun status_path ->
       let status =
@@ -430,7 +431,7 @@ let transform_json ~args ~expression ~json_path ~rows_path =
 let fetch_rows ~token ~dataset ~symbol ~from_ ~to_ ~expression ~consume =
   with_temp ".json" (fun json_path ->
     let url = api_url ~dataset ~symbol ~from_ ~to_ in
-    let process_status, http_code = curl_get ~token ~url ~output:json_path in
+    let process_status, http_code = curl_get ~scheme:"Bearer" ~token ~url ~output:json_path in
     let () = require_price_response json_path process_status http_code in
     with_temp ".rows" (fun rows_path ->
       let () = transform_json ~args:[] ~expression ~json_path ~rows_path in
@@ -473,22 +474,6 @@ let fetch_prices ~token ~market ~symbol ~from_ ~to_ ~cache_path =
               ~rows_path ~cache_path ~after:last_date)
     in
     ()
-  else
-    let first = first_cached_date cache_path in
-    let start_date =
-      match from_, first with
-      | None, Some date -> date
-      | None, None -> default_from
-      | Some requested, Some date when String.compare date requested < 0 ->
-          date
-      | Some requested, _ -> requested
-    in
-    fetch_rows ~token ~dataset:"USStockPrice" ~symbol
-      ~from_:start_date ~to_
-      ~expression:".data[] | [.date, .Open, .High, .Low, .Close, .Adj_Close, .Volume] | @csv"
-      ~consume:(fun rows_path ->
-        rewrite_rows ~header:"date,open,high,low,close,adj_close,volume"
-          ~rows_path ~cache_path)
 
 let fetch_dividends ~token ~symbol ~to_ ~cache_path =
   with_temp ".json" (fun json_path ->
@@ -496,7 +481,7 @@ let fetch_dividends ~token ~symbol ~to_ ~cache_path =
       api_url ~dataset:"TaiwanStockDividendResult" ~symbol
         ~from_:"1900-01-01" ~to_
     in
-    let process_status, http_code = curl_get ~token ~url ~output:json_path in
+    let process_status, http_code = curl_get ~scheme:"Bearer" ~token ~url ~output:json_path in
     let keep reason =
       Printf.eprintf "warning: dividend fetch failed (%s); %s\n" reason
         (if Sys.file_exists cache_path then "keeping cached dividend data"
@@ -553,7 +538,7 @@ let fetch_events ~token ~symbol ~to_ ~cache_path =
         if use_data_id then api_url ~dataset ~symbol ~from_:"1900-01-01" ~to_
         else api_url_no_id ~dataset ~from_:"1900-01-01" ~to_
       in
-      let process_status, http_code = curl_get ~token ~url ~output:json_path in
+      let process_status, http_code = curl_get ~scheme:"Bearer" ~token ~url ~output:json_path in
       if not (process_ok process_status) || http_code <> "200" then
         let () =
           keep
@@ -604,7 +589,7 @@ let fetch_stockinfo ~token ~symbol ~cache_path =
         "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo&data_id=%s"
         (url_encode symbol)
     in
-    let process_status, http_code = curl_get ~token ~url ~output:json_path in
+    let process_status, http_code = curl_get ~scheme:"Bearer" ~token ~url ~output:json_path in
     let keep reason =
       Printf.eprintf "warning: stockinfo fetch failed (%s); %s\n" reason
         (if Sys.file_exists cache_path then "keeping cached stock info"
@@ -1150,7 +1135,7 @@ let fetch_cash_dividends ~token ~symbol ~to_ ~price_cache ~factor_cache
       api_url ~dataset:"TaiwanStockDividend" ~symbol
         ~from_:"1900-01-01" ~to_
     in
-    let process_status, http_code = curl_get ~token ~url ~output:json_path in
+    let process_status, http_code = curl_get ~scheme:"Bearer" ~token ~url ~output:json_path in
     let tier_failure =
       match http_code with
       | "400" | "402" | "403" -> Some ("HTTP " ^ http_code)
@@ -1188,6 +1173,222 @@ let fetch_cash_dividends ~token ~symbol ~to_ ~price_cache ~factor_cache
                rewrite_rows ~header:"ex_date,cash_per_share,pay_date"
                  ~rows_path ~cache_path)))
 
+let snap_split_factor value =
+  let rec search p q best best_err =
+    if p > 50 then
+      if best_err < 1e-4 then best else value
+    else if q > 50 then
+      search (p + 1) 1 best best_err
+    else
+      let candidate = float_of_int p /. float_of_int q in
+      let err = abs_float (candidate /. value -. 1.) in
+      if err < best_err then search p (q + 1) candidate err
+      else search p (q + 1) best best_err
+  in
+  search 1 1 value infinity
+
+let tiingo_expected_header =
+  "date,close,high,low,open,volume,adjClose,adjHigh,adjLow,adjOpen,adjVolume,divCash,splitFactor"
+
+let write_tiingo_rows ~csv_path ~prev_close
+    ~prices_path ~events_path ~cashdiv_path ~div_path =
+  let csv = open_in csv_path in
+  Fun.protect
+    ~finally:(fun () -> close_in csv)
+    (fun () ->
+      let header =
+        match input_line csv with
+        | line -> String.trim line
+        | exception End_of_file -> ""
+      in
+      let () =
+        if header <> tiingo_expected_header then
+          failf "Tiingo: unexpected CSV header %S" header
+      in
+      let p = open_out prices_path in
+      let e = open_out events_path in
+      let c = open_out cashdiv_path in
+      let d = open_out div_path in
+      Fun.protect
+        ~finally:(fun () ->
+          close_out d; close_out c; close_out e; close_out p)
+        (fun () ->
+          let rec loop prev =
+            match input_line csv with
+            | exception End_of_file -> ()
+            | line ->
+                let line = String.trim line in
+                if line = "" then loop prev
+                else
+                  (match String.split_on_char ',' line with
+                   | [date; close; high; low; open_; volume;
+                      _; _; _; _; _; div_cash; split_factor] ->
+                       let date =
+                         let raw = unquote date in
+                         if String.length raw > 10 then String.sub raw 0 10
+                         else raw
+                       in
+                       let close_f = float_of_string close in
+                       let div_cash_f = float_of_string div_cash in
+                       let split_factor_f = float_of_string split_factor in
+                       let () =
+                         Printf.fprintf p "%s,%s,%s,%s,%s,%s\n"
+                           date open_ high low close volume
+                       in
+                       let () =
+                         if split_factor_f <> 1. then
+                           Printf.fprintf e "%s,%.17g\n" date
+                             (1. /. snap_split_factor split_factor_f)
+                       in
+                       let () =
+                         if div_cash_f > 0. then
+                           Printf.fprintf c "%s,%.17g,\n" date div_cash_f
+                       in
+                       let () =
+                         match prev with
+                         | Some pc when div_cash_f > 0. && pc > 0. ->
+                             Printf.fprintf d "%s,%.17g\n"
+                               date ((pc -. div_cash_f) /. pc)
+                         | _ -> ()
+                       in
+                       loop (Some close_f)
+                   | _ -> failf "Tiingo: malformed CSV row")
+          in
+          loop prev_close))
+
+let last_cached_close path =
+  if not (Sys.file_exists path) then None
+  else
+    let input = open_in path in
+    Fun.protect
+      ~finally:(fun () -> close_in input)
+      (fun () ->
+        let () =
+          match input_line input with
+          | _ -> ()
+          | exception End_of_file -> ()
+        in
+        let rec loop close =
+          match input_line input with
+          | "" -> loop close
+          | line ->
+              let close =
+                match String.split_on_char ',' line with
+                | [_; _; _; _; c; _] ->
+                    (try Some (float_of_string c) with Failure _ -> close)
+                | _ -> close
+              in
+              loop close
+          | exception End_of_file -> close
+        in
+        loop None)
+
+let fetch_us ~token ~symbol ~from_ ~to_ ~directory =
+  let price_cache = Filename.concat directory (symbol ^ ".csv") in
+  let events_cache = Filename.concat directory (symbol ^ ".events.csv") in
+  let cashdiv_cache = Filename.concat directory (symbol ^ ".cashdiv.csv") in
+  let div_cache = Filename.concat directory (symbol ^ ".div.csv") in
+  let default_from = "1994-10-01" in
+  let ph = "date,open,high,low,close,volume" in
+  let eh = "date,factor" in
+  let ch = "ex_date,cash_per_share,pay_date" in
+  let dh = "date,factor" in
+  let keep reason =
+    Printf.eprintf "warning: Tiingo fetch failed (%s); %s\n" reason
+      (if Sys.file_exists price_cache then "keeping cached data"
+       else "US prices unavailable")
+  in
+  let do_range ~start ~stop ~prev_close ~on_prices ~on_events ~on_cashdiv
+      ~on_div =
+    with_temp ".tiingo" (fun csv_path ->
+      let url =
+        Printf.sprintf
+          "https://api.tiingo.com/tiingo/daily/%s/prices?startDate=%s&endDate=%s&format=csv"
+          (url_encode symbol) (url_encode start) (url_encode stop)
+      in
+      let status, http =
+        curl_get ~scheme:"Token" ~token ~url ~output:csv_path
+      in
+      let () =
+        if not (process_ok status) || http <> "200" then
+          failf "HTTP %s"
+            (if http = "" || http = "000" then "unavailable" else http)
+      in
+      with_temp ".p" (fun pp ->
+        with_temp ".e" (fun ep ->
+          with_temp ".c" (fun cp ->
+            with_temp ".d" (fun dp ->
+              let () =
+                write_tiingo_rows ~csv_path ~prev_close
+                  ~prices_path:pp ~events_path:ep
+                  ~cashdiv_path:cp ~div_path:dp
+              in
+              let () = on_prices pp in
+              let () = on_events ep in
+              let () = on_cashdiv cp in
+              on_div dp)))))
+  in
+  (* Head-gap backfill *)
+  let () =
+    match from_, first_cached_date price_cache with
+    | Some start_date, Some first
+      when should_probe_head ~from_ ~first_cached:first ->
+        let day_before = previous_date first in
+        (try
+          do_range ~start:start_date ~stop:day_before ~prev_close:None
+            ~on_prices:(fun pp ->
+              prepend_rows ~header:ph ~rows_path:pp
+                ~cache_path:price_cache ~before:first)
+            ~on_events:(fun ep ->
+              if Sys.file_exists events_cache then
+                prepend_rows ~header:eh ~rows_path:ep
+                  ~cache_path:events_cache ~before:first
+              else
+                rewrite_rows ~header:eh ~rows_path:ep
+                  ~cache_path:events_cache)
+            ~on_cashdiv:(fun cp ->
+              if Sys.file_exists cashdiv_cache then
+                prepend_rows ~header:ch ~rows_path:cp
+                  ~cache_path:cashdiv_cache ~before:first
+              else
+                rewrite_rows ~header:ch ~rows_path:cp
+                  ~cache_path:cashdiv_cache)
+            ~on_div:(fun dp ->
+              if Sys.file_exists div_cache then
+                prepend_rows ~header:dh ~rows_path:dp
+                  ~cache_path:div_cache ~before:first
+              else
+                rewrite_rows ~header:dh ~rows_path:dp
+                  ~cache_path:div_cache)
+        with Failure message -> keep message)
+    | _ -> ()
+  in
+  (* Forward append *)
+  let last = last_cached_date price_cache in
+  let start_date =
+    match last, from_ with
+    | Some date, _ -> next_date date
+    | None, Some date -> date
+    | None, None -> default_from
+  in
+  if String.compare start_date to_ <= 0 then
+    let prev_close = last_cached_close price_cache in
+    (try
+      do_range ~start:start_date ~stop:to_ ~prev_close
+        ~on_prices:(fun pp ->
+          append_rows ~header:ph ~rows_path:pp
+            ~cache_path:price_cache ~after:last)
+        ~on_events:(fun ep ->
+          append_rows ~header:eh ~rows_path:ep
+            ~cache_path:events_cache ~after:last)
+        ~on_cashdiv:(fun cp ->
+          append_rows ~header:ch ~rows_path:cp
+            ~cache_path:cashdiv_cache ~after:last)
+        ~on_div:(fun dp ->
+          append_rows ~header:dh ~rows_path:dp
+            ~cache_path:div_cache ~after:last)
+    with Failure message -> keep message)
+
 let fetch ~market ~symbol ~from_ ~to_ ~data_dir =
   let market = market_name market in
   let () = check_symbol symbol in
@@ -1196,20 +1397,28 @@ let fetch ~market ~symbol ~from_ ~to_ ~data_dir =
     | None -> ignore (parse_date "to" to_)
     | Some date -> validate_range date to_
   in
-  let token =
-    match Sys.getenv_opt "FINMIND_TOKEN" with
-    | Some token when String.trim token <> "" -> token
-    | _ -> failwith "export FINMIND_TOKEN=\"your_token_here\""
-  in
   let directory = Filename.concat data_dir market in
   let () = mkdir_p directory in
-  let price_cache = Filename.concat directory (symbol ^ ".csv") in
-  let factor_cache = Filename.concat directory (symbol ^ ".div.csv") in
-  let cash_cache = Filename.concat directory (symbol ^ ".cashdiv.csv") in
-  let () =
-    fetch_prices ~token ~market ~symbol ~from_ ~to_ ~cache_path:price_cache
-  in
-  if market = "tw" then
+  if market = "us" then
+    let token =
+      match Sys.getenv_opt "TIINGO_TOKEN" with
+      | Some token when String.trim token <> "" -> token
+      | _ -> failwith "export TIINGO_TOKEN=\"your_tiingo_api_token\""
+    in
+    fetch_us ~token ~symbol ~from_ ~to_ ~directory
+  else
+    let token =
+      match Sys.getenv_opt "FINMIND_TOKEN" with
+      | Some token when String.trim token <> "" -> token
+      | _ -> failwith "export FINMIND_TOKEN=\"your_token_here\""
+    in
+    let price_cache = Filename.concat directory (symbol ^ ".csv") in
+    let factor_cache = Filename.concat directory (symbol ^ ".div.csv") in
+    let cash_cache = Filename.concat directory (symbol ^ ".cashdiv.csv") in
+    let () =
+      fetch_prices ~token ~market ~symbol ~from_ ~to_
+        ~cache_path:price_cache
+    in
     let () =
       fetch_dividends ~token ~symbol ~to_ ~cache_path:factor_cache
     in
