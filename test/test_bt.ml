@@ -2269,35 +2269,67 @@ let with_temp_market market function_ =
       Unix.rmdir root)
     (fun () -> function_ root directory)
 
-let test_us_dividend_derivation () =
-  with_temp_market "us" (fun root us ->
-    let path = Filename.concat us "CASH.csv" in
-    let output = open_out path in
-    let () =
-      Fun.protect
-        ~finally:(fun () -> close_out output)
-        (fun () ->
-          output_string output
-            "date,open,high,low,close,adj_close,volume\n\
-             2025-01-02,99,99,99,99,99,1100\n\
-             2025-01-03,99,99,99,99,99,1200\n\
-             2025-01-01,100,100,100,100,98,1000\n")
-    in
-    let loaded =
-      Data.load_asset ~market:"us" ~symbol:"CASH" ~from_:None ~to_:None
-        ~data_dir:root
-    in
-    (* The 0.98-to-1.00 ratio change is cash: raw close 99 differs from
-       the split-implied close 100 * 0.98 = 98. *)
-    assert (Array.length loaded.Data.dividends = 1);
-    (* The ratio change occurs on 2025-01-02, so that is the ex-date. *)
-    assert (loaded.Data.dividends.(0).Data.ex_date = "2025-01-02");
-    (* US cash is credited on its ex-date by the zero-lag convention. *)
-    assert (loaded.Data.dividends.(0).Data.pay_date = "2025-01-02");
-    (* 100 * (1 - 0.98 / 1.00) = 2 cash per share. *)
-    assert_close 2. loaded.Data.dividends.(0).Data.cash_per_share;
-    (* An unchanged ratio on 2025-01-03 adds no second event. *)
-    assert (Array.length loaded.Data.dividends = 1))
+let test_tiingo_snap () =
+  (* 7:1 split: Tiingo emits 7.000007000007001; snap to 7, event = 1/7. *)
+  assert_close 7. (Data.snap_split_factor 7.000007000007001);
+  (* Exact ratios pass through untouched. *)
+  assert_close 4. (Data.snap_split_factor 4.);
+  assert_close 0.5 (Data.snap_split_factor 0.5);
+  (* 3:2 split. *)
+  assert_close 1.5 (Data.snap_split_factor 1.5000015);
+  (* Irrational value outside any p/q <= 50 at 1e-4: verbatim. *)
+  assert_close 3.14159 (Data.snap_split_factor 3.14159)
+
+let test_tiingo_transform () =
+  (* Build a small Tiingo CSV fixture: a split, a dividend, and a normal row. *)
+  let csv =
+    "date,close,high,low,open,volume,adjClose,adjHigh,adjLow,adjOpen,adjVolume,divCash,splitFactor\n\
+     2020-08-27,503.43,507.73,501.06,506.09,3477380,503.43,507.73,501.06,506.09,3477380,0,1\n\
+     2020-08-28,499.3,501.56,498.52,500.74,2635860,499.3,501.56,498.52,500.74,2635860,0,1\n\
+     2020-08-31,129.04,131.0,126.0,127.58,14170170,129.04,131.0,126.0,127.58,14170170,0,4.000004000004\n\
+     2020-09-01,134.18,134.8,130.53,132.76,7432100,134.18,134.8,130.53,132.76,7432100,0,1\n\
+     2024-03-15,172.62,173.05,170.06,171.17,5088850,172.62,173.05,170.06,171.17,5088850,1.594937,1\n\
+     2024-03-18,173.72,175.1,171.96,175.1,3506210,173.72,175.1,171.96,175.1,3506210,0,1\n"
+  in
+  with_temp_strategy csv (fun csv_path ->
+    with_temp_strategy "" (fun prices_path ->
+      with_temp_strategy "" (fun events_path ->
+        with_temp_strategy "" (fun cashdiv_path ->
+          with_temp_strategy "" (fun div_path ->
+            Data.write_tiingo_rows ~csv_path ~prev_close:None
+              ~prices_path ~events_path ~cashdiv_path ~div_path;
+            (* Prices: six rows, OHLCV reordered from Tiingo column order. *)
+            let prices = String.split_on_char '\n' (read_file prices_path) in
+            assert (List.length (List.filter (fun l -> l <> "") prices) = 6);
+            (* Events: the 4:1 split produces one event factor = 1/4 = 0.25. *)
+            let events = read_file events_path in
+            assert (contains events "2020-08-31");
+            let factor =
+              match String.split_on_char ',' (String.trim events) with
+              | [_; f] -> float_of_string f
+              | _ -> failwith "expected one event row"
+            in
+            (* 4.000004000004 snaps to 4; 1/4 = 0.25. *)
+            assert_close 0.25 factor;
+            (* CashDiv: the 2024-03-15 row has divCash = 1.594937. *)
+            let cashdiv = read_file cashdiv_path in
+            assert (contains cashdiv "2024-03-15");
+            assert (contains cashdiv "1.594937");
+            (* Div factor: (prev_close - divCash) / prev_close.
+               prev_close on 2024-03-14 is the close on 2024-03-15's
+               predecessor in our fixture = 134.18 (2020-09-01 is last
+               before the dividend row; but our fixture is sparse).
+               Actually, the prev row is 2024-03-15's predecessor in
+               the file: 2020-09-01 close 134.18. So:
+               (134.18 - 1.594937) / 134.18 *)
+            let div = read_file div_path in
+            assert (contains div "2024-03-15");
+            let div_factor =
+              match String.split_on_char ',' (String.trim div) with
+              | [_; f] -> float_of_string f
+              | _ -> failwith "expected one div row"
+            in
+            assert_close ((134.18 -. 1.594937) /. 134.18) div_factor)))))
 
 let test_two_price_planes () =
   with_temp_market "tw" (fun root tw ->
@@ -2476,28 +2508,64 @@ let test_same_day_unit_factor_restates_cash () =
     (* The same-date 1:2 unit factor converts 10 old-basis cash to 5. *)
     assert_close 5. loaded.Data.dividends.(0).Data.cash_per_share)
 
-let test_us_split_is_not_cash () =
+let test_us_loader_parity () =
+  (* Build a US cache in the canonical four-file layout and verify the
+     unified loader produces the expected two-plane result. *)
   with_temp_market "us" (fun root us ->
-    let output = open_out (Filename.concat us "SPLIT.csv") in
-    Fun.protect
-      ~finally:(fun () -> close_out output)
-      (fun () ->
-        output_string output
-          "date,open,high,low,close,adj_close,volume\n\
-           2025-01-01,100,100,100,100,50,100\n\
-           2025-01-02,50,50,50,50,50,200\n");
+    let write name contents =
+      let output = open_out (Filename.concat us name) in
+      Fun.protect
+        ~finally:(fun () -> close_out output)
+        (fun () -> output_string output contents)
+    in
+    (* Raw prices: a 2:1 split on 2025-01-03, a $2 dividend on 2025-01-05. *)
+    write "TEST.csv"
+      "date,open,high,low,close,volume\n\
+       2025-01-01,100,100,100,100,1000\n\
+       2025-01-02,102,102,102,102,1000\n\
+       2025-01-03,50,50,50,50,2000\n\
+       2025-01-04,51,51,51,51,2000\n\
+       2025-01-05,49,49,49,49,2000\n";
+    (* Event: 2:1 split, factor = 0.5 (post/pre ratio). *)
+    write "TEST.events.csv" "date,factor\n2025-01-03,0.5\n";
+    (* Cash dividend of $2 on 2025-01-05. *)
+    write "TEST.cashdiv.csv" "ex_date,cash_per_share,pay_date\n2025-01-05,2,\n";
+    (* Div factor: (prev_close - divCash) / prev_close = (51 - 2) / 51. *)
+    write "TEST.div.csv"
+      (Printf.sprintf "date,factor\n2025-01-05,%.17g\n" (49. /. 51.));
     let loaded =
-      Data.load_asset ~market:"us" ~symbol:"SPLIT" ~from_:None ~to_:None
+      Data.load_asset ~market:"us" ~symbol:"TEST" ~from_:None ~to_:None
         ~data_dir:root
     in
-    (* The exact 1:2 raw-price drop identifies one unit event and no cash. *)
-    assert (Array.length loaded.Data.dividends = 0);
-    (* The 0.5 unit factor restates the earlier money close from 100 to 50. *)
+    assert (Array.length loaded.Data.signal = 5);
+    assert (Array.length loaded.Data.money = 5);
+    (* Signal plane: raw * div * events back-adjusted.
+       signal_factors = div ++ events = [(2025-01-03,0.5); (2025-01-05, 49/51)].
+       Cumulative factor at bar 0 (before both): 0.5 * 49/51.
+       Bar 0 signal close = 100 * 0.5 * 49/51. *)
+    assert_close (100. *. 0.5 *. (49. /. 51.)) loaded.Data.signal.(0).Data.c;
+    (* Bar 4 (after both factors): factor = 1.0, raw close = 49. *)
+    assert_close 49. loaded.Data.signal.(4).Data.c;
+    (* Money plane: raw * events only (no div factor).
+       money_factors = stock_dividend_factors ++ events.
+       Since the div.csv factor (49/51) is cash, money_dividend_factors
+       decomposes it as cash; the stock component equals full/cash = 1.
+       So money_factors = [(2025-01-03, 0.5)].
+       Bar 0 money close = 100 * 0.5 = 50. *)
     assert_close 50. loaded.Data.money.(0).Data.c;
-    (* The inverse 0.5 factor restates earlier money volume from 100 to 200. *)
-    assert_close 200. loaded.Data.money.(0).Data.v;
-    (* The signal plane uses the same post-split share basis of 200. *)
-    assert_close 200. loaded.Data.signal.(0).Data.v)
+    (* Bar 4: no money factor after the split, raw close = 49. *)
+    assert_close 49. loaded.Data.money.(4).Data.c;
+    (* Volume restated by inverse event factor: bar 0 = 1000 / 0.5 = 2000. *)
+    assert_close 2000. loaded.Data.money.(0).Data.v;
+    assert_close 2000. loaded.Data.signal.(0).Data.v;
+    (* US pay-date rule: pay_date = ex_date. *)
+    assert (Array.length loaded.Data.dividends = 1);
+    assert (loaded.Data.dividends.(0).Data.ex_date = "2025-01-05");
+    assert (loaded.Data.dividends.(0).Data.pay_date = "2025-01-05");
+    (* The 0.5 split on 2025-01-03 precedes the 2025-01-05 dividend;
+       restatement applies only to events on or after the ex-date,
+       so cash_per_share stays at the raw 2. *)
+    assert_close 2. loaded.Data.dividends.(0).Data.cash_per_share)
 
 let test_fallback_preserves_direct_overlap () =
   let derived =
@@ -3505,12 +3573,13 @@ let () =
   test_back_adjust_events ();
   test_cash_dividend_parse ();
   test_cash_dividend_fallback_derivation ();
-  test_us_dividend_derivation ();
+  test_tiingo_snap ();
+  test_tiingo_transform ();
   test_two_price_planes ();
   test_dividend_cash_split_restatement ();
   test_cash_restatement_through_stock_dividend ();
   test_same_day_unit_factor_restates_cash ();
-  test_us_split_is_not_cash ();
+  test_us_loader_parity ();
   test_fallback_preserves_direct_overlap ();
   test_stock_dividend_restates_volume ();
   test_load_adjustments ();
