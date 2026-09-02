@@ -1305,6 +1305,11 @@ let fetch_us ~token ~symbol ~from_ ~to_ ~directory =
             ~cache_path:div_cache ~after:last)
     with Failure message -> keep message)
 
+let require_token name =
+  match Sys.getenv_opt name with
+  | Some token when String.trim token <> "" -> token
+  | _ -> failf "export %s=\"your_api_token\"" name
+
 let fetch ~market ~symbol ~from_ ~to_ ~data_dir =
   let market = market_name market in
   let () = check_symbol symbol in
@@ -1316,18 +1321,10 @@ let fetch ~market ~symbol ~from_ ~to_ ~data_dir =
   let directory = Filename.concat data_dir market in
   let () = mkdir_p directory in
   if market = "us" then
-    let token =
-      match Sys.getenv_opt "TIINGO_TOKEN" with
-      | Some token when String.trim token <> "" -> token
-      | _ -> failwith "export TIINGO_TOKEN=\"your_tiingo_api_token\""
-    in
+    let token = require_token "TIINGO_TOKEN" in
     fetch_us ~token ~symbol ~from_ ~to_ ~directory
   else
-    let token =
-      match Sys.getenv_opt "FINMIND_TOKEN" with
-      | Some token when String.trim token <> "" -> token
-      | _ -> failwith "export FINMIND_TOKEN=\"your_token_here\""
-    in
+    let token = require_token "FINMIND_TOKEN" in
     let price_cache = Filename.concat directory (symbol ^ ".csv") in
     let factor_cache = Filename.concat directory (symbol ^ ".div.csv") in
     let cash_cache = Filename.concat directory (symbol ^ ".cashdiv.csv") in

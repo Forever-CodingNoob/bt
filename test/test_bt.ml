@@ -2280,6 +2280,23 @@ let test_tiingo_snap () =
   (* Irrational value outside any p/q <= 50 at 1e-4: verbatim. *)
   assert_close 3.14159 (Data.snap_split_factor 3.14159)
 
+let test_tiingo_token_required () =
+  (* Missing or empty TIINGO_TOKEN must raise Failure, not silently succeed. *)
+  let saved = Sys.getenv_opt "TIINGO_TOKEN" in
+  let () = Unix.putenv "TIINGO_TOKEN" "" in
+  let () =
+    Fun.protect
+      ~finally:(fun () ->
+        match saved with
+        | Some v -> Unix.putenv "TIINGO_TOKEN" v
+        | None -> Unix.putenv "TIINGO_TOKEN" "")
+      (fun () ->
+        assert_failure (fun () ->
+          Data.fetch ~market:"us" ~symbol:"SPY" ~from_:None
+            ~to_:"2026-01-01" ~data_dir:"/tmp"))
+  in
+  ()
+
 let test_tiingo_transform () =
   (* Build a small Tiingo CSV fixture: a split, a dividend, and a normal row. *)
   let csv =
@@ -3673,6 +3690,7 @@ let () =
   test_cash_dividend_parse ();
   test_cash_dividend_fallback_derivation ();
   test_tiingo_snap ();
+  test_tiingo_token_required ();
   test_tiingo_transform ();
   test_tiingo_append_seam ();
   test_two_price_planes ();
