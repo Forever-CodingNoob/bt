@@ -671,6 +671,108 @@ let float_field path line_number name value =
   try float_of_string value with Failure _ ->
     failf "%s:%d: invalid %s value %S" path line_number name value
 
+let back_adjust bars dividends =
+  let () =
+    Array.sort (fun left right -> String.compare left.date right.date) bars
+  in
+  let () =
+    Array.sort
+      (fun (left, _) (right, _) -> String.compare left right)
+      dividends
+  in
+  let rec descend bar_date dividend_index factor =
+    if dividend_index >= 0 &&
+       String.compare (fst dividends.(dividend_index)) bar_date > 0 then
+      let factor = factor *. snd dividends.(dividend_index) in
+      descend bar_date (dividend_index - 1) factor
+    else dividend_index, factor
+  in
+  let rec adjust bar_index dividend_index factor =
+    if bar_index < 0 then ()
+    else
+      let dividend_index, factor =
+        descend bars.(bar_index).date dividend_index factor
+      in
+      let current = bars.(bar_index) in
+      let () =
+        bars.(bar_index) <-
+          { current with
+            o = current.o *. factor;
+            h = current.h *. factor;
+            l = current.l *. factor;
+            c = current.c *. factor }
+      in
+      adjust (bar_index - 1) dividend_index factor
+  in
+  adjust (Array.length bars - 1) (Array.length dividends - 1) 1.
+
+let back_adjust_volume bars events =
+  let () =
+    Array.sort
+      (fun (left, _) (right, _) -> String.compare left right)
+      events
+  in
+  let rec descend bar_date event_index factor =
+    if event_index >= 0 &&
+       String.compare (fst events.(event_index)) bar_date > 0 then
+      let factor = factor *. snd events.(event_index) in
+      descend bar_date (event_index - 1) factor
+    else event_index, factor
+  in
+  let rec adjust bar_index event_index factor =
+    if bar_index < 0 then ()
+    else
+      let event_index, factor =
+        descend bars.(bar_index).date event_index factor
+      in
+      let current = bars.(bar_index) in
+      let () =
+        bars.(bar_index) <-
+          { current with v = current.v *. (1. /. factor) }
+      in
+      adjust (bar_index - 1) event_index factor
+  in
+  adjust (Array.length bars - 1) (Array.length events - 1) 1.
+let restate_dividend_cash dividends events =
+  let dividends = Array.copy dividends in
+  let events = Array.copy events in
+  let () =
+    Array.sort
+      (fun left right -> String.compare left.ex_date right.ex_date)
+      dividends
+  in
+  let () =
+    Array.sort
+      (fun (left, _) (right, _) -> String.compare left right)
+      events
+  in
+  let rec descend ex_date event_index factor =
+    if event_index >= 0 &&
+       String.compare (fst events.(event_index)) ex_date >= 0 then
+      let factor = factor *. snd events.(event_index) in
+      descend ex_date (event_index - 1) factor
+    else
+      event_index, factor
+  in
+  let rec adjust dividend_index event_index factor =
+    if dividend_index < 0 then ()
+    else
+      let current = dividends.(dividend_index) in
+      let event_index, factor =
+        descend current.ex_date event_index factor
+      in
+      let () =
+        dividends.(dividend_index) <-
+          { current with
+            cash_per_share = current.cash_per_share *. factor }
+      in
+      adjust (dividend_index - 1) event_index factor
+  in
+  let () =
+    adjust (Array.length dividends - 1) (Array.length events - 1) 1.
+  in
+  dividends
+
 let read_us_planes path =
   let input = open_in path in
   Fun.protect
@@ -726,17 +828,28 @@ let read_us_planes path =
             String.compare left.date right.date)
           (read_rows 2 [])
       in
-      let rec derive previous money signal dividends = function
+      let rec derive previous money signal dividends units = function
         | [] ->
-            Array.of_list (List.rev money),
-            Array.of_list (List.rev signal),
-            Array.of_list (List.rev dividends)
+            let money = Array.of_list (List.rev money) in
+            let signal = Array.of_list (List.rev signal) in
+            let dividends = Array.of_list (List.rev dividends) in
+            let units = Array.of_list (List.rev units) in
+            let () =
+              if Array.length units > 0 then back_adjust money units
+            in
+            let () =
+              if Array.length units > 0 then back_adjust_volume money units
+            in
+            let () =
+              if Array.length units > 0 then back_adjust_volume signal units
+            in
+            money, signal, restate_dividend_cash dividends units
         | (money_bar, signal_bar, adjusted_close, ratio) :: rest ->
-            let dividends =
+            let dividends, units =
               match previous with
               | Some (previous_close, previous_adjusted, previous_ratio) ->
                   (* Adj_Close is cent-rounded. Overlapping ratio intervals
-                     are rounding noise, not an observable dividend. *)
+                     are rounding noise, not an observable corporate action. *)
                   let previous_high =
                     (previous_adjusted +. 0.005) /. previous_close
                   in
@@ -744,19 +857,25 @@ let read_us_planes path =
                     (adjusted_close -. 0.005) /. money_bar.c
                   in
                   if current_low > previous_high then
-                    let cash_per_share =
-                      previous_close *. (1. -. previous_ratio /. ratio)
-                    in
-                    { ex_date = money_bar.date; cash_per_share;
-                      pay_date = money_bar.date } :: dividends
+                    let factor = previous_ratio /. ratio in
+                    let cash_per_share = previous_close *. (1. -. factor) in
+                    let split_close = previous_close *. factor in
+                    if abs_float (money_bar.c -. split_close) <= 0.01 then
+                      dividends, (money_bar.date, factor) :: units
+                    else if cash_per_share > 0. then
+                      ({ ex_date = money_bar.date; cash_per_share;
+                         pay_date = money_bar.date } :: dividends),
+                      units
+                    else
+                      dividends, units
                   else
-                    dividends
-              | None -> dividends
+                    dividends, units
+              | None -> dividends, units
             in
             derive (Some (money_bar.c, adjusted_close, ratio))
-              (money_bar :: money) (signal_bar :: signal) dividends rest
+              (money_bar :: money) (signal_bar :: signal) dividends units rest
       in
-      derive None [] [] [] rows)
+      derive None [] [] [] [] rows)
 
 let read_bars ~market path =
   if market = "us" then
@@ -980,27 +1099,31 @@ let money_dividend_factors bars factors dividends =
   decompose 0 None [] (group 0 [])
 
 let merge_cash_dividend_cache dividends ~cache_path =
-  let derived_dates = Hashtbl.create (Array.length dividends) in
-  let derived_rows =
-    Array.to_list
-      (Array.map
-         (fun dividend ->
-           Hashtbl.replace derived_dates dividend.ex_date ();
-           Printf.sprintf "%s,%.17g," dividend.ex_date
-             dividend.cash_per_share)
-         dividends)
-  in
+  let cached_dates = Hashtbl.create (Array.length dividends) in
   let cached_rows =
     if not (Sys.file_exists cache_path) then []
     else
       match non_empty_lines cache_path with
       | "ex_date,cash_per_share,pay_date" :: rows ->
-          List.filter
-            (fun row -> not (Hashtbl.mem derived_dates (row_date row)))
-            rows
+          let () =
+            List.iter
+              (fun row -> Hashtbl.replace cached_dates (row_date row) ())
+              rows
+          in
+          rows
       | _ ->
           failf "%s: expected header ex_date,cash_per_share,pay_date"
             cache_path
+  in
+  let derived_rows =
+    dividends
+    |> Array.to_list
+    |> List.filter_map (fun dividend ->
+      if Hashtbl.mem cached_dates dividend.ex_date then None
+      else
+        Some
+          (Printf.sprintf "%s,%.17g," dividend.ex_date
+             dividend.cash_per_share))
   in
   let rows =
     List.sort
@@ -1165,107 +1288,6 @@ let financing_ratio ~data_dir ~symbol =
             0.6
         | _ -> fallback ())
 
-let back_adjust bars dividends =
-  let () =
-    Array.sort (fun left right -> String.compare left.date right.date) bars
-  in
-  let () =
-    Array.sort
-      (fun (left, _) (right, _) -> String.compare left right)
-      dividends
-  in
-  let rec descend bar_date dividend_index factor =
-    if dividend_index >= 0 &&
-       String.compare (fst dividends.(dividend_index)) bar_date > 0 then
-      let factor = factor *. snd dividends.(dividend_index) in
-      descend bar_date (dividend_index - 1) factor
-    else dividend_index, factor
-  in
-  let rec adjust bar_index dividend_index factor =
-    if bar_index < 0 then ()
-    else
-      let dividend_index, factor =
-        descend bars.(bar_index).date dividend_index factor
-      in
-      let current = bars.(bar_index) in
-      let () =
-        bars.(bar_index) <-
-          { current with
-            o = current.o *. factor;
-            h = current.h *. factor;
-            l = current.l *. factor;
-            c = current.c *. factor }
-      in
-      adjust (bar_index - 1) dividend_index factor
-  in
-  adjust (Array.length bars - 1) (Array.length dividends - 1) 1.
-
-let back_adjust_volume bars events =
-  let () =
-    Array.sort
-      (fun (left, _) (right, _) -> String.compare left right)
-      events
-  in
-  let rec descend bar_date event_index factor =
-    if event_index >= 0 &&
-       String.compare (fst events.(event_index)) bar_date > 0 then
-      let factor = factor *. snd events.(event_index) in
-      descend bar_date (event_index - 1) factor
-    else event_index, factor
-  in
-  let rec adjust bar_index event_index factor =
-    if bar_index < 0 then ()
-    else
-      let event_index, factor =
-        descend bars.(bar_index).date event_index factor
-      in
-      let current = bars.(bar_index) in
-      let () =
-        bars.(bar_index) <-
-          { current with v = current.v *. (1. /. factor) }
-      in
-      adjust (bar_index - 1) event_index factor
-  in
-  adjust (Array.length bars - 1) (Array.length events - 1) 1.
-let restate_dividend_cash dividends events =
-  let dividends = Array.copy dividends in
-  let events = Array.copy events in
-  let () =
-    Array.sort
-      (fun left right -> String.compare left.ex_date right.ex_date)
-      dividends
-  in
-  let () =
-    Array.sort
-      (fun (left, _) (right, _) -> String.compare left right)
-      events
-  in
-  let rec descend ex_date event_index factor =
-    if event_index >= 0 &&
-       String.compare (fst events.(event_index)) ex_date > 0 then
-      let factor = factor *. snd events.(event_index) in
-      descend ex_date (event_index - 1) factor
-    else
-      event_index, factor
-  in
-  let rec adjust dividend_index event_index factor =
-    if dividend_index < 0 then ()
-    else
-      let current = dividends.(dividend_index) in
-      let event_index, factor =
-        descend current.ex_date event_index factor
-      in
-      let () =
-        dividends.(dividend_index) <-
-          { current with
-            cash_per_share = current.cash_per_share *. factor }
-      in
-      adjust (dividend_index - 1) event_index factor
-  in
-  let () =
-    adjust (Array.length dividends - 1) (Array.length events - 1) 1.
-  in
-  dividends
 
 
 
@@ -1346,10 +1368,11 @@ let load_asset ~market ~symbol ~from_ ~to_ ~data_dir =
           [||]
       in
       let signal_factors = Array.append dividend_factors events in
+      let stock_dividend_factors =
+        money_dividend_factors money dividend_factors cash_dividends
+      in
       let money_factors =
-        Array.append
-          (money_dividend_factors money dividend_factors cash_dividends)
-          events
+        Array.append stock_dividend_factors events
       in
       let () =
         if Array.length signal_factors > 0 then
@@ -1359,13 +1382,15 @@ let load_asset ~market ~symbol ~from_ ~to_ ~data_dir =
         if Array.length money_factors > 0 then back_adjust money money_factors
       in
       let () =
-        if Array.length events > 0 then back_adjust_volume signal events
+        if Array.length money_factors > 0 then
+          back_adjust_volume signal money_factors
       in
       let () =
-        if Array.length events > 0 then back_adjust_volume money events
+        if Array.length money_factors > 0 then
+          back_adjust_volume money money_factors
       in
       let cash_dividends =
-        restate_dividend_cash cash_dividends events
+        restate_dividend_cash cash_dividends money_factors
       in
       money, signal, cash_dividends
   in

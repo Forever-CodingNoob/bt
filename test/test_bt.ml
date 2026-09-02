@@ -2279,7 +2279,7 @@ let test_us_dividend_derivation () =
         (fun () ->
           output_string output
             "date,open,high,low,close,adj_close,volume\n\
-             2025-01-02,98,98,98,98,98,1100\n\
+             2025-01-02,99,99,99,99,99,1100\n\
              2025-01-03,99,99,99,99,99,1200\n\
              2025-01-01,100,100,100,100,98,1000\n")
     in
@@ -2287,7 +2287,8 @@ let test_us_dividend_derivation () =
       Data.load_asset ~market:"us" ~symbol:"CASH" ~from_:None ~to_:None
         ~data_dir:root
     in
-    (* Only the 0.98-to-1.00 ratio change is a dividend event. *)
+    (* The 0.98-to-1.00 ratio change is cash: raw close 99 differs from
+       the split-implied close 100 * 0.98 = 98. *)
     assert (Array.length loaded.Data.dividends = 1);
     (* The ratio change occurs on 2025-01-02, so that is the ex-date. *)
     assert (loaded.Data.dividends.(0).Data.ex_date = "2025-01-02");
@@ -2331,24 +2332,25 @@ let test_two_price_planes () =
     in
     let expected_signal : Data.bar array =
       [| { date = "2025-12-28"; o = 90.; h = 90.; l = 90.; c = 90.;
-           v = 500. };
+           v = 1000. };
          { date = "2025-12-29"; o = 90.; h = 90.; l = 90.; c = 90.;
-           v = 500. };
+           v = 1000. };
          { date = "2025-12-30"; o = 90.; h = 90.; l = 90.; c = 90.;
            v = 1000. };
          { date = "2025-12-31"; o = 90.; h = 90.; l = 90.; c = 90.;
            v = 1100. } |]
     in
-    (* The signal OHLCV bytes match the legacy full-factor derivation. *)
+    (* Signal prices stay byte-identical; both 0.5 share factors restate
+       250 volume to 1000, and the later stock factor restates 500 to 1000. *)
     assert
       (Marshal.to_bytes loaded.Data.signal [Marshal.No_sharing] =
        Marshal.to_bytes expected_signal [Marshal.No_sharing]);
     (* Event and stock-dividend factors leave pre-event money at 100. *)
     assert_close 100. loaded.Data.money.(0).Data.c;
-    (* The corporate-event factor doubles pre-event volume in money. *)
-    assert_close 500. loaded.Data.money.(0).Data.v;
-    (* The same corporate-event factor doubles pre-event signal volume. *)
-    assert_close 500. loaded.Data.signal.(0).Data.v;
+    (* The event and stock factors restate 250 / (0.5 * 0.5) to 1000. *)
+    assert_close 1000. loaded.Data.money.(0).Data.v;
+    (* Both planes use the same post-event volume basis of 1000 shares. *)
+    assert_close 1000. loaded.Data.signal.(0).Data.v;
     (* Removing only the cash factor leaves the stock factor in money. *)
     assert_close 100. loaded.Data.money.(2).Data.c;
     (* The ex-date raw close falls from adjusted 100 to money price 90. *)
@@ -2422,6 +2424,125 @@ let test_dividend_cash_split_restatement () =
 
 
 
+let test_cash_restatement_through_stock_dividend () =
+  with_temp_market "tw" (fun root tw ->
+    let write name contents =
+      let output = open_out (Filename.concat tw name) in
+      Fun.protect
+        ~finally:(fun () -> close_out output)
+        (fun () -> output_string output contents)
+    in
+    write "CASH_STOCK.csv"
+      "date,open,high,low,close,volume\n\
+       2025-01-01,100,100,100,100,100\n\
+       2025-01-02,90,90,90,90,100\n\
+       2025-01-03,45,45,45,45,200\n";
+    write "CASH_STOCK.div.csv"
+      "date,factor\n2025-01-02,0.9\n2025-01-03,0.5\n";
+    write "CASH_STOCK.events.csv" "date,factor\n";
+    write "CASH_STOCK.cashdiv.csv"
+      "ex_date,cash_per_share,pay_date\n2025-01-02,10,2025-02-02\n";
+    let loaded =
+      Data.load_asset ~market:"tw" ~symbol:"CASH_STOCK" ~from_:None
+        ~to_:None ~data_dir:root
+    in
+    (* The one direct cash row produces one loaded dividend. *)
+    assert (Array.length loaded.Data.dividends = 1);
+    (* The later 1:2 stock dividend restates 10 old-basis cash to 5. *)
+    assert_close 5. loaded.Data.dividends.(0).Data.cash_per_share)
+
+let test_same_day_unit_factor_restates_cash () =
+  with_temp_market "tw" (fun root tw ->
+    let write name contents =
+      let output = open_out (Filename.concat tw name) in
+      Fun.protect
+        ~finally:(fun () -> close_out output)
+        (fun () -> output_string output contents)
+    in
+    write "SAME_DAY.csv"
+      "date,open,high,low,close,volume\n\
+       2025-01-01,200,200,200,200,100\n\
+       2025-01-02,95,95,95,95,200\n";
+    write "SAME_DAY.div.csv" "date,factor\n2025-01-02,0.95\n";
+    write "SAME_DAY.events.csv" "date,factor\n2025-01-02,0.5\n";
+    write "SAME_DAY.cashdiv.csv"
+      "ex_date,cash_per_share,pay_date\n2025-01-02,10,2025-02-02\n";
+    let loaded =
+      Data.load_asset ~market:"tw" ~symbol:"SAME_DAY" ~from_:None
+        ~to_:None ~data_dir:root
+    in
+    (* The one direct cash row produces one loaded dividend. *)
+    assert (Array.length loaded.Data.dividends = 1);
+    (* The same-date 1:2 unit factor converts 10 old-basis cash to 5. *)
+    assert_close 5. loaded.Data.dividends.(0).Data.cash_per_share)
+
+let test_us_split_is_not_cash () =
+  with_temp_market "us" (fun root us ->
+    let output = open_out (Filename.concat us "SPLIT.csv") in
+    Fun.protect
+      ~finally:(fun () -> close_out output)
+      (fun () ->
+        output_string output
+          "date,open,high,low,close,adj_close,volume\n\
+           2025-01-01,100,100,100,100,50,100\n\
+           2025-01-02,50,50,50,50,50,200\n");
+    let loaded =
+      Data.load_asset ~market:"us" ~symbol:"SPLIT" ~from_:None ~to_:None
+        ~data_dir:root
+    in
+    (* The exact 1:2 raw-price drop identifies one unit event and no cash. *)
+    assert (Array.length loaded.Data.dividends = 0);
+    (* The 0.5 unit factor restates the earlier money close from 100 to 50. *)
+    assert_close 50. loaded.Data.money.(0).Data.c;
+    (* The inverse 0.5 factor restates earlier money volume from 100 to 200. *)
+    assert_close 200. loaded.Data.money.(0).Data.v;
+    (* The signal plane uses the same post-split share basis of 200. *)
+    assert_close 200. loaded.Data.signal.(0).Data.v)
+
+let test_fallback_preserves_direct_overlap () =
+  let derived =
+    Data.derive_cash_dividends
+      [| bar "2025-12-30" 100. 100.;
+         bar "2025-12-31" 90. 90. |]
+      [| "2025-12-31", 0.9 |]
+  in
+  with_temp_strategy
+    "ex_date,cash_per_share,pay_date\n2025-12-31,7,2026-01-15\n"
+    (fun cache_path ->
+      Data.merge_cash_dividend_cache derived ~cache_path;
+      let merged = Data.read_cash_dividends cache_path in
+      (* One shared ex-date collapses to the authoritative cached row. *)
+      assert (Array.length merged = 1);
+      (* The direct-source amount 7 wins over the derived amount 10. *)
+      assert_close 7. merged.(0).Data.cash_per_share;
+      (* The direct-source pay date survives the overlapping fallback. *)
+      assert (merged.(0).Data.pay_date = "2026-01-15"))
+
+let test_stock_dividend_restates_volume () =
+  with_temp_market "tw" (fun root tw ->
+    let write name contents =
+      let output = open_out (Filename.concat tw name) in
+      Fun.protect
+        ~finally:(fun () -> close_out output)
+        (fun () -> output_string output contents)
+    in
+    write "STOCK_VOLUME.csv"
+      "date,open,high,low,close,volume\n\
+       2025-01-01,100,100,100,100,100\n\
+       2025-01-02,50,50,50,50,200\n";
+    write "STOCK_VOLUME.div.csv" "date,factor\n2025-01-02,0.5\n";
+    write "STOCK_VOLUME.events.csv" "date,factor\n";
+    write "STOCK_VOLUME.cashdiv.csv"
+      "ex_date,cash_per_share,pay_date\n";
+    let loaded =
+      Data.load_asset ~market:"tw" ~symbol:"STOCK_VOLUME" ~from_:None
+        ~to_:None ~data_dir:root
+    in
+    (* The inverse 0.5 stock factor restates earlier money volume to 200. *)
+    assert_close 200. loaded.Data.money.(0).Data.v;
+    (* The same factor puts signal volume on the same 200-share basis. *)
+    assert_close 200. loaded.Data.signal.(0).Data.v)
+
 let test_load_adjustments () =
   let root = Filename.temp_file "bt-test-data-" "" in
   Sys.remove root;
@@ -2450,6 +2571,9 @@ let test_load_adjustments () =
          2025-07-21,98,98,98,98,700\n";
       write (Filename.concat tw "MIXED.div.csv")
         "date,factor\n2025-07-21,0.98\n";
+      write (Filename.concat tw "MIXED.cashdiv.csv")
+        "ex_date,cash_per_share,pay_date\n\
+         2025-07-21,2,2025-08-21\n";
       write (Filename.concat tw "MIXED.events.csv")
         "date,factor\n2025-06-18,0.25\n";
       let mixed =
@@ -2478,6 +2602,9 @@ let test_load_adjustments () =
          2020-01-02,90,90,90,90,222\n";
       write (Filename.concat tw "DIV.div.csv")
         "date,factor\n2020-01-02,0.9\n";
+      write (Filename.concat tw "DIV.cashdiv.csv")
+        "ex_date,cash_per_share,pay_date\n\
+         2020-01-02,10,2020-02-02\n";
       write (Filename.concat tw "DIV.events.csv") "date,factor\n";
       let dividend =
         (Data.load_asset ~market:"tw" ~symbol:"DIV" ~from_:None
@@ -3381,6 +3508,11 @@ let () =
   test_us_dividend_derivation ();
   test_two_price_planes ();
   test_dividend_cash_split_restatement ();
+  test_cash_restatement_through_stock_dividend ();
+  test_same_day_unit_factor_restates_cash ();
+  test_us_split_is_not_cash ();
+  test_fallback_preserves_direct_overlap ();
+  test_stock_dividend_restates_volume ();
   test_load_adjustments ();
   test_financing_ratio ();
   test_event_transform ();
