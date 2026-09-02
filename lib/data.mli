@@ -48,8 +48,9 @@ val load_asset :
 (** Retain bars whose dates satisfy the supplied predicate. *)
 val filter_dates : keep:(string -> bool) -> bar array -> bar array
 
-(** Return the latest cached financing ratio for a Taiwan symbol. *)
-val financing_ratio : data_dir:string -> symbol:string -> float
+(** Return the financing ratio for a symbol: US defaults to Reg T 50%,
+    TW resolves from cached stockinfo or falls back to TWSE 60%. *)
+val financing_ratio : market:string -> data_dir:string -> symbol:string -> float
 
 (** Decide whether a cache needs an earlier-date probe. *)
 val should_probe_head : from_:string option -> first_cached:string -> bool

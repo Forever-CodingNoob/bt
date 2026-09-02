@@ -327,10 +327,10 @@ let run argv =
              inputs)
       then failwith (Printf.sprintf "unknown parameter %s" name))
     !parameters;
-  let ratio_for symbol =
+  let ratio_for market symbol =
     match !financing_ratio with
     | Some percent -> percent /. 100.
-    | None -> Btlib.Data.financing_ratio ~data_dir:!data_dir ~symbol
+    | None -> Btlib.Data.financing_ratio ~market ~data_dir:!data_dir ~symbol
   in
   let configured_loan_term =
     if !loan_term_months = 0 then None else Some !loan_term_months
@@ -380,7 +380,7 @@ let run argv =
         in
         let ratios =
           Array.of_list
-            (List.map (fun (_, _, symbol) -> ratio_for symbol) input.stocks)
+            (List.map (fun (_, market, symbol) -> ratio_for market symbol) input.stocks)
         in
         let margin_config : Btlib.Engine.margin =
           { financing_rate = !financing_rate /. 100.;
@@ -414,7 +414,7 @@ let run argv =
         let margin_config : Btlib.Engine.margin =
           { financing_rate = !financing_rate /. 100.;
             maintenance_ratio = !maintenance_ratio /. 100.;
-            ratios = [| ratio_for symbol |];
+            ratios = [| ratio_for market symbol |];
             loan_term_months =
               if market = "tw" then configured_loan_term else None }
         in

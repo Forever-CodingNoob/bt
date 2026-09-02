@@ -2845,13 +2845,15 @@ let test_financing_ratio () =
              5483,\"tpex\",\"2024-01-01\"\n\
              8069,\"tpex\",\"2020-01-01\"\n\
              8069,\"twse\",\"2024-01-01\"\n");
-      assert (Data.financing_ratio ~data_dir:root ~symbol:"00685L" = 0.6);
+      assert (Data.financing_ratio ~market:"tw" ~data_dir:root ~symbol:"00685L" = 0.6);
       (* The FSC's 60% TPEX maximum took effect on 2014-11-10. *)
-      assert (Data.financing_ratio ~data_dir:root ~symbol:"5483" = 0.6);
+      assert (Data.financing_ratio ~market:"tw" ~data_dir:root ~symbol:"5483" = 0.6);
       (* the row with the latest date wins *)
-      assert (Data.financing_ratio ~data_dir:root ~symbol:"8069" = 0.6);
-      (* unknown symbol warns and defaults *)
-      assert (Data.financing_ratio ~data_dir:root ~symbol:"9999" = 0.6))
+      assert (Data.financing_ratio ~market:"tw" ~data_dir:root ~symbol:"8069" = 0.6);
+      (* unknown TW symbol warns and defaults to TWSE 60% *)
+      assert (Data.financing_ratio ~market:"tw" ~data_dir:root ~symbol:"9999" = 0.6);
+      (* US symbols default to Reg T 50% without a warning *)
+      assert (Data.financing_ratio ~market:"us" ~data_dir:root ~symbol:"SPY" = 0.5))
 
 let test_multi_stock_compile () =
   let bull_bars =

@@ -124,7 +124,7 @@ Loads one or more strategy files and their cached prices. Each strategy file sel
 | `--dividend-tax PERCENT` | `0` | Reduce every TW receivable and US cash dividend at creation. Represents dividend income tax and the NHI supplementary premium. |
 | `--financing-rate PERCENT` | `6.35` | Set the annual financing rate. |
 | `--maintenance-ratio PERCENT` | `130` | Set the maintenance threshold. |
-| `--financing-ratio PERCENT` | per symbol | Set the fresh-loan financing ratio for every asset. Use 50 for TPEX backtests before 2014-11-10. |
+| `--financing-ratio PERCENT` | TW 60, US 50 | Set the fresh-loan financing ratio for every asset. TW defaults from cached stockinfo (TWSE/TPEX 60%). US defaults to the Reg T initial-margin ratio of 50%. |
 | `--loan-term-months N` | `18` | Set the TW margin-loan term in calendar months. Use 0 for open-ended TW loans. US loans are always open-ended. |
 | `--data-dir DIR` | `data/` | Set the cache directory. |
 | `--out-dir DIR` | `out/` | Set the output directory. |

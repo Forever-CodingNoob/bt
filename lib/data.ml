@@ -1347,50 +1347,55 @@ let fetch ~market ~symbol ~from_ ~to_ ~data_dir =
       ~cache_path:(Filename.concat directory "stockinfo.csv")
 
 
-let financing_ratio ~data_dir ~symbol =
-  let path =
-    Filename.concat (Filename.concat data_dir "tw") "stockinfo.csv"
-  in
-  let fallback () =
-    let () =
-      Printf.eprintf
-        "warning: financing ratio unknown for %s; assuming TWSE 60%%\n" symbol
-    in
-    0.6
-  in
-  if not (Sys.file_exists path) then fallback ()
+let financing_ratio ~market ~data_dir ~symbol =
+  let market = market_name market in
+  if market = "us" then 0.5
   else
-    let input = open_in path in
-    Fun.protect
-      ~finally:(fun () -> close_in input)
-      (fun () ->
-        let () =
-          match input_line input with
-          | _header -> ()
-          | exception End_of_file -> ()
-        in
-        let rec read_best best =
-          match input_line input with
-          | line ->
-              let best =
-                match String.split_on_char ',' line with
-                | [stock_id; kind; date] when unquote stock_id = symbol ->
-                    let date = unquote date in
-                    (match best with
-                     | Some (previous, _)
-                       when String.compare previous date >= 0 ->
-                         best
-                     | _ -> Some (date, unquote kind))
-                | _ -> best
-              in
-              read_best best
-          | exception End_of_file -> best
-        in
-        match read_best None with
-        | Some (_, "twse") -> 0.6
-        | Some (_, "tpex") ->
-            0.6
-        | _ -> fallback ())
+    let path =
+      Filename.concat (Filename.concat data_dir "tw") "stockinfo.csv"
+    in
+    let fallback () =
+      let () =
+        Printf.eprintf
+          "warning: financing ratio unknown for %s; assuming TWSE 60%%\n"
+          symbol
+      in
+      0.6
+    in
+    if not (Sys.file_exists path) then fallback ()
+    else
+      let input = open_in path in
+      Fun.protect
+        ~finally:(fun () -> close_in input)
+        (fun () ->
+          let () =
+            match input_line input with
+            | _header -> ()
+            | exception End_of_file -> ()
+          in
+          let rec read_best best =
+            match input_line input with
+            | line ->
+                let best =
+                  match String.split_on_char ',' line with
+                  | [stock_id; kind; date]
+                    when unquote stock_id = symbol ->
+                      let date = unquote date in
+                      (match best with
+                       | Some (previous, _)
+                         when String.compare previous date >= 0 ->
+                           best
+                       | _ -> Some (date, unquote kind))
+                  | _ -> best
+                in
+                read_best best
+            | exception End_of_file -> best
+          in
+          match read_best None with
+          | Some (_, "twse") -> 0.6
+          | Some (_, "tpex") ->
+              0.6
+          | _ -> fallback ())
 
 
 

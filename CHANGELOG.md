@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 
 - FinMind USStockPrice fetch path and close/adjClose derivation heuristics.
+
+### Fixed
+
+- US symbols default to Reg T 50% financing ratio instead of the TW 60% fallback with a spurious warning.
+
 ## [0.6.0] - 2026-09-02
 
 ### Added

@@ -133,9 +133,9 @@ US dividends become cash on their ex-date with no receivable period. When divide
 
 ### Open-ended margin
 
-US loan lots are always open-ended. The engine does not model Reg T initial margin requirements, pattern-day-trader rules, or FINRA maintenance requirements.
+US margin defaults to the Reg T initial-margin ratio of 50%. US loan lots are always open-ended (no term maturity). `--financing-ratio` overrides the default.
 
 ### Gap between simulation and the real market
 
+- Pattern-day-trader rules and FINRA maintenance requirements are not modeled.
 - No short selling or borrow costs are modeled.
-- No US regulatory margin rules (Reg T, FINRA maintenance) are modeled.
