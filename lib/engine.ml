@@ -818,6 +818,7 @@ let run ?dividends ?(dividend_tax = 0.)
   let apply_fills ~bar_index ~date ~eff ~clamped ~force price_at =
     let e0 = equity () in
     let current_loans = Array.init asset_count loan_at in
+    let unlevered = sum eff <= 1. in
     let current_interests = Array.init asset_count interest_at in
     let current_tails =
       Array.init asset_count
@@ -926,6 +927,37 @@ let run ?dividends ?(dividend_tax = 0.)
           e1 -. post_assets +. post_liabilities +. !debt
           -. total_receivables ()
         in
+        let requested_buy_total =
+          fold_assets
+            (fun total index ->
+              if changed.(index) && trades.(index) > 0. then
+                total +. trades.(index)
+              else total)
+            0.
+        in
+        let () =
+          if unlevered && requested_buy_total > available then
+            let fundable = Float.max 0. available in
+            let scale =
+              if requested_buy_total > 0. then
+                Float.min 1. (fundable /. requested_buy_total)
+              else 1.
+            in
+            let remaining = ref fundable in
+            iter_assets (fun index ->
+              if changed.(index) && trades.(index) > 0. then
+                let current = total_value index in
+                let trade =
+                  Float.min !remaining (trades.(index) *. scale)
+                in
+                let () = trades.(index) <- trade in
+                let () = final_values.(index) <- current +. trade in
+                let () =
+                  to_es.(index) <- final_values.(index) /. equity_basis
+                in
+                let () = remaining := Float.max 0. (!remaining -. trade) in
+                scaled_buys.(index) <- true)
+        in
         let cash_refinance_capacities = Array.make asset_count 0. in
         let margin_refinance_rates = Array.make asset_count 0. in
         let margin_refinance_capacities = Array.make asset_count 0. in
@@ -977,7 +1009,8 @@ let run ?dividends ?(dividend_tax = 0.)
              > refinance_capacity +. tolerance
         in
         let funding_clamp =
-          capacity_clamp || (buy_scale < 1. && has_requested_buy)
+          not unlevered
+          && (capacity_clamp || (buy_scale < 1. && has_requested_buy))
         in
         let () =
           if capacity_clamp && requested_minimum > 0. then
@@ -1139,13 +1172,18 @@ let run ?dividends ?(dividend_tax = 0.)
               let buy = trades.(index) in
               let ratio = margin.ratios.(index) in
               let cash_buy =
-                if ratio <= 0. then buy
+                if unlevered then buy
+                else if ratio <= 0. then buy
                 else Float.min buy (allocations.(index) /. ratio)
               in
               let () = buy_cashes.(index) <- cash_buy in
-              let () = buy_margins.(index) <- buy -. cash_buy in
+              let () =
+                buy_margins.(index) <-
+                  if unlevered then 0. else buy -. cash_buy
+              in
               down_payments.(index) <-
-                minimums.(index) +. allocations.(index))
+                if unlevered then buy
+                else minimums.(index) +. allocations.(index))
         in
         let cash_refinance_values = Array.make asset_count 0. in
         let margin_refinance_values = Array.make asset_count 0. in

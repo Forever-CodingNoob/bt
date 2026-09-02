@@ -958,13 +958,68 @@ let test_receivable_not_available_to_planner () =
       [| dividend "2020-01-02" 6.25 "2020-02-01" |] 0.
   in
   (* Entry leaves 0.04 cash. Its 0.0096 shares book a 0.06
-     receivable, raising equity to 1.06. Reaching target 1 needs a
-     0.10 buy: 0.04 cash plus a 0.06 financed lot. The receivable
-     must not masquerade as the 0.06 cash allocation, so the re-fill
-     reaches exposure 1 rather than stopping at inventory 1.00. *)
+     receivable, raising equity to 1.06. Gross target 1 may not
+     borrow, so only the real 0.04 cash is invested. Inventory
+     reaches 1.00, or exposure 1/1.06 = 50/53; the receivable must
+     not masquerade as the missing 0.06 cash allocation. *)
   match result.fills with
   | _entry :: refill :: _ ->
-      assert_close ~tolerance:1e-12 1. refill.Engine.to_e
+      assert_close ~tolerance:1e-12 (50. /. 53.) refill.Engine.to_e
+  | _ -> assert false
+
+let test_unlevered_dividend_refill_cash_clamp () =
+  (* Normalize the first loan-producing 0050 bar to a 100 entry:
+     equity 2.6776256532099918, cash 0.06010600669768993, requested
+     buy 0.060082033966137427, and a 6.94e-18 margin residual. *)
+  let pay_price = 261.85640368512605 in
+  let cash_per_share = 6.012998899436231 in
+  let bars =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" pay_price pay_price;
+       bar "2020-01-03" pay_price pay_price;
+       bar "2020-01-04" pay_price pay_price |]
+  in
+  let costs : Engine.costs =
+    { fee_bps = 3.99; tax_bps = 0.; slip_bps = 0.; min_fee = 0. }
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.; maintenance_ratio = 0.; ratios = [| 0.6 |];
+      loan_term_months = None }
+  in
+  let result =
+    run_with_dividends ~stock:"tw/TEST" bars
+      [| 1.; 1.; 1.; 1. |] costs margin
+      [| dividend "2020-01-02" cash_per_share "2020-01-03" |] 0.
+  in
+  let fee = 3.99 /. 10000. in
+  let entry = 1. /. (1. +. fee) in
+  let dividend_cash = entry /. 100. *. cash_per_share in
+  let inventory = entry /. 100. *. pay_price in
+  let refill = dividend_cash /. (1. +. fee) in
+  (* Entry owns entry/100 shares. At the pay price, inventory is
+     entry*pay_price/100 and the dividend is
+     entry*cash_per_share/100. The pay-date buy plus its fee must
+     equal that cash, so buy = dividend/(1+f). The final sale leaves
+     (inventory + buy)(1-f), with no refinance-leg fees. *)
+  assert_close ~tolerance:1e-12
+    ((inventory +. refill) *. (1. -. fee))
+    (final_equity result);
+  (* Requested gross exposure is exactly 1, so the fee-sized funding
+     gap is a normal cash sizing clamp: it creates no refinance and
+     does not increment the margin clamp statistic. *)
+  assert (result.margin_stats.Engine.refinances = 0);
+  assert (result.margin_stats.Engine.clamps = 0);
+  (* With no loan at any point, maintenance is never defined. *)
+  assert (result.margin_stats.Engine.min_maintenance = None);
+  (* Before the pay-date fill, inventory plus the receivable is total
+     equity. Cash-sized re-fill reaches exposure 1, then final-close
+     is third. *)
+  match result.fills with
+  | [_entry; pay_refill; _close] ->
+      assert_close ~tolerance:1e-12
+        (inventory /. (inventory +. dividend_cash))
+        pay_refill.Engine.from_e;
+      assert_close ~tolerance:1e-12 1. pay_refill.Engine.to_e
   | _ -> assert false
 
 let test_intersected_ex_date () =
@@ -3249,6 +3304,7 @@ let () =
   test_frozen_dividend_reduces_debt ();
   test_no_dividend_events_identity ();
   test_receivable_not_duplicated_on_force_close ();
+  test_unlevered_dividend_refill_cash_clamp ();
   test_receivable_not_available_to_planner ();
   test_intersected_ex_date ();
   test_engine_buyhold_costs ();
