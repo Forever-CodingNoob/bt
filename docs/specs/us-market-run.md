@@ -61,6 +61,10 @@ TW behavior must not move: profile values reproduce today's constants (365, T+2,
 
 TDD per behavior with recorded red runs: day count (360 vs 365 on a weekend fixture), T+1 window arithmetic, tiered required-margin computation across all three price bands, minimum-cure sizing (hand-derived: cure exactly to the threshold), flat-rate override, TAF charge with floor and cap under `--capital`, SEC fee on sells, mixed-market rejection (levered and unlevered), and the TW byte-identity gate on the 00685L smoke. A SPY margin-run smoke before and after, recorded with interpretation.
 
+## Simplicity and reuse
+
+The US path reuses the shared engine machinery everywhere it can: lots, receivables, the fill planner, the solvency guard, the bar walk, and the reporting pipeline are one code path for both markets. A fork exists only where the profile carries a genuine divergence (day count, settlement lag, maintenance model, defaults), expressed as a variant match inside the shared function - never as a parallel US copy of shared logic. When existing code can serve, it is used as is.
+
 ## Execution
 
-One task agent under `skill://executing-plans` and the TDD contract; commits only (user pushes); no git-settings changes; Claude trailer; market matches per the AGENTS.md golden rule (the profile centralizes them).
+One task agent per plan task under `skill://executing-plans` and the TDD contract. After EACH task's implementation, a reviewer agent reviews the diff for correctness AND functional-programming-style compliance: market forks as match arms on profile variants, no `if market`, no `for`/`while`, `let () = e in` sequencing, tail recursion, and maximal reuse of the shared path (a parallel US reimplementation of shared logic is a finding). Fix waves re-review. Commits only (user pushes); no git-settings changes; Claude trailer.
