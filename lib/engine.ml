@@ -140,6 +140,18 @@ let default_costs ~market ~symbol =
         per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   | _ -> invalid_arg "Engine.default_costs: market must be tw or us"
 
+let taf_dollars (costs : costs) ~shares =
+  let raw = shares *. costs.per_share_sell_fee in
+  let rounded =
+    Float.of_int (int_of_float (Float.ceil (raw *. 100.))) /. 100.
+  in
+  let capped =
+    if costs.per_share_sell_cap > 0. then
+      Float.min costs.per_share_sell_cap rounded
+    else rounded
+  in
+  Float.max 0.01 capped
+
 let clamp_target value =
   if Float.is_nan value || value < 0. then 0. else value
 
@@ -170,11 +182,11 @@ let add_months_clamped date months =
   let target_day = min day (days_in_month target_year target_month) in
   Printf.sprintf "%04d-%02d-%02d" target_year target_month target_day
 
-
 let us_tier_rate price =
   if price < 2.50 then 1.0
   else if price < 6.00 then 0.5
   else 0.3
+
 let market_of_label label =
   match String.index_opt label '/' with
   | Some i -> String.sub label 0 i
@@ -484,17 +496,7 @@ let run ?dividends ?(dividend_tax = 0.)
       | Some cap when delta < 0. && costs.per_share_sell_fee > 0. ->
           let dollars = equity_before *. cap in
           let shares = amount *. dollars /. price in
-          let raw = shares *. costs.per_share_sell_fee in
-          let rounded =
-            Float.of_int (int_of_float (Float.ceil (raw *. 100.))) /. 100.
-          in
-          let capped =
-            if costs.per_share_sell_cap > 0. then
-              Float.min costs.per_share_sell_cap rounded
-            else rounded
-          in
-          let clamped = Float.max 0.01 capped in
-          clamped /. dollars
+          taf_dollars costs ~shares /. dollars
       | _ -> 0.
     in
     bps_cost +. taf
@@ -512,17 +514,7 @@ let run ?dividends ?(dividend_tax = 0.)
       match capital with
       | Some cap when costs.per_share_sell_fee > 0. ->
           let shares = value *. cap /. price in
-          let raw = shares *. costs.per_share_sell_fee in
-          let rounded =
-            Float.of_int (int_of_float (Float.ceil (raw *. 100.))) /. 100.
-          in
-          let capped =
-            if costs.per_share_sell_cap > 0. then
-              Float.min costs.per_share_sell_cap rounded
-            else rounded
-          in
-          let clamped = Float.max 0.01 capped in
-          clamped /. cap
+          taf_dollars costs ~shares /. cap
       | _ -> 0.
     in
     commission
@@ -1731,7 +1723,20 @@ let run ?dividends ?(dividend_tax = 0.)
             /. (if total_margin > 0. then total_margin else 1.)
           else 0.
         in
-        let relief = tier_weighted /. total_margin -. cost_per_unit in
+        let tail_drain_rate =
+          if total_margin > 0. then
+            fold_assets
+              (fun acc index ->
+                if margin_values.(index) > 0. then
+                  acc +. tail_interest_at index bar_index
+                else acc)
+              0.
+            /. total_margin
+          else 0.
+         in
+        let relief =
+          tier_weighted /. total_margin -. cost_per_unit -. tail_drain_rate
+        in
         let sell_total =
           if relief > 0. then Float.min total_margin (deficit /. relief)
           else total_margin

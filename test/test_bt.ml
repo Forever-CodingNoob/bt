@@ -394,7 +394,7 @@ let test_funding_clamp_covers_fixed_refinance_costs () =
   in
   let costs : Engine.costs =
     { fee_bps = 0.; tax_bps = 0.; slip_bps = 0.; min_fee = 50.;
-    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
+      per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let margin : Engine.margin =
     { financing_rate = 0.; maintenance_override = Some 0.; ratios = [| 0.6 |];
@@ -656,7 +656,7 @@ let test_engine_insolvent_min_fee () =
   in
   let costs : Engine.costs =
     { fee_bps = 3.99; tax_bps = 0.; slip_bps = 0.; min_fee = 20.;
-    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
+      per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let margin : Engine.margin =
     { financing_rate = 0.; maintenance_override = Some 1.3; ratios = [| 0.6 |];
@@ -700,7 +700,7 @@ let test_engine_exit_fee_bankruptcy () =
   in
   let costs : Engine.costs =
     { fee_bps = 3.99; tax_bps = 0.; slip_bps = 0.; min_fee = 20.;
-    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
+      per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let margin : Engine.margin =
     { financing_rate = 0.; maintenance_override = Some 0.; ratios = [| 0.6 |];
@@ -904,7 +904,7 @@ let test_us_dividend_refill_cost () =
   in
   let costs : Engine.costs =
     { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0.;
-    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
+      per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let result =
     run_with_dividends ~stock:"us/TEST" bars
@@ -1033,7 +1033,7 @@ let test_unlevered_dividend_refill_cash_clamp () =
   in
   let costs : Engine.costs =
     { fee_bps = 3.99; tax_bps = 0.; slip_bps = 0.; min_fee = 0.;
-    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
+      per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let margin : Engine.margin =
     { financing_rate = 0.; maintenance_override = Some 0.; ratios = [| 0.6 |];
@@ -1103,7 +1103,6 @@ let test_intersected_ex_date () =
   assert_close ~tolerance:1e-12 0.9 (final_equity before_range)
 
 
-
 let test_engine_buyhold_costs () =
   (* Entry solves E1 = E0 - fee * E1, so E1 = E0 / (1 + fee).
      The last close force-closes the position. *)
@@ -1112,7 +1111,7 @@ let test_engine_buyhold_costs () =
   in
   let costs : Engine.costs =
     { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0.;
-    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
+      per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let result =
     run_single bars [| 1.; 1. |] costs ~capital:None ~fill:Engine.Close_same
@@ -1170,7 +1169,7 @@ let test_engine () =
   assert_close ~tolerance:1e-12 engine_zero_expected (final_equity zero_result);
   let fee_costs : Engine.costs =
     { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0.;
-    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
+      per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let fee_result =
     run_single sample_bars target fee_costs ~capital:None ~fill:Engine.Open_next
@@ -1201,7 +1200,7 @@ let test_engine_close_costs () =
   let target = [|0.; 1.; 1.; 0.; 0.|] in
   let costs : Engine.costs =
     { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0.;
-    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
+      per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let result =
     run_single fill_bars target costs ~capital:None ~fill:Engine.Close_same
@@ -1226,7 +1225,7 @@ let test_engine_min_fee () =
   let target = [| 0.; 1.; 1.; 0.; 0. |] in
   let costs : Engine.costs =
     { fee_bps = 3.99; tax_bps = 0.; slip_bps = 0.; min_fee = 20.;
-    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
+      per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let result =
     run_single fill_bars target costs
@@ -1251,7 +1250,7 @@ let test_engine_min_fee_without_capital () =
   let target = [| 0.; 1.; 1.; 0.; 0. |] in
   let costs : Engine.costs =
     { fee_bps = 3.99; tax_bps = 0.; slip_bps = 0.; min_fee = 20.;
-    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
+      per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let result =
     run_single fill_bars target costs ~capital:None ~fill:Engine.Close_same
@@ -1287,7 +1286,7 @@ let test_engine_partial_costs () =
   let target = [|0.; 0.5; 1.; 0.5; 0.|] in
   let costs : Engine.costs =
     { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0.;
-    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
+      per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let result =
     run_single fill_bars target costs ~capital:None ~fill:Engine.Close_same
@@ -1338,7 +1337,7 @@ let test_engine_partial_open_costs () =
   let target = [| 0.; 0.5; 1.; 0.5; 0. |] in
   let costs : Engine.costs =
     { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0.;
-    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
+      per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let result =
     run_single fill_bars target costs ~capital:None ~fill:Engine.Open_next
@@ -1418,11 +1417,11 @@ let test_engine_portfolio_costs () =
   in
   let a_costs : Engine.costs =
     { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0.;
-    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
+      per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let b_costs : Engine.costs =
     { fee_bps = 0.; tax_bps = 100.; slip_bps = 0.; min_fee = 0.;
-    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
+      per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let result =
     Engine.run ~profile:tw_profile [| ("tw/A", a); ("tw/B", b) |]
@@ -1464,7 +1463,7 @@ let test_engine_portfolio_min_fee () =
   in
   let costs : Engine.costs =
     { fee_bps = 3.99; tax_bps = 0.; slip_bps = 0.; min_fee = 20.;
-    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
+      per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let result =
     Engine.run ~profile:tw_profile [| ("tw/A", a); ("tw/B", b) |]
@@ -1668,7 +1667,7 @@ let test_golden () =
   in
   let costs : Engine.costs =
     { fee_bps = 0.; tax_bps = 0.; slip_bps = 0.; min_fee = 0.;
-    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
+      per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let result =
     Engine.run ~profile:tw_profile [| ("tw/TEST", bars) |] strategy [| costs |]
@@ -2573,7 +2572,6 @@ let test_dividend_cash_split_restatement () =
     assert_close 1. fallback.Data.dividends.(1).Data.cash_per_share)
 
 
-
 let test_cash_restatement_through_stock_dividend () =
   with_temp_market "tw" (fun root tw ->
     let sym = Filename.concat tw "CASH_STOCK" in
@@ -2959,7 +2957,7 @@ let test_e1_order_independence () =
   in
   let costs : Engine.costs =
     { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0.;
-    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
+      per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let margin : Engine.margin =
     { financing_rate = 0.; maintenance_override = Some 0.;
@@ -3037,7 +3035,7 @@ let test_sell_only_fee_does_not_refinance () =
   in
   let costs : Engine.costs =
     { fee_bps = 0.; tax_bps = 0.; slip_bps = 0.; min_fee = 20.;
-    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
+      per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let margin : Engine.margin =
     { financing_rate = 0.; maintenance_override = Some 0.;
@@ -3075,7 +3073,7 @@ let test_residual_debt_does_not_force_refinance () =
   in
   let fee_costs : Engine.costs =
     { fee_bps = 0.; tax_bps = 0.; slip_bps = 0.; min_fee = 20.;
-    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
+      per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let margin : Engine.margin =
     { financing_rate = 0.; maintenance_override = Some 0.;
@@ -3146,7 +3144,7 @@ let test_refinance_costs () =
   in
   let costs : Engine.costs =
     { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0.;
-    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
+      per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let margin : Engine.margin =
     { financing_rate = 0.; maintenance_override = Some 0.; ratios = [| 0.6 |];
@@ -4090,6 +4088,41 @@ let test_cure_shortfall_preserves_liability () =
   assert_close ~tolerance:1e-12 0.4 (final_equity result)
 
 
+let test_us_cure_tail_aware () =
+  (* Entry $10, target 2.0, ratio 0.5 → mv = 2.0, loan = 1.0.
+     financing_rate 36% → 0.001/day on 360-day basis.
+     Bar 1 ($7): equity = 0.4, required = 0.42.  Breach.
+     Bar 2 cure: 3 days interest (Fri→Mon) = 0.003, equity = 0.397.
+       Deficit = 0.023.  Tail = 1 day (Mon→Tue) = 0.001.
+       Relief must subtract the tail-interest drain (0.001/0.7 per
+       dollar of margin sold) so the cure is boundary-exact:
+         relief = (0.21 - 0.001) / 0.7 = 0.209/0.7
+       Without: relief = 0.3, fraction undershoots, second call.
+       With: fraction = 0.023 / (0.209/0.7) / 0.7 exactly meets the
+       maintenance requirement.
+     Bar 3: target 0, exit.  Final equity = 0.7 - 0.304 = 0.396
+       (total interest = 4 days at 0.001; independent of cure fraction
+       because the shortfall from the settled fraction is repaid from
+       proceeds when the remaining margin sells on bar 3). *)
+  let bars =
+    [| bar "2020-01-02" 10. 10.;
+       bar "2020-01-03" 7. 7.;
+       bar "2020-01-06" 7. 7.;
+       bar "2020-01-07" 7. 7. |]
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.36; maintenance_override = None;
+      ratios = [| 0.5 |]; loan_term_months = None }
+  in
+  let result =
+    Engine.run ~profile:us_profile [| ("us/TEST", bars) |]
+      { Engine.targets = [| [| 2.; 2.; 2.; 0. |] |] }
+      [| zero_costs |] ~margin ~capital:None ~fill:Engine.Close_same
+  in
+  (* Tail-aware cure: boundary-exact relief, no second call *)
+  assert (result.margin_stats.Engine.margin_call_dates = ["2020-01-03"]);
+  assert_close ~tolerance:1e-12 0.396 (final_equity result)
+
 let () =
   test_profile_of_market ();
   test_parser ();
@@ -4214,4 +4247,5 @@ let () =
   test_tw_maintenance_override_none ();
   test_us_cure_interest_single_charge ();
   test_cure_shortfall_preserves_liability ();
+  test_us_cure_tail_aware ();
   print_endline "ok"
