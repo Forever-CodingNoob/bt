@@ -123,8 +123,10 @@ Loads one or more strategy files and their cached prices. Each strategy file sel
 | `--slip-bps F` | `0` | Override slippage in basis points for all strategies and the baseline. |
 | `--min-fee F` | `20` (with `--capital`) | Override the minimum commission per order in TWD. Applies only with `--capital`. |
 | `--dividend-tax PERCENT` | `0` | Reduce every TW receivable and US cash dividend at creation. Represents dividend income tax and the NHI supplementary premium. |
-| `--financing-rate PERCENT` | `6.35` | Set the annual financing rate. |
-| `--maintenance-ratio PERCENT` | `130` | Set the maintenance threshold. |
+| `--financing-rate PERCENT` | TW 6.35, US 6.25 | Set the annual financing rate. |
+| `--maintenance-ratio PERCENT` | TW 130 (collateral/loan), US tiered | Set a flat maintenance threshold for either market. When unset, TW uses 130% collateral over loan and US uses the tiered table (100% below $2.50, 50% $2.50–$6, 30% above $6). |
+| `--per-share-fee F` | US 0.000195, TW 0 | Override the per-share sell fee in dollars. Applies only with `--capital`. |
+| `--per-share-cap F` | US 9.79, TW 0 | Override the per-share sell fee cap in dollars per order. Use 0 for uncapped. Applies only with `--capital`. |
 | `--financing-ratio PERCENT` | TW 60, US 50 | Set the fresh-loan financing ratio for every asset. TW defaults from cached stockinfo (TWSE/TPEX 60%). US defaults to the Reg T initial-margin ratio of 50%. |
 | `--loan-term-months N` | `18` | Set the TW margin-loan term in calendar months. Use 0 for open-ended TW loans. US loans are always open-ended. |
 | `--data-dir DIR` | `data/` | Set the cache directory. |
@@ -149,12 +151,12 @@ The command applies `--from` and `--to` to every input. It then uses the exact i
 
 One basis point is 0.01%. One hundred basis points are 1%.
 
-| Market and symbol | Fee | Minimum fee | Sell tax | Slippage |
-|---|---|---|---|---|
-| US | 0 bps (0%) | 0 TWD | 0 bps (0%) | 0 bps (0%) |
-| Taiwan ordinary bond ETF (`00...B`) | 3.99 bps (0.0399%) | 20 TWD per order | 0 bps (0%) through 2026-12-31 | 0 bps (0%) |
-| Other Taiwan `00` or `02` ETN | 3.99 bps (0.0399%) | 20 TWD per order | 10 bps (0.10%) | 0 bps (0%) |
-| Other Taiwan symbol | 3.99 bps (0.0399%) | 20 TWD per order | 30 bps (0.30%) | 0 bps (0%) |
+| Market and symbol | Fee | Minimum fee | Sell tax | Per-share sell fee | Slippage |
+|---|---|---|---|---|---|
+| US | 0 bps (0%) | — | 0.206 bps (SEC fee, effective 2026-04-04) | $0.000195/share, $0.01 floor, $9.79 cap (TAF, effective 2026-01-01) | 0 bps (0%) |
+| Taiwan ordinary bond ETF (`00...B`) | 3.99 bps (0.0399%) | 20 TWD per order | 0 bps (0%) through 2026-12-31 | — | 0 bps (0%) |
+| Other Taiwan `00` or `02` ETN | 3.99 bps (0.0399%) | 20 TWD per order | 10 bps (0.10%) | — | 0 bps (0%) |
+| Other Taiwan symbol | 3.99 bps (0.0399%) | 20 TWD per order | 30 bps (0.30%) | — | 0 bps (0%) |
 
 Leveraged and inverse bond ETFs end in `L` or `R`, not `B`, so they use the 10 bps ETF rate.
 

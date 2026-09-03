@@ -130,11 +130,40 @@ Split factors are snapped to the nearest small rational p/q (p and q at most 50)
 
 ### Costs and taxes
 
-A US trade pays no commission, tax, or slippage by default. Override with `--fee-bps`, `--tax-bps`, and `--slip-bps`.
+A US trade pays no commission by default. Alpaca charges zero commission for equities.
+
+Sell-side regulatory fees:
+
+| Fee | Rate | Effective | Source |
+|---|---|---|---|
+| SEC fee | 0.206 bps ($20.60 per $1,000,000) | 2026-04-04 | SEC fiscal-year schedule |
+| FINRA TAF | $0.000195 per share, $0.01 floor, $9.79 cap | 2026-01-01 | FINRA fee schedule |
+
+The SEC fee applies as the default `tax_bps` for US sells. The TAF applies only when `--capital` supplies a dollar scale. Without `--capital`, per-share dollar amounts are inactive.
+
+Override with `--fee-bps`, `--tax-bps`, `--slip-bps`, `--per-share-fee`, and `--per-share-cap`.
 
 ### Margin financing
 
 US margin defaults to the Reg T initial-margin ratio of 50%. US loan lots are always open-ended: there is no term maturity, and `--loan-term-months` does not apply. `--financing-ratio` overrides the default.
+
+Financing interest is a liability at 6.25% per year by default (`--financing-rate`). The Alpaca formula is `daily_charge = debit_balance * rate / 360`. Interest starts on the next trading bar (T+1) after a loan lot originates. Repayment settles interest through T+1 after the repayment bar. The engine caps this tail at the last bar instead of extrapolating beyond the data.
+
+Maintenance uses a tiered required-margin table evaluated at each close on the money series:
+
+| Close price | Required margin |
+|---|---|
+| Below $2.50 | 100% of position value |
+| $2.50 to $5.99 | 50% of position value |
+| $6.00 and above | 30% of position value |
+
+The required margin is the sum of each long position's tier rate times its position value. The account passes while equity is at least the required margin.
+
+`--maintenance-ratio PCT` overrides the entire table with one flat rate. Use this for leveraged ETFs that carry house requirements (2x ETFs at 50%, 3x ETFs at 75%).
+
+A breach at close schedules a next-open minimum cure. The engine sells the smallest proportional fraction of margin inventory whose proceeds (after repaying the associated loan share and paying costs) restore equity to at least the required margin. Positions survive partially. This matches the Alpaca policy of liquidating only enough to reduce the margin requirement sufficiently.
+
+If equity is zero or less at any close, the solvency guard sells all inventories, keeps any unpaid debt as residual liability, and freezes the account. Bankruptcy and the solvency guard are shared with TW.
 
 ### Dividends
 
@@ -144,5 +173,10 @@ US dividends become cash on their ex-date with no receivable period. When divide
 
 ### Gap between simulation and the real market
 
-- Pattern-day-trader rules and FINRA maintenance requirements are not modeled.
+- Leveraged-ETF house requirements (2x 50%, 3x 75%) and short tiers are not auto-classified. Use `--maintenance-ratio` to set the correct rate.
+- The concentration rule (single position at 70% of equities value with a margin balance of $100,000 or more raises that position to 50%) is not modeled.
+- Intraday buying power (4x) and the intraday margin framework are out of scope. The engine is end-of-day.
+- Elite-tier margin pricing (4.75%) is a `--financing-rate` override, not a default.
+- CAT fee pass-throughs are not modeled.
 - No short selling or borrow costs are modeled.
+- Pattern-day-trader rules are not modeled.

@@ -115,7 +115,7 @@ Do not change these types or formats:
 - Engine fill modes: `Close_same` fills at the decision close. `Open_next` fills at the next open.
 - Margin accounting keeps separate cash and margin inventories for each asset. Equity subtracts loans, accrued interest, and residual debt.
 - Buys use cash first. A fresh margin buy takes a standard exchange-ratio loan. Refinancing uses a sell and buy pair with full costs on both legs. Interest is a liability that settles with repayment.
-- Maintenance is total margin inventory value divided by total loans. A margin call sells only margin inventories. Bankruptcy sells everything, keeps residual debt, and freezes the account.
+- TW maintenance is total margin inventory value divided by total loans. Below the threshold (130% by default), a margin call sells all margin inventories. US maintenance is equity over a tiered or flat required margin. Below the required level, a minimum-cure sell reduces margin just enough. `margin.maintenance_override` is `float option`: `None` uses the market default, `Some v` overrides. Bankruptcy sells everything, keeps residual debt, and freezes the account.
 - The engine assumes every Taiwan symbol is marginable at the standard TWSE or TPEX ratio. Broker eligibility and reduced ratios, including possible limits on leveraged ETFs such as 00685L, are outside the model.
 - TW cache header: `date,open,high,low,close,volume`
 - Dividend cache header: `date,factor`
