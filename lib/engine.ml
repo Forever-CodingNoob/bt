@@ -1783,6 +1783,10 @@ let run ?dividends ?(dividend_tax = 0.)
                 if total_with_tail > 0. then
                   let owed = total_with_tail *. fraction in
                   let payment = Float.min !cash owed in
+                  let shortfall = owed -. payment in
+                  let () =
+                    if shortfall > 0. then debt := !debt +. shortfall
+                  in
                   let () = cash := !cash -. payment in
                   scale_lots index (1. -. fraction)
               in

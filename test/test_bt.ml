@@ -4046,6 +4046,50 @@ let test_us_cure_interest_single_charge () =
   assert_close ~tolerance:1e-12 0.396 (final_equity result)
 
 
+let test_cure_shortfall_preserves_liability () =
+  (* Two US assets, ratio 0.5.  B (index 0) drops from $100 to $40,
+     making it underwater (loan 0.5 > margin 0.4).  A (index 1) stays
+     flat.  Equity stays positive at 0.4.
+     The engine puts everything into margin (no cash_values) because
+     sum(targets)=2 > 1.  Maintenance breach at bar-1 close triggers
+     minimum_cure at bar-2 open.  B is processed first (index 0).
+     Derivation:
+       pre-cure: equity = 0 + 1.4 - 1.0 = 0.4
+       total_margin = 0.4 + 1.0 = 1.4
+       required = 0.3*0.4 + 0.3*1.0 = 0.42,  deficit = 0.02
+       relief = 0.42 / 1.4 = 0.3,  sell_total = 0.02/0.3 = 1/15
+       fraction = (1/15)/1.4 = 1/21
+       sell_B = 1/21 * 0.4 = 4/210,  owed_B = 0.5/21 = 5/210
+       payment_B = min(4/210, 5/210) = 4/210
+       shortfall = 1/210  (must be routed to debt)
+     Final equity after force-close: 0.4.
+     Without fix: 17/42 (overstated by 1/210). *)
+  let bars_a =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 100. 100.;
+       bar "2020-01-03" 100. 100. |]
+  in
+  let bars_b =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 40. 40.;
+       bar "2020-01-03" 40. 40. |]
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.; maintenance_override = None;
+      ratios = [| 0.5; 0.5 |]; loan_term_months = None }
+  in
+  let result =
+    Engine.run ~profile:us_profile
+      [| ("us/B", bars_b); ("us/A", bars_a) |]
+      { Engine.targets = [| [| 1.; 1.; 1. |]; [| 1.; 1.; 1. |] |] }
+      [| zero_costs; zero_costs |] ~margin ~capital:None
+      ~fill:Engine.Close_same
+  in
+  assert (result.margin_stats.Engine.margin_call_dates = ["2020-01-02"]);
+  (* Equity conservation: unpaid cure liability preserved as debt *)
+  assert_close ~tolerance:1e-12 0.4 (final_equity result)
+
+
 let () =
   test_profile_of_market ();
   test_parser ();
@@ -4169,4 +4213,5 @@ let () =
   test_us_maintenance_flat_override ();
   test_tw_maintenance_override_none ();
   test_us_cure_interest_single_charge ();
+  test_cure_shortfall_preserves_liability ();
   print_endline "ok"
