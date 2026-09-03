@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- A strategy may declare the same stock symbol multiple times under distinct aliases (needed for analog runs mapping several legs to one underlying); duplicate-alias and mixed-alias guards remain.
+
 ## [0.7.0] - 2026-09-02
 
 ### Added

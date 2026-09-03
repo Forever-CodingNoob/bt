@@ -398,14 +398,8 @@ let stocks_of ~filename statements =
         "%s: mix of aliased and unaliased stock statements" filename)
   in
   let seen_alias = Hashtbl.create 4 in
-  let seen_spec = Hashtbl.create 4 in
   List.map
     (fun (spec, alias) ->
-      let () =
-        if Hashtbl.mem seen_spec spec then
-          failwith (Printf.sprintf "%s: duplicate stock %s" filename spec)
-      in
-      let () = Hashtbl.replace seen_spec spec () in
       let () =
         match alias with
         | None -> ()

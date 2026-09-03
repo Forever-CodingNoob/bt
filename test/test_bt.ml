@@ -2922,8 +2922,6 @@ let test_multi_stock_errors () =
   expect "stock \"tw/A\"\nstock \"tw/B\"\ntarget 1.0\n";
   (* duplicate alias *)
   expect "stock \"tw/A\" as a\nstock \"tw/B\" as a\na.target 1.0\n";
-  (* duplicate symbol *)
-  expect "stock \"tw/A\" as a\nstock \"tw/A\" as b\na.target 1.0\nb.target 1.0\n";
   (* alias collides with a builtin *)
   expect "stock \"tw/A\" as sma\nsma.target 1.0\n";
   (* alias collides with a predefined series *)
