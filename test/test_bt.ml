@@ -4008,6 +4008,44 @@ let test_tw_maintenance_override_none () =
    | None -> assert false)
 
 
+let test_us_cure_interest_single_charge () =
+  (* Entry at $10, target 2.0, ratio 0.5 → mv = 2.0, loan = 1.0.
+     financing_rate 36%/yr (/360) so 0.001 per day per unit principal.
+     Bar 0 (2020-01-02 Thu): entry, no interest (T+1 lag).
+     Bar 1 (2020-01-03 Fri): price $7, mv = 1.4. No interest (bar 1,
+       settlement_start 1, 1>1 false). equity = 0.4.
+       required = 0.42. Breach.
+     Bar 2 (2020-01-06 Mon): 3 calendar days of interest:
+       1.0 * 0.36 * 3/360 = 0.003.  equity = 0.397.
+       Cure at open. Tail = 1 day (Mon→Tue) = 0.001.
+       The sold fraction's settlement includes the tail.  The surviving
+       lots keep their original interest and accrue normally.
+     Bar 3 (2020-01-07 Tue): accrue 1 day. target goes to 0, sell all.
+     The interest for the tail window must be charged exactly once.
+     With the correct single-charge, final equity is strictly higher
+     than the double-charge. *)
+  let bars =
+    [| bar "2020-01-02" 10. 10.;
+       bar "2020-01-03" 7. 7.;
+       bar "2020-01-06" 7. 7.;
+       bar "2020-01-07" 7. 7. |]
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.36; maintenance_override = None;
+      ratios = [| 0.5 |]; loan_term_months = None }
+  in
+  let result =
+    Engine.run ~profile:us_profile [| ("us/TEST", bars) |]
+      { Engine.targets = [| [| 2.; 2.; 2.; 0. |] |] }
+      [| zero_costs |] ~margin ~capital:None ~fill:Engine.Close_same
+  in
+  (* Tail interest for the cured fraction (1 day, 0.001 per unit
+     principal) must not inflate the surviving lots.  The expected
+     equity is derived under a single charge of the tail window.
+     With the double-charge bug, equity is ~0.001*(1-f) lower. *)
+  assert_close ~tolerance:1e-12 0.396 (final_equity result)
+
+
 let () =
   test_profile_of_market ();
   test_parser ();
@@ -4130,4 +4168,5 @@ let () =
   test_us_minimum_cure ();
   test_us_maintenance_flat_override ();
   test_tw_maintenance_override_none ();
+  test_us_cure_interest_single_charge ();
   print_endline "ok"

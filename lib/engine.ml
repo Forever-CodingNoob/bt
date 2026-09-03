@@ -356,6 +356,19 @@ let run ?dividends ?(dividend_tax = 0.)
     String.length stock >= 3
     && stock.[0] = 'u' && stock.[1] = 's' && stock.[2] = '/'
   in
+  let tier_rate index price_at =
+    match margin.maintenance_override with
+    | Some flat -> flat
+    | None -> us_tier_rate (price_at index)
+  in
+  let required_margin price_at =
+    fold_assets
+      (fun acc index ->
+        let value = total_value index in
+        if value > 0. then acc +. tier_rate index price_at *. value
+        else acc)
+      0.
+  in
   let settle_debt_from_cash () =
     if !cash > 0. && !debt > 0. then
       let payment = Float.min !cash !debt in
@@ -659,23 +672,7 @@ let run ?dividends ?(dividend_tax = 0.)
         match profile.maintenance with
         | Collateral_over_loan -> sum margin_values /. total_loan
         | Equity_over_required ->
-            let required =
-              match margin.maintenance_override with
-              | Some flat ->
-                  fold_assets
-                    (fun acc index ->
-                      let value = total_value index in
-                      if value > 0. then acc +. flat *. value else acc)
-                    0.
-              | None ->
-                  fold_assets
-                    (fun acc index ->
-                      let value = total_value index in
-                      if value > 0. then
-                        acc +. us_tier_rate (price_at index) *. value
-                      else acc)
-                    0.
-            in
+            let required = required_margin price_at in
             if required > 0. then equity () /. required else Float.infinity
       in
       let () =
@@ -1705,23 +1702,7 @@ let run ?dividends ?(dividend_tax = 0.)
     if total_margin <= 0. || e <= 0. then
       bankrupt_all ~bar_index ~date price_at
     else
-      let required =
-        match margin.maintenance_override with
-        | Some flat ->
-            fold_assets
-              (fun acc index ->
-                let value = total_value index in
-                if value > 0. then acc +. flat *. value else acc)
-              0.
-        | None ->
-            fold_assets
-              (fun acc index ->
-                let value = total_value index in
-                if value > 0. then
-                  acc +. us_tier_rate (price_at index) *. value
-                else acc)
-              0.
-      in
+      let required = required_margin price_at in
       if e >= required then ()
       else
         let deficit = required -. e in
@@ -1732,12 +1713,7 @@ let run ?dividends ?(dividend_tax = 0.)
           fold_assets
             (fun acc index ->
               if margin_values.(index) > 0. then
-                let rate =
-                  match margin.maintenance_override with
-                  | Some flat -> flat
-                  | None -> us_tier_rate (price_at index)
-                in
-                acc +. rate *. margin_values.(index)
+                acc +. tier_rate index price_at *. margin_values.(index)
               else acc)
             0.
         in
@@ -1795,17 +1771,20 @@ let run ?dividends ?(dividend_tax = 0.)
                   margin_values.(index) -. sell_amount
               in
               let () = cash := !cash +. sell_amount -. cost_value in
-              let () = capitalize_tail_interest index bar_index in
-              let total_owed =
-                loan_at index +. interest_at index
-              in
+              (* Settle the cured fraction's share of loans, accrued
+                 interest, and tail interest.  Do NOT capitalize tail
+                 into surviving lots: they continue accruing normally
+                 and the tail window will be charged once on their
+                 eventual sell or force-close. *)
+              let tail = tail_interest_at index bar_index in
+              let base = loan_at index +. interest_at index in
+              let total_with_tail = base +. tail in
               let () =
-                if total_owed > 0. then
-                  let owed = total_owed *. fraction in
+                if total_with_tail > 0. then
+                  let owed = total_with_tail *. fraction in
                   let payment = Float.min !cash owed in
-                  let remaining = 1. -. payment /. total_owed in
                   let () = cash := !cash -. payment in
-                  scale_lots index remaining
+                  scale_lots index (1. -. fraction)
               in
               let () =
                 if !cash < 0. then
@@ -1958,24 +1937,7 @@ let run ?dividends ?(dividend_tax = 0.)
           | Equity_over_required ->
               let () = ignore (track_maintenance close_price_at) in
               let e = equity () in
-              let required =
-                match margin.maintenance_override with
-                | Some flat ->
-                    fold_assets
-                      (fun acc index ->
-                        let value = total_value index in
-                        if value > 0. then acc +. flat *. value else acc)
-                      0.
-                | None ->
-                    fold_assets
-                      (fun acc index ->
-                        let value = total_value index in
-                        if value > 0. then
-                          acc
-                          +. us_tier_rate (close_price_at index) *. value
-                        else acc)
-                      0.
-              in
+              let required = required_margin close_price_at in
               if total_loans () > 0. && e < required then
                 let () = record_call date in
                 pending_liquidation := true
