@@ -172,8 +172,8 @@ let run argv =
   let slip_bps = ref None in
   let min_fee = ref None in
   let dividend_tax = ref 0. in
-  let financing_rate = ref 6.35 in
-  let maintenance_ratio = ref 130. in
+  let financing_rate = ref None in
+  let maintenance_ratio = ref None in
   let financing_ratio = ref None in
   let loan_term_months = ref 18 in
   let data_dir = ref "data" in
@@ -210,11 +210,11 @@ let run argv =
        Arg.Set_float dividend_tax,
        "dividend tax percent (default 0)");
       ("--financing-rate",
-       Arg.Float (fun value -> financing_rate := value),
-       "annual financing rate percent");
+       Arg.Float (fun value -> financing_rate := Some value),
+       "annual financing rate percent (default: market profile)");
       ("--maintenance-ratio",
-       Arg.Float (fun value -> maintenance_ratio := value),
-       "maintenance ratio percent");
+       Arg.Float (fun value -> maintenance_ratio := Some value),
+       "maintenance ratio percent (default: market profile)");
       ("--financing-ratio",
        Arg.Float (fun value -> financing_ratio := Some value),
        "uniform financing ratio percent");
@@ -242,9 +242,6 @@ let run argv =
   if strategy_files = [] then usage_error "run: at least one STRAT file is required";
   if !loan_term_months < 0 then
     usage_error "run: --loan-term-months must be 0 or greater";
-  (match !baseline with
-   | Some (("tw" | "us"), _) | None -> ()
-   | Some _ -> usage_error "run: --baseline market must be tw or us");
   let names = List.map strategy_name strategy_files in
   let seen = Hashtbl.create (List.length names) in
   List.iter
@@ -255,11 +252,49 @@ let run argv =
     names;
   if !baseline <> None && List.exists (( = ) "baseline") names then
     usage_error "run: strat basename \"baseline\" conflicts with --baseline";
-  let inputs =
+  let parsed =
     List.map2
       (fun path name ->
         let ast = Btlib.Dsl.parse_file path in
         let stocks = Btlib.Dsl.stocks_of ~filename:path ast in
+        (name, ast, stocks, Btlib.Dsl.declared_params_ast ast))
+      strategy_files names
+  in
+  let all_markets =
+    List.concat_map
+      (fun (_, _, stocks, _) ->
+        List.map (fun (_, market, _) -> market) stocks)
+      parsed
+  in
+  let all_markets =
+    match !baseline with
+    | None -> all_markets
+    | Some (market, _) -> market :: all_markets
+  in
+  let market =
+    match all_markets with
+    | [] -> usage_error "run: no stocks declared"
+    | first :: rest ->
+        if List.for_all (( = ) first) rest then first
+        else usage_error "run: all stocks must share one market"
+  in
+  let profile = Btlib.Engine.profile_of_market market in
+  let financing_rate =
+    match !financing_rate with
+    | Some v -> v
+    | None -> profile.Btlib.Engine.default_financing_rate
+  in
+  let maintenance_ratio =
+    match !maintenance_ratio with
+    | Some v -> v
+    | None ->
+        (match profile.Btlib.Engine.maintenance with
+         | Btlib.Engine.Collateral_over_loan -> 130.
+         | Btlib.Engine.Equity_over_required -> 25.)
+  in
+  let inputs =
+    List.map
+      (fun (name, ast, stocks, declarations) ->
         let assets =
           List.map
             (fun (_, market, symbol) ->
@@ -267,12 +302,8 @@ let run argv =
                 ~from_:!from_ ~to_:!to_ ~data_dir:!data_dir)
             stocks
         in
-        { name;
-          stocks;
-          ast;
-          declarations = Btlib.Dsl.declared_params_ast ast;
-          assets })
-      strategy_files names
+        { name; stocks; ast; declarations; assets })
+      parsed
   in
   let baseline_asset =
     match !baseline with
@@ -385,8 +416,8 @@ let run argv =
             (List.map (fun (_, market, symbol) -> ratio_for market symbol) input.stocks)
         in
         let margin_config : Btlib.Engine.margin =
-          { financing_rate = !financing_rate /. 100.;
-            maintenance_ratio = !maintenance_ratio /. 100.;
+          { financing_rate = financing_rate /. 100.;
+            maintenance_ratio = maintenance_ratio /. 100.;
             ratios;
             loan_term_months =
               if List.exists
@@ -400,7 +431,7 @@ let run argv =
           Btlib.Engine.run ~dividends
             ~dividend_tax:(!dividend_tax /. 100.)
             engine_assets strategy costs
-            ~margin:margin_config ~capital:!capital ~fill:!fill
+            ~profile ~margin:margin_config ~capital:!capital ~fill:!fill
         in
         (input.name, String.concat "+" labels, result))
       inputs
@@ -415,8 +446,8 @@ let run argv =
           apply_cost_overrides defaults !fee_bps !tax_bps !slip_bps !min_fee
         in
         let margin_config : Btlib.Engine.margin =
-          { financing_rate = !financing_rate /. 100.;
-            maintenance_ratio = !maintenance_ratio /. 100.;
+          { financing_rate = financing_rate /. 100.;
+            maintenance_ratio = maintenance_ratio /. 100.;
             ratios = [| ratio_for market symbol |];
             loan_term_months =
               (match market with
@@ -428,7 +459,7 @@ let run argv =
              ~dividend_tax:(!dividend_tax /. 100.)
              [| (market ^ "/" ^ symbol, bars) |]
              (baseline_strategy (Array.length bars)) [| costs |]
-             ~margin:margin_config
+             ~profile ~margin:margin_config
              ~capital:!capital ~fill:!fill)
   in
   let columns =
@@ -440,7 +471,7 @@ let run argv =
   let output_stem = Btlib.Report.stem ~names ~out_name:!out_name in
   Btlib.Report.print_many
     ~columns ~baseline:baseline_result ~fill:!fill ~stocks
-    ~financing_rate:!financing_rate;
+    ~financing_rate;
   Btlib.Report.write_outputs
     ~out_dir:!out_dir ~stem:output_stem
     ~columns ~baseline:baseline_result;

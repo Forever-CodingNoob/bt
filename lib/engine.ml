@@ -88,6 +88,32 @@ type receivable = {
   receivable_margin : float;
 }
 
+type maintenance_model =
+  | Collateral_over_loan
+  | Equity_over_required
+
+type market_profile = {
+  interest_day_count : float;
+  settlement_lag : int;
+  maintenance : maintenance_model;
+  default_financing_rate : float;
+}
+
+let profile_of_market = function
+  | "tw" ->
+      { interest_day_count = 365.;
+        settlement_lag = 2;
+        maintenance = Collateral_over_loan;
+        default_financing_rate = 6.35 }
+  | "us" ->
+      { interest_day_count = 360.;
+        settlement_lag = 1;
+        maintenance = Equity_over_required;
+        default_financing_rate = 6.25 }
+  | market ->
+      invalid_arg
+        (Printf.sprintf "Engine.profile_of_market: unknown market %S" market)
+
 
 let default_costs ~market ~symbol =
   match String.lowercase_ascii market with
@@ -146,7 +172,7 @@ let market_of_label label =
 
 let run ?dividends ?(dividend_tax = 0.)
     (assets : (string * Data.bar array) array) (strategy : strategy)
-    (costs : costs array) ~(margin : margin)
+    (costs : costs array) ~(profile : market_profile) ~(margin : margin)
     ~capital:(capital : float option) ~fill =
   let asset_count = Array.length assets in
   let () =
@@ -259,20 +285,20 @@ let run ?dividends ?(dividend_tax = 0.)
         :: margin_lots.(index)
   in
   let settlement_start_index lot =
-    Int.min last_index (lot.origination_index + 2)
+    Int.min last_index (lot.origination_index + profile.settlement_lag)
   in
   let tail_interest_for_lot index bar_index lot =
     let start_index =
       Int.max bar_index (settlement_start_index lot)
     in
-    let stop_index = Int.min last_index (bar_index + 2) in
+    let stop_index = Int.min last_index (bar_index + profile.settlement_lag) in
     if stop_index > start_index then
       let days =
         day_number (date_at index stop_index)
         - day_number (date_at index start_index)
       in
       lot.principal *. margin.financing_rate
-      *. float_of_int days /. 365.
+      *. float_of_int days /. profile.interest_day_count
     else 0.
   in
   let tail_interest_at index bar_index =
@@ -818,7 +844,7 @@ let run ?dividends ?(dividend_tax = 0.)
             lot.interest <-
               lot.interest
               +. lot.principal *. margin.financing_rate
-                 *. float_of_int days /. 365.)
+                 *. float_of_int days /. profile.interest_day_count)
         margin_lots.(index))
   in
   let apply_fills ~bar_index ~date ~eff ~clamped ~force price_at =

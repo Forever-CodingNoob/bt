@@ -53,6 +53,22 @@ type result = {
   margin_stats : margin_stats;
 }
 
+(** TW collateral-over-loan or US equity-over-required maintenance. *)
+type maintenance_model =
+  | Collateral_over_loan
+  | Equity_over_required
+
+(** Per-market simulation constants. *)
+type market_profile = {
+  interest_day_count : float;
+  settlement_lag : int;
+  maintenance : maintenance_model;
+  default_financing_rate : float;
+}
+
+(** Return the market profile. Fails on unknown markets. *)
+val profile_of_market : string -> market_profile
+
 (** Return the default transaction costs for a market and symbol. *)
 val default_costs : market:string -> symbol:string -> costs
 
@@ -64,6 +80,7 @@ val run :
   (string * Data.bar array) array ->
   strategy ->
   costs array ->
+  profile:market_profile ->
   margin:margin ->
   capital:float option ->
   fill:fill ->
