@@ -74,7 +74,8 @@ let fill_bars =
      bar "2020-01-07" 114. 116. |]
 
 let zero_costs : Engine.costs =
-  { fee_bps = 0.; tax_bps = 0.; slip_bps = 0.; min_fee = 0. }
+  { fee_bps = 0.; tax_bps = 0.; slip_bps = 0.; min_fee = 0.;
+    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
 
 let test_default_costs () =
   let tax_bps symbol =
@@ -392,7 +393,8 @@ let test_funding_clamp_covers_fixed_refinance_costs () =
        bar "2020-01-03" 1. 1. |]
   in
   let costs : Engine.costs =
-    { fee_bps = 0.; tax_bps = 0.; slip_bps = 0.; min_fee = 50. }
+    { fee_bps = 0.; tax_bps = 0.; slip_bps = 0.; min_fee = 50.;
+    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let margin : Engine.margin =
     { financing_rate = 0.; maintenance_ratio = 0.; ratios = [| 0.6 |];
@@ -653,7 +655,8 @@ let test_engine_insolvent_min_fee () =
        bar "2020-01-02" 50. 50. |]
   in
   let costs : Engine.costs =
-    { fee_bps = 3.99; tax_bps = 0.; slip_bps = 0.; min_fee = 20. }
+    { fee_bps = 3.99; tax_bps = 0.; slip_bps = 0.; min_fee = 20.;
+    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let margin : Engine.margin =
     { financing_rate = 0.; maintenance_ratio = 1.3; ratios = [| 0.6 |];
@@ -696,7 +699,8 @@ let test_engine_exit_fee_bankruptcy () =
        bar "2020-01-03" 50.05 50.05 |]
   in
   let costs : Engine.costs =
-    { fee_bps = 3.99; tax_bps = 0.; slip_bps = 0.; min_fee = 20. }
+    { fee_bps = 3.99; tax_bps = 0.; slip_bps = 0.; min_fee = 20.;
+    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let margin : Engine.margin =
     { financing_rate = 0.; maintenance_ratio = 0.; ratios = [| 0.6 |];
@@ -899,7 +903,8 @@ let test_us_dividend_refill_cost () =
        bar "2020-01-03" 100. 100. |]
   in
   let costs : Engine.costs =
-    { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0. }
+    { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0.;
+    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let result =
     run_with_dividends ~stock:"us/TEST" bars
@@ -1027,7 +1032,8 @@ let test_unlevered_dividend_refill_cash_clamp () =
        bar "2020-01-04" pay_price pay_price |]
   in
   let costs : Engine.costs =
-    { fee_bps = 3.99; tax_bps = 0.; slip_bps = 0.; min_fee = 0. }
+    { fee_bps = 3.99; tax_bps = 0.; slip_bps = 0.; min_fee = 0.;
+    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let margin : Engine.margin =
     { financing_rate = 0.; maintenance_ratio = 0.; ratios = [| 0.6 |];
@@ -1105,7 +1111,8 @@ let test_engine_buyhold_costs () =
     [| bar "2020-01-01" 100. 100.; bar "2020-01-02" 100. 110. |]
   in
   let costs : Engine.costs =
-    { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0. }
+    { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0.;
+    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let result =
     run_single bars [| 1.; 1. |] costs ~capital:None ~fill:Engine.Close_same
@@ -1162,7 +1169,8 @@ let test_engine () =
   in
   assert_close ~tolerance:1e-12 engine_zero_expected (final_equity zero_result);
   let fee_costs : Engine.costs =
-    { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0. }
+    { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0.;
+    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let fee_result =
     run_single sample_bars target fee_costs ~capital:None ~fill:Engine.Open_next
@@ -1192,7 +1200,8 @@ let test_engine_close () =
 let test_engine_close_costs () =
   let target = [|0.; 1.; 1.; 0.; 0.|] in
   let costs : Engine.costs =
-    { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0. }
+    { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0.;
+    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let result =
     run_single fill_bars target costs ~capital:None ~fill:Engine.Close_same
@@ -1216,7 +1225,8 @@ let test_engine_close_costs () =
 let test_engine_min_fee () =
   let target = [| 0.; 1.; 1.; 0.; 0. |] in
   let costs : Engine.costs =
-    { fee_bps = 3.99; tax_bps = 0.; slip_bps = 0.; min_fee = 20. }
+    { fee_bps = 3.99; tax_bps = 0.; slip_bps = 0.; min_fee = 20.;
+    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let result =
     run_single fill_bars target costs
@@ -1240,7 +1250,8 @@ let test_engine_min_fee () =
 let test_engine_min_fee_without_capital () =
   let target = [| 0.; 1.; 1.; 0.; 0. |] in
   let costs : Engine.costs =
-    { fee_bps = 3.99; tax_bps = 0.; slip_bps = 0.; min_fee = 20. }
+    { fee_bps = 3.99; tax_bps = 0.; slip_bps = 0.; min_fee = 20.;
+    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let result =
     run_single fill_bars target costs ~capital:None ~fill:Engine.Close_same
@@ -1275,7 +1286,8 @@ let test_engine_partial () =
 let test_engine_partial_costs () =
   let target = [|0.; 0.5; 1.; 0.5; 0.|] in
   let costs : Engine.costs =
-    { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0. }
+    { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0.;
+    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let result =
     run_single fill_bars target costs ~capital:None ~fill:Engine.Close_same
@@ -1325,7 +1337,8 @@ let test_engine_partial_open () =
 let test_engine_partial_open_costs () =
   let target = [| 0.; 0.5; 1.; 0.5; 0. |] in
   let costs : Engine.costs =
-    { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0. }
+    { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0.;
+    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let result =
     run_single fill_bars target costs ~capital:None ~fill:Engine.Open_next
@@ -1404,10 +1417,12 @@ let test_engine_portfolio_costs () =
        bar "2020-01-03" 45. 54. |]
   in
   let a_costs : Engine.costs =
-    { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0. }
+    { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0.;
+    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let b_costs : Engine.costs =
-    { fee_bps = 0.; tax_bps = 100.; slip_bps = 0.; min_fee = 0. }
+    { fee_bps = 0.; tax_bps = 100.; slip_bps = 0.; min_fee = 0.;
+    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let result =
     Engine.run ~profile:tw_profile [| ("tw/A", a); ("tw/B", b) |]
@@ -1448,7 +1463,8 @@ let test_engine_portfolio_min_fee () =
        bar "2020-01-02" 50. 50. |]
   in
   let costs : Engine.costs =
-    { fee_bps = 3.99; tax_bps = 0.; slip_bps = 0.; min_fee = 20. }
+    { fee_bps = 3.99; tax_bps = 0.; slip_bps = 0.; min_fee = 20.;
+    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let result =
     Engine.run ~profile:tw_profile [| ("tw/A", a); ("tw/B", b) |]
@@ -1651,7 +1667,8 @@ let test_golden () =
     Dsl.compile (sma_strategy_path ()) ~params:["fast", 5.; "slow", 20.] bars
   in
   let costs : Engine.costs =
-    { fee_bps = 0.; tax_bps = 0.; slip_bps = 0.; min_fee = 0. }
+    { fee_bps = 0.; tax_bps = 0.; slip_bps = 0.; min_fee = 0.;
+    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let result =
     Engine.run ~profile:tw_profile [| ("tw/TEST", bars) |] strategy [| costs |]
@@ -2941,7 +2958,8 @@ let test_e1_order_independence () =
     [| bar "2020-01-01" price price; bar "2020-01-02" price price |]
   in
   let costs : Engine.costs =
-    { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0. }
+    { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0.;
+    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let margin : Engine.margin =
     { financing_rate = 0.; maintenance_ratio = 0.;
@@ -3018,7 +3036,8 @@ let test_sell_only_fee_does_not_refinance () =
        bar "2020-01-03" 0.1 0.1 |]
   in
   let costs : Engine.costs =
-    { fee_bps = 0.; tax_bps = 0.; slip_bps = 0.; min_fee = 20. }
+    { fee_bps = 0.; tax_bps = 0.; slip_bps = 0.; min_fee = 20.;
+    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let margin : Engine.margin =
     { financing_rate = 0.; maintenance_ratio = 0.;
@@ -3055,7 +3074,8 @@ let test_residual_debt_does_not_force_refinance () =
        bar "2020-01-03" 100. 100. |]
   in
   let fee_costs : Engine.costs =
-    { fee_bps = 0.; tax_bps = 0.; slip_bps = 0.; min_fee = 20. }
+    { fee_bps = 0.; tax_bps = 0.; slip_bps = 0.; min_fee = 20.;
+    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let margin : Engine.margin =
     { financing_rate = 0.; maintenance_ratio = 0.;
@@ -3125,7 +3145,8 @@ let test_refinance_costs () =
        bar "2020-01-03" 100. 100. |]
   in
   let costs : Engine.costs =
-    { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0. }
+    { fee_bps = 100.; tax_bps = 0.; slip_bps = 0.; min_fee = 0.;
+    per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let margin : Engine.margin =
     { financing_rate = 0.; maintenance_ratio = 0.; ratios = [| 0.6 |];
@@ -3678,6 +3699,155 @@ let test_mixed_market_rejection () =
         assert (contains (read_file stderr_path) "all stocks must share one market")))
 
 
+let test_us_interest_day_count () =
+  (* Same bars span Mon-Mon including a weekend.  TW (T+2, /365) and
+     US (T+1, /360) must produce different equity.
+     Rate 0.365: loan = 1.
+     TW: settlement starts bar 2, accrues bars 3-5 = 5 calendar days.
+       interest = 1 * 0.365 * 5 / 365 = 0.005, equity = 0.995.
+     US: settlement starts bar 1, accrues bars 2-5 = 6 calendar days.
+       interest = 1 * 0.365 * 6 / 360, equity = 1 - that. *)
+  let bars =
+    [| bar "2020-01-06" 100. 100.;
+       bar "2020-01-07" 100. 100.;
+       bar "2020-01-08" 100. 100.;
+       bar "2020-01-09" 100. 100.;
+       bar "2020-01-10" 100. 100.;
+       bar "2020-01-13" 100. 100. |]
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.365; maintenance_ratio = 0.;
+      ratios = [| 0.6 |]; loan_term_months = None }
+  in
+  let tw_result =
+    Engine.run ~profile:tw_profile [| ("tw/TEST", bars) |]
+      { Engine.targets = [| Array.make 6 2. |] }
+      [| zero_costs |] ~margin ~capital:None ~fill:Engine.Close_same
+  in
+  let us_result =
+    Engine.run ~profile:us_profile [| ("us/TEST", bars) |]
+      { Engine.targets = [| Array.make 6 2. |] }
+      [| zero_costs |] ~margin ~capital:None ~fill:Engine.Close_same
+  in
+  assert_close ~tolerance:1e-12 0.995 (final_equity tw_result);
+  let us_expected = 1. -. 0.365 *. 6. /. 360. in
+  assert_close ~tolerance:1e-12 us_expected (final_equity us_result);
+  (* The /360 convention gives a higher daily rate, so US equity is lower. *)
+  assert (final_equity us_result < final_equity tw_result)
+
+let test_us_default_costs () =
+  (* US defaults: zero commission, SEC fee sells only, FINRA TAF. *)
+  let us = Engine.default_costs ~market:"us" ~symbol:"SPY" in
+  assert (us.Engine.fee_bps = 0.);
+  assert (us.Engine.tax_bps = 0.206);
+  assert (us.Engine.slip_bps = 0.);
+  assert (us.Engine.min_fee = 0.);
+  assert (us.Engine.per_share_sell_fee = 0.000195);
+  assert (us.Engine.per_share_sell_cap = 9.79);
+  (* TW: TAF fields are zero. *)
+  let tw = Engine.default_costs ~market:"tw" ~symbol:"0050" in
+  assert (tw.Engine.per_share_sell_fee = 0.);
+  assert (tw.Engine.per_share_sell_cap = 0.)
+
+let test_taf_per_share_charge () =
+  (* Sell 1000 shares at $10.  TAF raw = 1000 * 0.000195 = $0.195.
+     Rounded up to cent = $0.20.  Floor $0.01, cap $9.79 -> $0.20.
+     As fraction of $10000 portfolio = 0.00002. *)
+  let bars =
+    [| bar "2020-01-01" 10. 10.; bar "2020-01-02" 10. 10. |]
+  in
+  let costs : Engine.costs =
+    { fee_bps = 0.; tax_bps = 0.; slip_bps = 0.; min_fee = 0.;
+      per_share_sell_fee = 0.000195; per_share_sell_cap = 9.79 }
+  in
+  let result =
+    Engine.run ~profile:us_profile [| ("us/TEST", bars) |]
+      { Engine.targets = [| [| 1.; 0. |] |] }
+      [| costs |] ~margin:(no_margin 1) ~capital:(Some 10000.)
+      ~fill:Engine.Close_same
+  in
+  (* Entry has no cost (buy, TAF is sells only).
+     Exit: TAF $0.20 / $10000 = 0.00002.  equity = 1 - 0.00002 = 0.99998. *)
+  assert_close ~tolerance:1e-12 0.99998 (final_equity result)
+
+let test_taf_floor () =
+  (* 1 share at $10000 -> TAF raw = 0.000195.  Round up = $0.01.
+     Floor max(0.01, 0.01) = $0.01. *)
+  let bars =
+    [| bar "2020-01-01" 10000. 10000.;
+       bar "2020-01-02" 10000. 10000. |]
+  in
+  let costs : Engine.costs =
+    { fee_bps = 0.; tax_bps = 0.; slip_bps = 0.; min_fee = 0.;
+      per_share_sell_fee = 0.000195; per_share_sell_cap = 9.79 }
+  in
+  let result =
+    Engine.run ~profile:us_profile [| ("us/TEST", bars) |]
+      { Engine.targets = [| [| 1.; 0. |] |] }
+      [| costs |] ~margin:(no_margin 1) ~capital:(Some 10000.)
+      ~fill:Engine.Close_same
+  in
+  (* Shares = 1 * 10000 / 10000 = 1. raw = 0.000195 -> round up = $0.01.
+     Floor $0.01.  fraction = 0.01 / 10000 = 0.000001. *)
+  assert_close ~tolerance:1e-12 (1. -. 0.01 /. 10000.) (final_equity result)
+
+let test_taf_cap () =
+  (* 100000 shares at $1 -> TAF raw = $19.50.  Cap $9.79. *)
+  let bars =
+    [| bar "2020-01-01" 1. 1.; bar "2020-01-02" 1. 1. |]
+  in
+  let costs : Engine.costs =
+    { fee_bps = 0.; tax_bps = 0.; slip_bps = 0.; min_fee = 0.;
+      per_share_sell_fee = 0.000195; per_share_sell_cap = 9.79 }
+  in
+  let result =
+    Engine.run ~profile:us_profile [| ("us/TEST", bars) |]
+      { Engine.targets = [| [| 1.; 0. |] |] }
+      [| costs |] ~margin:(no_margin 1) ~capital:(Some 100000.)
+      ~fill:Engine.Close_same
+  in
+  (* Shares = 100000 / 1 = 100000. raw = $19.50.  Cap $9.79.
+     fraction = 9.79 / 100000 = 0.0000979. *)
+  assert_close ~tolerance:1e-12 (1. -. 9.79 /. 100000.) (final_equity result)
+
+let test_taf_inactive_without_capital () =
+  (* Without --capital, TAF fields have no effect. *)
+  let bars =
+    [| bar "2020-01-01" 10. 10.; bar "2020-01-02" 10. 10. |]
+  in
+  let costs : Engine.costs =
+    { fee_bps = 0.; tax_bps = 0.; slip_bps = 0.; min_fee = 0.;
+      per_share_sell_fee = 0.000195; per_share_sell_cap = 9.79 }
+  in
+  let result =
+    Engine.run ~profile:us_profile [| ("us/TEST", bars) |]
+      { Engine.targets = [| [| 1.; 0. |] |] }
+      [| costs |] ~margin:(no_margin 1) ~capital:None
+      ~fill:Engine.Close_same
+  in
+  (* No capital -> no TAF.  Zero bps -> equity stays 1. *)
+  assert_close ~tolerance:1e-12 1. (final_equity result)
+
+let test_taf_zero_for_tw () =
+  (* TW defaults have per_share_sell_fee = 0.  Even with capital, no TAF. *)
+  let bars =
+    [| bar "2020-01-01" 10. 10.; bar "2020-01-02" 10. 10. |]
+  in
+  let tw_costs =
+    Engine.default_costs ~market:"tw" ~symbol:"0050"
+  in
+  let costs : Engine.costs =
+    { tw_costs with fee_bps = 0.; tax_bps = 0.; min_fee = 0. }
+  in
+  let result =
+    Engine.run ~profile:tw_profile [| ("tw/TEST", bars) |]
+      { Engine.targets = [| [| 1.; 0. |] |] }
+      [| costs |] ~margin:(no_margin 1) ~capital:(Some 10000.)
+      ~fill:Engine.Close_same
+  in
+  assert_close ~tolerance:1e-12 1. (final_equity result)
+
+
 let () =
   test_profile_of_market ();
   test_parser ();
@@ -3787,4 +3957,11 @@ let () =
   test_nested_cache_layout ();
   test_event_transform ();
   test_mixed_market_rejection ();
+  test_us_interest_day_count ();
+  test_us_default_costs ();
+  test_taf_per_share_charge ();
+  test_taf_floor ();
+  test_taf_cap ();
+  test_taf_inactive_without_capital ();
+  test_taf_zero_for_tw ();
   print_endline "ok"

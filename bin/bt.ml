@@ -5,6 +5,7 @@ let usage =
    \  bt run STRAT... [--baseline M/SYM] [--from D] [--to D]\n\
    \         [-p name=value ...] [--fill open|close]\n\
    \         [--fee-bps F] [--tax-bps F] [--slip-bps F] [--min-fee F]\n\
+   \         [--per-share-fee F] [--per-share-cap F]\n\
    \         [--dividend-tax PCT] [--financing-rate PCT] [--maintenance-ratio PCT] [--financing-ratio PCT]\n\
    \         [--loan-term-months N]\n\
    \         [--capital TWD] [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]"
@@ -94,8 +95,8 @@ let parse_parameter parameters value =
   | _ ->
       raise (Arg.Bad (Printf.sprintf "invalid parameter %S; expected name=value" value))
 
-let apply_cost_overrides defaults fee_bps tax_bps slip_bps min_fee :
-    Btlib.Engine.costs =
+let apply_cost_overrides defaults fee_bps tax_bps slip_bps min_fee
+    per_share_fee per_share_cap : Btlib.Engine.costs =
   { fee_bps =
       (match fee_bps with Some value -> value | None -> defaults.Btlib.Engine.fee_bps);
     tax_bps =
@@ -103,7 +104,15 @@ let apply_cost_overrides defaults fee_bps tax_bps slip_bps min_fee :
     slip_bps =
       (match slip_bps with Some value -> value | None -> defaults.Btlib.Engine.slip_bps);
     min_fee =
-      (match min_fee with Some value -> value | None -> defaults.Btlib.Engine.min_fee) }
+      (match min_fee with Some value -> value | None -> defaults.Btlib.Engine.min_fee);
+    per_share_sell_fee =
+      (match per_share_fee with
+       | Some value -> value
+       | None -> defaults.Btlib.Engine.per_share_sell_fee);
+    per_share_sell_cap =
+      (match per_share_cap with
+       | Some value -> value
+       | None -> defaults.Btlib.Engine.per_share_sell_cap) }
 
 let load_asset ~market ~symbol ~from_ ~to_ ~data_dir =
   let cache_path =
@@ -171,6 +180,8 @@ let run argv =
   let tax_bps = ref None in
   let slip_bps = ref None in
   let min_fee = ref None in
+  let per_share_fee = ref None in
+  let per_share_cap = ref None in
   let dividend_tax = ref 0. in
   let financing_rate = ref None in
   let maintenance_ratio = ref None in
@@ -206,6 +217,12 @@ let run argv =
       ("--slip-bps", Arg.Float (fun value -> slip_bps := Some value), "slippage basis points");
       ("--min-fee", Arg.Float (fun value -> min_fee := Some value),
        "minimum fee per order in TWD");
+      ("--per-share-fee",
+       Arg.Float (fun value -> per_share_fee := Some value),
+       "FINRA TAF per-share sell fee in dollars");
+      ("--per-share-cap",
+       Arg.Float (fun value -> per_share_cap := Some value),
+       "FINRA TAF per-order cap in dollars");
       ("--dividend-tax",
        Arg.Set_float dividend_tax,
        "dividend tax percent (default 0)");
@@ -408,7 +425,8 @@ let run argv =
                (fun (_, market, symbol) ->
                  apply_cost_overrides
                    (Btlib.Engine.default_costs ~market ~symbol)
-                   !fee_bps !tax_bps !slip_bps !min_fee)
+                   !fee_bps !tax_bps !slip_bps !min_fee
+                   !per_share_fee !per_share_cap)
                input.stocks)
         in
         let ratios =
@@ -444,6 +462,7 @@ let run argv =
         let defaults = Btlib.Engine.default_costs ~market ~symbol in
         let costs =
           apply_cost_overrides defaults !fee_bps !tax_bps !slip_bps !min_fee
+            !per_share_fee !per_share_cap
         in
         let margin_config : Btlib.Engine.margin =
           { financing_rate = financing_rate /. 100.;

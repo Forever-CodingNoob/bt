@@ -5,6 +5,8 @@ type costs = {
   tax_bps : float;
   slip_bps : float;
   min_fee : float;
+  per_share_sell_fee : float;
+  per_share_sell_cap : float;
 }
 
 type fill = Open_next | Close_same
@@ -117,7 +119,9 @@ let profile_of_market = function
 
 let default_costs ~market ~symbol =
   match String.lowercase_ascii market with
-  | "us" -> { fee_bps = 0.; tax_bps = 0.; slip_bps = 0.; min_fee = 0. }
+  | "us" ->
+      { fee_bps = 0.; tax_bps = 0.206; slip_bps = 0.; min_fee = 0.;
+        per_share_sell_fee = 0.000195; per_share_sell_cap = 9.79 }
   | "tw" ->
       let length = String.length symbol in
       let starts_with_zero second =
@@ -132,7 +136,8 @@ let default_costs ~market ~symbol =
       { fee_bps = 3.99;
         tax_bps;
         slip_bps = 0.;
-        min_fee = 20. }
+        min_fee = 20.;
+        per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   | _ -> invalid_arg "Engine.default_costs: market must be tw or us"
 
 let clamp_target value =
@@ -442,7 +447,7 @@ let run ?dividends ?(dividend_tax = 0.)
     in
     !landed
   in
-  let charge index ~equity_before ~delta =
+  let charge index ~equity_before ~delta ~price =
     let costs = costs.(index) in
     let amount = abs_float delta in
     let commission = amount *. costs.fee_bps /. 10000. in
@@ -455,9 +460,25 @@ let run ?dividends ?(dividend_tax = 0.)
     let non_commission_bps =
       if delta > 0. then costs.slip_bps else costs.tax_bps +. costs.slip_bps
     in
-    commission +. amount *. non_commission_bps /. 10000.
+    let bps_cost = commission +. amount *. non_commission_bps /. 10000. in
+    let taf =
+      match capital with
+      | Some cap when delta < 0. && costs.per_share_sell_fee > 0. ->
+          let dollars = equity_before *. cap in
+          let shares = amount *. dollars /. price in
+          let raw = shares *. costs.per_share_sell_fee in
+          let rounded =
+            Float.of_int (int_of_float (Float.ceil (raw *. 100.))) /. 100.
+          in
+          let clamped =
+            Float.max 0.01 (Float.min costs.per_share_sell_cap rounded)
+          in
+          clamped /. dollars
+      | _ -> 0.
+    in
+    bps_cost +. taf
   in
-  let absolute_sell_cost index value =
+  let absolute_sell_cost index ~price value =
     let costs = costs.(index) in
     let commission = value *. costs.fee_bps /. 10000. in
     let commission =
@@ -466,8 +487,23 @@ let run ?dividends ?(dividend_tax = 0.)
           Float.max commission (costs.min_fee /. cap)
       | _ -> commission
     in
+    let taf =
+      match capital with
+      | Some cap when costs.per_share_sell_fee > 0. ->
+          let shares = value *. cap /. price in
+          let raw = shares *. costs.per_share_sell_fee in
+          let rounded =
+            Float.of_int (int_of_float (Float.ceil (raw *. 100.))) /. 100.
+          in
+          let clamped =
+            Float.max 0.01 (Float.min costs.per_share_sell_cap rounded)
+          in
+          clamped /. cap
+      | _ -> 0.
+    in
     commission
     +. value *. (costs.tax_bps +. costs.slip_bps) /. 10000.
+    +. taf
   in
   let record_fill index ~date ~price ~from_e ~to_e =
     fills :=
@@ -555,13 +591,14 @@ let run ?dividends ?(dividend_tax = 0.)
       in
       let cost_fraction =
         if equity_now > 0. then
-          Some (charge index ~equity_before:equity_now ~delta:(-. sold_e))
+          Some (charge index ~equity_before:equity_now ~delta:(-. sold_e)
+                  ~price)
         else None
       in
       let cost_value =
         match cost_fraction with
         | Some fraction -> fraction *. equity_now
-        | None -> absolute_sell_cost index amount
+        | None -> absolute_sell_cost index ~price amount
       in
       let cash_only =
         not margin_only
@@ -684,7 +721,7 @@ let run ?dividends ?(dividend_tax = 0.)
                   let value = roll_values.(index) in
                   if value > 0. then
                     charge index ~equity_before:e0
-                      ~delta:(-. value /. e0) *. e0
+                      ~delta:(-. value /. e0) ~price:(price_at index) *. e0
                   else 0.)
             in
             let cash_after_sales =
@@ -701,7 +738,7 @@ let run ?dividends ?(dividend_tax = 0.)
                   if buy > 0. then
                     let buy_cost =
                       charge index ~equity_before:e0
-                        ~delta:(buy /. e0) *. e0
+                        ~delta:(buy /. e0) ~price:(price_at index) *. e0
                     in
                     required
                     +. (1. -. margin.ratios.(index)) *. buy
@@ -757,7 +794,7 @@ let run ?dividends ?(dividend_tax = 0.)
                   if buy > 0. then
                     let buy_cost =
                       charge index ~equity_before:e0
-                        ~delta:(buy /. e0) *. e0
+                        ~delta:(buy /. e0) ~price:(price_at index) *. e0
                     in
                     let () =
                       cash :=
@@ -1074,6 +1111,7 @@ let run ?dividends ?(dividend_tax = 0.)
                 in
                 let cost =
                   charge index ~equity_before:equity_basis ~delta:delta_e
+                    ~price:(price_at index)
                   *. equity_basis
                 in
                 let () = trade_costs.(index) <- cost in
@@ -1247,11 +1285,13 @@ let run ?dividends ?(dividend_tax = 0.)
                     let sell_cost =
                       charge index ~equity_before:equity_basis
                         ~delta:(-. value /. equity_basis)
+                        ~price:(price_at index)
                       *. equity_basis
                     in
                     let buy_cost =
                       charge index ~equity_before:equity_basis
                         ~delta:(value /. equity_basis)
+                        ~price:(price_at index)
                       *. equity_basis
                     in
                     let () = cash_refinance_values.(index) <- value in
@@ -1284,11 +1324,13 @@ let run ?dividends ?(dividend_tax = 0.)
                   let sell_cost =
                     charge index ~equity_before:equity_basis
                       ~delta:(-. value /. equity_basis)
+                      ~price:(price_at index)
                     *. equity_basis
                   in
                   let buy_cost =
                     charge index ~equity_before:equity_basis
                       ~delta:(value /. equity_basis)
+                      ~price:(price_at index)
                     *. equity_basis
                   in
                   let () = margin_refinance_values.(index) <- value in

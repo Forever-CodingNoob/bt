@@ -7,6 +7,8 @@ type costs = {
   tax_bps : float;
   slip_bps : float;
   min_fee : float;
+  per_share_sell_fee : float;
+  per_share_sell_cap : float;
 }
 
 (** Price used to execute scheduled exposure changes. *)
