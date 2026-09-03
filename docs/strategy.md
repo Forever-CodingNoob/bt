@@ -95,7 +95,7 @@ Compilation fails for:
 
 - a mix of aliased and unaliased stock declarations, or more than one
   unaliased stock;
-- a duplicate alias or duplicate market/symbol;
+- a duplicate alias (the same market/symbol may appear under distinct aliases);
 - an alias that collides with a `param`, `let`, builtin, or predefined
   series name;
 - an undeclared alias, or a declared stock with no statements;

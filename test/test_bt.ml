@@ -2945,6 +2945,58 @@ let test_multi_stock_errors () =
   (* alias qualification in an unaliased file *)
   expect "stock \"tw/A\"\na.target 1.0\n"
 
+
+let test_duplicate_symbol_aliases () =
+  (* Two aliases pointing at the same market/symbol. Pre-3333b01
+     stocks_of rejected this with seen_spec; the test must fail
+     if that rejection is reintroduced. *)
+  let shared_bars =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 100. 100.;
+       bar "2020-01-03" 100. 100. |]
+  in
+  with_temp_strategy
+    "stock \"tw/0050\" as bull\n\
+     stock \"tw/0050\" as bear\n\
+     bull.target 0.6\n\
+     bear.target 0.4\n"
+    (fun path ->
+      let ast = Dsl.parse_file path in
+      (* stocks_of returns both entries with the same spec *)
+      (match Dsl.stocks_of ~filename:path ast with
+       | [ (Some "bull", "tw", "0050"); (Some "bear", "tw", "0050") ] -> ()
+       | _ -> assert false);
+      let strategy =
+        Dsl.compile_ast ast ~params:[]
+          ~assets:[ (Some "bull", shared_bars); (Some "bear", shared_bars) ]
+      in
+      (* Per-leg targets: bull constant 0.6, bear constant 0.4. *)
+      assert (strategy.Engine.targets = [| [| 0.6; 0.6; 0.6 |];
+                                           [| 0.4; 0.4; 0.4 |] |]);
+      (* Engine.run with a US dividend on the second bar so the credit
+         lands immediately into cash.  Flat price 100, zero costs,
+         no margin.  Each leg holds value proportional to its target:
+         bull 0.6 and bear 0.4.  A $10 dividend on 1 share at $100
+         credits (value / price) * cash_per_share per leg.
+
+         At entry (bar 0, close-same fill): E1 = 1 (zero costs).
+         Bull value = 0.6, bear value = 0.4, cash = 0.
+         Bar 1 ex-date: bull credit = 0.6/100 * 10 = 0.06,
+         bear credit = 0.4/100 * 10 = 0.04; sum = 0.10.
+         A single stock at target 1.0 would credit 1.0/100 * 10 = 0.10.
+         Final equity on bar 2 = 1.0 + 0.10 = 1.10. *)
+      let dividends =
+        [| [| dividend "2020-01-02" 10. "2020-01-02" |];
+           [| dividend "2020-01-02" 10. "2020-01-02" |] |]
+      in
+      let result =
+        Engine.run ~dividends ~dividend_tax:0. ~profile:us_profile
+          [| ("us/BULL", shared_bars); ("us/BEAR", shared_bars) |]
+          strategy [| zero_costs; zero_costs |]
+          ~margin:(no_margin 2) ~capital:None ~fill:Engine.Close_same
+      in
+      assert_close ~tolerance:1e-12 1.10 (final_equity result))
+
 let test_e1_order_independence () =
   (* Targets A = 0.9 and B = 0.3 cost 0.012*E1, so
      E1 = 1/(1.012) in either declaration order. Minimum down payment
@@ -4130,6 +4182,7 @@ let () =
   test_stock_statement ();
   test_multi_stock_compile ();
   test_multi_stock_errors ();
+  test_duplicate_symbol_aliases ();
   test_indicators ();
   test_target_style ();
   test_hold_tie_break ();

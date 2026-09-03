@@ -306,14 +306,25 @@ let run argv =
     | Some v -> Some (v /. 100.)
     | None -> None
   in
+  let loaded_cache = Hashtbl.create 8 in
+  let load_cached ~market ~symbol =
+    let key = (market, symbol) in
+    match Hashtbl.find_opt loaded_cache key with
+    | Some asset -> asset
+    | None ->
+        let asset =
+          load_asset ~market ~symbol
+            ~from_:!from_ ~to_:!to_ ~data_dir:!data_dir
+        in
+        let () = Hashtbl.replace loaded_cache key asset in
+        asset
+  in
   let inputs =
     List.map
       (fun (name, ast, stocks, declarations) ->
         let assets =
           List.map
-            (fun (_, market, symbol) ->
-              load_asset ~market ~symbol
-                ~from_:!from_ ~to_:!to_ ~data_dir:!data_dir)
+            (fun (_, market, symbol) -> load_cached ~market ~symbol)
             stocks
         in
         { name; stocks; ast; declarations; assets })
@@ -325,8 +336,7 @@ let run argv =
     | Some (market, symbol) ->
         Some
           (market, symbol,
-           load_asset ~market ~symbol
-             ~from_:!from_ ~to_:!to_ ~data_dir:!data_dir)
+           load_cached ~market ~symbol)
   in
   let arrays =
     List.concat_map
