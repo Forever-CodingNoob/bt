@@ -3848,6 +3848,26 @@ let test_taf_zero_for_tw () =
   assert_close ~tolerance:1e-12 1. (final_equity result)
 
 
+let test_taf_zero_cap_means_uncapped () =
+  (* --per-share-fee with cap = 0 (TW default) must be uncapped, not
+     clamped to $0.01.  1000 shares at $0.000195 = $0.195 -> $0.20. *)
+  let bars =
+    [| bar "2020-01-01" 10. 10.; bar "2020-01-02" 10. 10. |]
+  in
+  let costs : Engine.costs =
+    { fee_bps = 0.; tax_bps = 0.; slip_bps = 0.; min_fee = 0.;
+      per_share_sell_fee = 0.000195; per_share_sell_cap = 0. }
+  in
+  let result =
+    Engine.run ~profile:tw_profile [| ("tw/TEST", bars) |]
+      { Engine.targets = [| [| 1.; 0. |] |] }
+      [| costs |] ~margin:(no_margin 1) ~capital:(Some 10000.)
+      ~fill:Engine.Close_same
+  in
+  (* Uncapped: TAF = $0.20.  fraction = 0.20 / 10000 = 0.00002. *)
+  assert_close ~tolerance:1e-12 0.99998 (final_equity result)
+
+
 let () =
   test_profile_of_market ();
   test_parser ();
@@ -3964,4 +3984,5 @@ let () =
   test_taf_cap ();
   test_taf_inactive_without_capital ();
   test_taf_zero_for_tw ();
+  test_taf_zero_cap_means_uncapped ();
   print_endline "ok"

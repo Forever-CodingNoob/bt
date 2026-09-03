@@ -470,9 +470,12 @@ let run ?dividends ?(dividend_tax = 0.)
           let rounded =
             Float.of_int (int_of_float (Float.ceil (raw *. 100.))) /. 100.
           in
-          let clamped =
-            Float.max 0.01 (Float.min costs.per_share_sell_cap rounded)
+          let capped =
+            if costs.per_share_sell_cap > 0. then
+              Float.min costs.per_share_sell_cap rounded
+            else rounded
           in
+          let clamped = Float.max 0.01 capped in
           clamped /. dollars
       | _ -> 0.
     in
@@ -495,9 +498,12 @@ let run ?dividends ?(dividend_tax = 0.)
           let rounded =
             Float.of_int (int_of_float (Float.ceil (raw *. 100.))) /. 100.
           in
-          let clamped =
-            Float.max 0.01 (Float.min costs.per_share_sell_cap rounded)
+          let capped =
+            if costs.per_share_sell_cap > 0. then
+              Float.min costs.per_share_sell_cap rounded
+            else rounded
           in
+          let clamped = Float.max 0.01 capped in
           clamped /. cap
       | _ -> 0.
     in
