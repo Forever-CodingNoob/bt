@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-02
+
 ### Added
 
 - Tiingo end-of-day US data source with canonical four-file cache layout (raw OHLCV, events, cash dividends, dividend factors).
@@ -19,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A run simulates exactly one market: mixing tw and us stocks (or a baseline from another market) in one `bt run` is now a usage error.
 - US cache format uses raw prices without adj_close; one unified two-plane loader serves both TW and US markets.
 - Incremental US fetch with append and head-gap backfill (same as TW).
 - Cache files grouped into per-symbol subdirectories: `data/<market>/<SYMBOL>/<SYMBOL>.csv`. The shared `data/tw/stockinfo.csv` stays at the market level.
@@ -142,7 +145,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Return-based engine with daily close-to-close signal prices.
 - TW dividend back-adjustment via FinMind factors.
 
-[Unreleased]: https://github.com/Forever-CodingNoob/bt/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/Forever-CodingNoob/bt/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/Forever-CodingNoob/bt/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/Forever-CodingNoob/bt/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/Forever-CodingNoob/bt/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Forever-CodingNoob/bt/compare/v0.3.0...v0.4.0
