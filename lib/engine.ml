@@ -21,7 +21,7 @@ type fill_event = {
 
 type margin = {
   financing_rate : float;
-  maintenance_ratio : float;
+  maintenance_override : float option;
   ratios : float array;
   loan_term_months : int option;
 }
@@ -170,6 +170,11 @@ let add_months_clamped date months =
   let target_day = min day (days_in_month target_year target_month) in
   Printf.sprintf "%04d-%02d-%02d" target_year target_month target_day
 
+
+let us_tier_rate price =
+  if price < 2.50 then 1.0
+  else if price < 6.00 then 0.5
+  else 0.3
 let market_of_label label =
   match String.index_opt label '/' with
   | Some i -> String.sub label 0 i
@@ -647,10 +652,32 @@ let run ?dividends ?(dividend_tax = 0.)
       let () = record_fill index ~date ~price ~from_e ~to_e in
       if total_value index = 0. then close_trip index ~date
   in
-  let track_maintenance () =
+  let track_maintenance price_at =
     let total_loan = total_loans () in
     if total_loan > 0. then
-      let ratio = sum margin_values /. total_loan in
+      let ratio =
+        match profile.maintenance with
+        | Collateral_over_loan -> sum margin_values /. total_loan
+        | Equity_over_required ->
+            let required =
+              match margin.maintenance_override with
+              | Some flat ->
+                  fold_assets
+                    (fun acc index ->
+                      let value = total_value index in
+                      if value > 0. then acc +. flat *. value else acc)
+                    0.
+              | None ->
+                  fold_assets
+                    (fun acc index ->
+                      let value = total_value index in
+                      if value > 0. then
+                        acc +. us_tier_rate (price_at index) *. value
+                      else acc)
+                    0.
+            in
+            if required > 0. then equity () /. required else Float.infinity
+      in
       let () =
         match !min_maintenance with
         | None -> min_maintenance := Some ratio
@@ -720,7 +747,7 @@ let run ?dividends ?(dividend_tax = 0.)
               | _ -> ())
           in
           if !has_rollover then
-            let () = ignore (track_maintenance ()) in
+            let () = ignore (track_maintenance price_at) in
             let sell_costs =
               Array.init asset_count
                 (fun index ->
@@ -834,7 +861,7 @@ let run ?dividends ?(dividend_tax = 0.)
     | _ -> margin_call_dates := date :: !margin_call_dates
   in
   let bankrupt_all ~bar_index ~date price_at =
-    let () = ignore (track_maintenance ()) in
+    let () = ignore (track_maintenance price_at) in
     let () = record_call date in
     let () =
       iter_assets (fun index ->
@@ -1672,6 +1699,128 @@ let run ?dividends ?(dividend_tax = 0.)
       let () = bankrupt := true in
       pending_liquidation := false
   in
+  let minimum_cure ~bar_index ~date price_at =
+    let e = equity () in
+    let total_margin = sum margin_values in
+    if total_margin <= 0. || e <= 0. then
+      bankrupt_all ~bar_index ~date price_at
+    else
+      let required =
+        match margin.maintenance_override with
+        | Some flat ->
+            fold_assets
+              (fun acc index ->
+                let value = total_value index in
+                if value > 0. then acc +. flat *. value else acc)
+              0.
+        | None ->
+            fold_assets
+              (fun acc index ->
+                let value = total_value index in
+                if value > 0. then
+                  acc +. us_tier_rate (price_at index) *. value
+                else acc)
+              0.
+      in
+      if e >= required then ()
+      else
+        let deficit = required -. e in
+        (* Relief per dollar of margin sold: each dollar sold reduces
+           required by its tier weight, and costs reduce equity.
+           Compute the aggregate tier-weighted margin and cost rate. *)
+        let tier_weighted =
+          fold_assets
+            (fun acc index ->
+              if margin_values.(index) > 0. then
+                let rate =
+                  match margin.maintenance_override with
+                  | Some flat -> flat
+                  | None -> us_tier_rate (price_at index)
+                in
+                acc +. rate *. margin_values.(index)
+              else acc)
+            0.
+        in
+        let cost_per_unit =
+          if e > 0. then
+            fold_assets
+              (fun acc index ->
+                if margin_values.(index) > 0. then
+                  acc
+                  +. charge index ~equity_before:e ~delta:(-1.)
+                       ~price:(price_at index)
+                     *. margin_values.(index)
+                else acc)
+              0.
+            /. (if total_margin > 0. then total_margin else 1.)
+          else 0.
+        in
+        let relief = tier_weighted /. total_margin -. cost_per_unit in
+        let sell_total =
+          if relief > 0. then Float.min total_margin (deficit /. relief)
+          else total_margin
+        in
+        let fraction = sell_total /. total_margin in
+        let () =
+          iter_assets (fun index ->
+            let sell_amount = fraction *. margin_values.(index) in
+            if sell_amount > 0. then
+              let equity_now = equity () in
+              let total_before = total_value index in
+              let sold_e =
+                if equity_now > 0. then sell_amount /. equity_now else 0.
+              in
+              let from_e =
+                if equity_now > 0. then total_before /. equity_now else 0.
+              in
+              let to_e = Float.max 0. (from_e -. sold_e) in
+              let cost_value =
+                if equity_now > 0. then
+                  charge index ~equity_before:equity_now ~delta:(-. sold_e)
+                    ~price:(price_at index)
+                  *. equity_now
+                else absolute_sell_cost index ~price:(price_at index)
+                       sell_amount
+              in
+              let () =
+                sell_value.(index) <-
+                  sell_value.(index) +. sold_e *. price_at index
+              in
+              let () =
+                sell_exposure.(index) <-
+                  sell_exposure.(index) +. sold_e
+              in
+              let () =
+                margin_values.(index) <-
+                  margin_values.(index) -. sell_amount
+              in
+              let () = cash := !cash +. sell_amount -. cost_value in
+              let () = capitalize_tail_interest index bar_index in
+              let total_owed =
+                loan_at index +. interest_at index
+              in
+              let () =
+                if total_owed > 0. then
+                  let owed = total_owed *. fraction in
+                  let payment = Float.min !cash owed in
+                  let remaining = 1. -. payment /. total_owed in
+                  let () = cash := !cash -. payment in
+                  scale_lots index remaining
+              in
+              let () =
+                if !cash < 0. then
+                  let () = debt := !debt -. !cash in
+                  cash := 0.
+              in
+              let () =
+                record_fill index ~date ~price:(price_at index) ~from_e
+                  ~to_e
+              in
+              if total_value index = 0. then close_trip index ~date)
+        in
+        if equity () <= 0. then
+          bankrupt_all ~bar_index ~date price_at
+  in
   let rec walk_bars t =
     if t = length then ()
     else
@@ -1704,7 +1853,13 @@ let run ?dividends ?(dividend_tax = 0.)
                       (fun i -> open_at i t)
                   in
                   let () =
-                    liquidate ~bar_index:t ~date (fun i -> open_at i t)
+                    (match profile.maintenance with
+                     | Collateral_over_loan ->
+                         liquidate ~bar_index:t ~date
+                           (fun i -> open_at i t)
+                     | Equity_over_required ->
+                         minimum_cure ~bar_index:t ~date
+                           (fun i -> open_at i t))
                   in
                   let () = pending_liquidation := false in
                   let () =
@@ -1749,7 +1904,13 @@ let run ?dividends ?(dividend_tax = 0.)
                 let () =
                   if !pending_liquidation then
                     let () =
-                      liquidate ~bar_index:t ~date (fun i -> open_at i t)
+                      (match profile.maintenance with
+                       | Collateral_over_loan ->
+                           liquidate ~bar_index:t ~date
+                             (fun i -> open_at i t)
+                       | Equity_over_required ->
+                           minimum_cure ~bar_index:t ~date
+                             (fun i -> open_at i t))
                     in
                     pending_liquidation := false
                 in
@@ -1781,11 +1942,43 @@ let run ?dividends ?(dividend_tax = 0.)
       in
       let () =
         if not !bankrupt then
-          match track_maintenance () with
-          | Some ratio when ratio < margin.maintenance_ratio ->
-              let () = record_call date in
-              pending_liquidation := true
-          | _ -> ()
+          let close_price_at index = close_at index t in
+          match profile.maintenance with
+          | Collateral_over_loan ->
+              let threshold =
+                match margin.maintenance_override with
+                | Some v -> v
+                | None -> 1.3
+              in
+              (match track_maintenance close_price_at with
+               | Some ratio when ratio < threshold ->
+                   let () = record_call date in
+                   pending_liquidation := true
+               | _ -> ())
+          | Equity_over_required ->
+              let () = ignore (track_maintenance close_price_at) in
+              let e = equity () in
+              let required =
+                match margin.maintenance_override with
+                | Some flat ->
+                    fold_assets
+                      (fun acc index ->
+                        let value = total_value index in
+                        if value > 0. then acc +. flat *. value else acc)
+                      0.
+                | None ->
+                    fold_assets
+                      (fun acc index ->
+                        let value = total_value index in
+                        if value > 0. then
+                          acc
+                          +. us_tier_rate (close_price_at index) *. value
+                        else acc)
+                      0.
+              in
+              if total_loans () > 0. && e < required then
+                let () = record_call date in
+                pending_liquidation := true
       in
       let () =
         if !cash < -1e-9 then

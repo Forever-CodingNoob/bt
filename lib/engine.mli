@@ -27,7 +27,7 @@ type fill_event = {
     calendar-month term; US assets always remain open-ended. *)
 type margin = {
   financing_rate : float;
-  maintenance_ratio : float;
+  maintenance_override : float option;
   ratios : float array;
   loan_term_months : int option;
 }

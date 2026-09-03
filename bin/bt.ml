@@ -301,13 +301,10 @@ let run argv =
     | Some v -> v
     | None -> profile.Btlib.Engine.default_financing_rate
   in
-  let maintenance_ratio =
+  let maintenance_override =
     match !maintenance_ratio with
-    | Some v -> v
-    | None ->
-        (match profile.Btlib.Engine.maintenance with
-         | Btlib.Engine.Collateral_over_loan -> 130.
-         | Btlib.Engine.Equity_over_required -> 25.)
+    | Some v -> Some (v /. 100.)
+    | None -> None
   in
   let inputs =
     List.map
@@ -435,7 +432,7 @@ let run argv =
         in
         let margin_config : Btlib.Engine.margin =
           { financing_rate = financing_rate /. 100.;
-            maintenance_ratio = maintenance_ratio /. 100.;
+            maintenance_override;
             ratios;
             loan_term_months =
               if List.exists
@@ -466,7 +463,7 @@ let run argv =
         in
         let margin_config : Btlib.Engine.margin =
           { financing_rate = financing_rate /. 100.;
-            maintenance_ratio = maintenance_ratio /. 100.;
+            maintenance_override;
             ratios = [| ratio_for market symbol |];
             loan_term_months =
               (match market with

@@ -224,7 +224,7 @@ let engine_fee_expected =
 let golden_expected = 1.7291207425596153
 
 let no_margin count : Engine.margin =
-  { financing_rate = 0.; maintenance_ratio = 0.;
+  { financing_rate = 0.; maintenance_override = Some 0.;
     ratios = Array.make count 1.; loan_term_months = None }
 
 let tw_profile = Engine.profile_of_market "tw"
@@ -263,7 +263,7 @@ let test_inventory_split () =
        bar "2020-01-02" 100. 100. |]
   in
   let margin : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 0.; ratios = [| 0.6 |];
+    { financing_rate = 0.; maintenance_override = Some 0.; ratios = [| 0.6 |];
       loan_term_months = None }
   in
   let result =
@@ -286,7 +286,7 @@ let test_maintenance_at_entry () =
        bar "2020-01-02" 100. 100. |]
   in
   let margin : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 0.; ratios = [| 0.6 |];
+    { financing_rate = 0.; maintenance_override = Some 0.; ratios = [| 0.6 |];
       loan_term_months = None }
   in
   (* At 1.2x: x = 13/15, m = 1/3, loan = 0.2.
@@ -313,7 +313,7 @@ let test_interest_liability () =
        bar "2020-01-07" 100. 100. |]
   in
   let margin : Engine.margin =
-    { financing_rate = 0.0635; maintenance_ratio = 1.3;
+    { financing_rate = 0.0635; maintenance_override = Some 1.3;
       ratios = [| 0.6 |]; loan_term_months = None }
   in
   let result =
@@ -345,7 +345,7 @@ let test_engine_initial_margin_clamp () =
        bar "2020-01-02" 100. 100. |]
   in
   let margin : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 0.; ratios = [| 0.6 |];
+    { financing_rate = 0.; maintenance_override = Some 0.; ratios = [| 0.6 |];
       loan_term_months = None }
   in
   let result =
@@ -369,7 +369,7 @@ let test_cap_reachable () =
        bar "2020-01-02" 100. 100. |]
   in
   let margin : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 0.; ratios = [| 0.6 |];
+    { financing_rate = 0.; maintenance_override = Some 0.; ratios = [| 0.6 |];
       loan_term_months = None }
   in
   let result =
@@ -397,7 +397,7 @@ let test_funding_clamp_covers_fixed_refinance_costs () =
     per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let margin : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 0.; ratios = [| 0.6 |];
+    { financing_rate = 0.; maintenance_override = Some 0.; ratios = [| 0.6 |];
       loan_term_months = None }
   in
   let result =
@@ -425,7 +425,7 @@ let test_engine_mixed_ratio_clamp () =
     [| bar "2020-01-01" price price; bar "2020-01-02" price price |]
   in
   let margin : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 0.;
+    { financing_rate = 0.; maintenance_override = Some 0.;
       ratios = [| 0.6; 0.5 |]; loan_term_months = None }
   in
   let result =
@@ -453,7 +453,7 @@ let test_forced_repayment_is_proportional () =
        bar "2020-01-03" 55. 55. |]
   in
   let margin : Engine.margin =
-    { financing_rate = 18.25; maintenance_ratio = 1.3;
+    { financing_rate = 18.25; maintenance_override = Some 1.3;
       ratios = [| 0.6 |]; loan_term_months = None }
   in
   let result =
@@ -476,7 +476,7 @@ let test_call_liquidates_margin_only () =
        bar "2020-01-03" 75. 75. |]
   in
   let margin : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 1.3; ratios = [| 0.6 |];
+    { financing_rate = 0.; maintenance_override = Some 1.3; ratios = [| 0.6 |];
       loan_term_months = None }
   in
   let result =
@@ -504,7 +504,7 @@ let test_insolvent_call_sells_all_at_open () =
        bar "2020-01-06" 50. 50. |]
   in
   let margin : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 1.3; ratios = [| 0.6 |];
+    { financing_rate = 0.; maintenance_override = Some 1.3; ratios = [| 0.6 |];
       loan_term_months = None }
   in
   let result =
@@ -537,7 +537,7 @@ let test_engine_margin_call () =
        bar "2020-01-07" 90. 90. |]
   in
   let margin : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 1.3; ratios = [| 0.6 |];
+    { financing_rate = 0.; maintenance_override = Some 1.3; ratios = [| 0.6 |];
       loan_term_months = None }
   in
   let result =
@@ -574,7 +574,7 @@ let test_engine_bankruptcy () =
        bar "2020-01-03" 50. 60. |]
   in
   let margin : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 1.3; ratios = [| 0.6 |];
+    { financing_rate = 0.; maintenance_override = Some 1.3; ratios = [| 0.6 |];
       loan_term_months = None }
   in
   let result =
@@ -602,7 +602,7 @@ let test_open_next_bankruptcy_freezes_at_close () =
        bar "2020-01-03" 100. 100. |]
   in
   let margin : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 0.; ratios = [| 0.6 |];
+    { financing_rate = 0.; maintenance_override = Some 0.; ratios = [| 0.6 |];
       loan_term_months = None }
   in
   let result =
@@ -628,7 +628,7 @@ let test_engine_insolvent_gap () =
        bar "2020-01-02" 50. 50. |]
   in
   let margin : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 1.3; ratios = [| 0.6 |];
+    { financing_rate = 0.; maintenance_override = Some 1.3; ratios = [| 0.6 |];
       loan_term_months = None }
   in
   let result =
@@ -659,7 +659,7 @@ let test_engine_insolvent_min_fee () =
     per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let margin : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 1.3; ratios = [| 0.6 |];
+    { financing_rate = 0.; maintenance_override = Some 1.3; ratios = [| 0.6 |];
       loan_term_months = None }
   in
   let result =
@@ -703,7 +703,7 @@ let test_engine_exit_fee_bankruptcy () =
     per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let margin : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 0.; ratios = [| 0.6 |];
+    { financing_rate = 0.; maintenance_override = Some 0.; ratios = [| 0.6 |];
       loan_term_months = None }
   in
   let result =
@@ -741,7 +741,7 @@ let test_engine_zero_value_exit_preserves_liability () =
        bar "2020-01-03" 0. 0. |]
   in
   let margin : Engine.margin =
-    { financing_rate = 0.365; maintenance_ratio = 0.;
+    { financing_rate = 0.365; maintenance_override = Some 0.;
       ratios = [| 0.6; 0.6 |]; loan_term_months = None }
   in
   let result =
@@ -784,7 +784,7 @@ let test_tw_dividend_receivable () =
        bar "2020-01-04" 90. 90. |]
   in
   let margin : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 0.; ratios = [| 0.6 |];
+    { financing_rate = 0.; maintenance_override = Some 0.; ratios = [| 0.6 |];
       loan_term_months = None }
   in
   let result =
@@ -813,7 +813,7 @@ let test_tw_dividend_paydown_interest () =
        bar "2020-01-05" 100. 100. |]
   in
   let margin : Engine.margin =
-    { financing_rate = 3.65; maintenance_ratio = 0.; ratios = [| 0.6 |];
+    { financing_rate = 3.65; maintenance_override = Some 0.; ratios = [| 0.6 |];
       loan_term_months = None }
   in
   let result =
@@ -842,7 +842,7 @@ let test_tw_dividend_pure_paydown_preserves_drift () =
        bar "2020-01-04" 120. 120. |]
   in
   let margin : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 0.; ratios = [| 0.6 |];
+    { financing_rate = 0.; maintenance_override = Some 0.; ratios = [| 0.6 |];
       loan_term_months = None }
   in
   let result =
@@ -876,7 +876,7 @@ let test_tw_dividend_excess_spill () =
        bar "2020-01-04" 100. 100. |]
   in
   let margin : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 0.; ratios = [| 0.6 |];
+    { financing_rate = 0.; maintenance_override = Some 0.; ratios = [| 0.6 |];
       loan_term_months = None }
   in
   let result =
@@ -942,7 +942,7 @@ let test_frozen_dividend_reduces_debt () =
        bar "2020-01-04" 40. 40. |]
   in
   let margin : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 0.; ratios = [| 0.6 |];
+    { financing_rate = 0.; maintenance_override = Some 0.; ratios = [| 0.6 |];
       loan_term_months = None }
   in
   let result =
@@ -1036,7 +1036,7 @@ let test_unlevered_dividend_refill_cash_clamp () =
     per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let margin : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 0.; ratios = [| 0.6 |];
+    { financing_rate = 0.; maintenance_override = Some 0.; ratios = [| 0.6 |];
       loan_term_months = None }
   in
   let result =
@@ -1134,7 +1134,7 @@ let test_exact_cash_funding () =
        bar "2020-01-02" price price |]
   in
   let margin : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 0.;
+    { financing_rate = 0.; maintenance_override = Some 0.;
       ratios = [| 0.6; 0.6 |]; loan_term_months = None }
   in
   let result =
@@ -2962,7 +2962,7 @@ let test_e1_order_independence () =
     per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let margin : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 0.;
+    { financing_rate = 0.; maintenance_override = Some 0.;
       ratios = [| 0.6; 0.6 |]; loan_term_months = None }
   in
   let strategy_ab : Engine.strategy =
@@ -2998,7 +2998,7 @@ let test_sell_deficit_waits_for_refinancing () =
        bar "2020-01-02" 200. 200. |]
   in
   let margin : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 0.;
+    { financing_rate = 0.; maintenance_override = Some 0.;
       ratios = [| 0.6; 0.6 |]; loan_term_months = None }
   in
   let result =
@@ -3040,7 +3040,7 @@ let test_sell_only_fee_does_not_refinance () =
     per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let margin : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 0.;
+    { financing_rate = 0.; maintenance_override = Some 0.;
       ratios = [| 0.6; 0.6 |]; loan_term_months = None }
   in
   let result =
@@ -3078,7 +3078,7 @@ let test_residual_debt_does_not_force_refinance () =
     per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let margin : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 0.;
+    { financing_rate = 0.; maintenance_override = Some 0.;
       ratios = [| 0.6; 0.6; 0.6 |]; loan_term_months = None }
   in
   let result =
@@ -3112,7 +3112,7 @@ let test_refinance_scale_in () =
        bar "2020-01-03" 100. 100. |]
   in
   let margin : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 0.; ratios = [| 0.6 |];
+    { financing_rate = 0.; maintenance_override = Some 0.; ratios = [| 0.6 |];
       loan_term_months = None }
   in
   let result =
@@ -3149,7 +3149,7 @@ let test_refinance_costs () =
     per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let margin : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 0.; ratios = [| 0.6 |];
+    { financing_rate = 0.; maintenance_override = Some 0.; ratios = [| 0.6 |];
       loan_term_months = None }
   in
   let result =
@@ -3182,7 +3182,7 @@ let test_refinance_order_independence () =
        bar "2020-01-02" price price |]
   in
   let margin : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 0.;
+    { financing_rate = 0.; maintenance_override = Some 0.;
       ratios = [| 0.6; 0.6 |]; loan_term_months = None }
   in
   let run assets targets =
@@ -3236,7 +3236,7 @@ let test_margin_refinance_with_interest () =
        bar "2020-01-07" 200. 200. |]
   in
   let margin : Engine.margin =
-    { financing_rate = 0.0635; maintenance_ratio = 0.;
+    { financing_rate = 0.0635; maintenance_override = Some 0.;
       ratios = [| 0.6 |]; loan_term_months = None }
   in
   let result =
@@ -3265,7 +3265,7 @@ let test_e1_drift_reversal () =
        bar "2020-01-02" 200. 200. |]
   in
   let margin : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 0.; ratios = [| 0.6 |];
+    { financing_rate = 0.; maintenance_override = Some 0.; ratios = [| 0.6 |];
       loan_term_months = None }
   in
   let result =
@@ -3303,7 +3303,7 @@ let test_e1_sell_then_buy () =
        bar "2020-01-02" 50. 50. |]
   in
   let margin : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 0.;
+    { financing_rate = 0.; maintenance_override = Some 0.;
       ratios = [| 0.6; 0.6 |]; loan_term_months = None }
   in
   let strategy : Engine.strategy =
@@ -3337,7 +3337,7 @@ let test_loan_order_independence () =
     [| bar "2020-01-01" price price; bar "2020-01-02" price price |]
   in
   let margin : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 0.;
+    { financing_rate = 0.; maintenance_override = Some 0.;
       ratios = [| 0.6; 0.6 |]; loan_term_months = None }
   in
   let strategy : Engine.strategy =
@@ -3352,7 +3352,7 @@ let test_loan_order_independence () =
     { targets = [| [| 0.3; 0.3 |]; [| 0.9; 0.9 |] |] }
   in
   let margin_ba : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 0.;
+    { financing_rate = 0.; maintenance_override = Some 0.;
       ratios = [| 0.6; 0.6 |]; loan_term_months = None }
   in
   let result_ba =
@@ -3380,7 +3380,7 @@ let test_sell_settlement_order_independence () =
        bar "2020-01-03" 200. 200. |]
   in
   let margin : Engine.margin =
-    { financing_rate = 0.365; maintenance_ratio = 0.;
+    { financing_rate = 0.365; maintenance_override = Some 0.;
       ratios = [| 0.6; 0.6 |]; loan_term_months = None }
   in
   let run assets targets =
@@ -3420,7 +3420,7 @@ let test_call_settlement_order_independence () =
        bar "2020-01-04" 120. 120. |]
   in
   let margin : Engine.margin =
-    { financing_rate = 0.365; maintenance_ratio = 1.3;
+    { financing_rate = 0.365; maintenance_override = Some 1.3;
       ratios = [| 0.6; 0.6 |]; loan_term_months = None }
   in
   let run assets =
@@ -3458,7 +3458,7 @@ let test_loan_sell_then_buy () =
        bar "2020-01-02" 50. 50. |]
   in
   let margin : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 0.;
+    { financing_rate = 0.; maintenance_override = Some 0.;
       ratios = [| 0.6; 0.6 |]; loan_term_months = None }
   in
   (* Bar 0 A is cv = 2/3, mv = 5/6, loan = 0.5, cash = 0.
@@ -3492,7 +3492,7 @@ let test_interest_settlement_window () =
        bar "2020-01-13" 100. 100. |]
   in
   let margin : Engine.margin =
-    { financing_rate = 0.365; maintenance_ratio = 0.;
+    { financing_rate = 0.365; maintenance_override = Some 0.;
       ratios = [| 0.6 |]; loan_term_months = None }
   in
   let result =
@@ -3516,7 +3516,7 @@ let test_margin_term_rollover () =
        bar "2023-08-25" 100. 100. |]
   in
   let margin : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 0.;
+    { financing_rate = 0.; maintenance_override = Some 0.;
       ratios = [| 0.6 |]; loan_term_months = Some 18 }
   in
   let result =
@@ -3553,7 +3553,7 @@ let test_margin_term_underwater_partial () =
        bar "2022-03-01" 80. 80. |]
   in
   let margin : Engine.margin =
-    { financing_rate = 0.; maintenance_ratio = 0.;
+    { financing_rate = 0.; maintenance_override = Some 0.;
       ratios = [| 0.6 |]; loan_term_months = Some 18 }
   in
   let result =
@@ -3595,7 +3595,7 @@ let test_margin_term_disabled () =
   in
   let run stock profile loan_term_months =
     let margin : Engine.margin =
-      { financing_rate = 0.; maintenance_ratio = 0.;
+      { financing_rate = 0.; maintenance_override = Some 0.;
         ratios = [| 0.6 |]; loan_term_months }
     in
     Engine.run ~profile [| (stock, bars) |]
@@ -3716,7 +3716,7 @@ let test_us_interest_day_count () =
        bar "2020-01-13" 100. 100. |]
   in
   let margin : Engine.margin =
-    { financing_rate = 0.365; maintenance_ratio = 0.;
+    { financing_rate = 0.365; maintenance_override = Some 0.;
       ratios = [| 0.6 |]; loan_term_months = None }
   in
   let tw_result =
@@ -3868,6 +3868,146 @@ let test_taf_zero_cap_means_uncapped () =
   assert_close ~tolerance:1e-12 0.99998 (final_equity result)
 
 
+let test_us_tiered_maintenance () =
+  (* Band 1: price > $6, tier = 30%.
+     Entry at $10, target 2.0, ratio 0.5 → mv = 2.0, loan = 1.0, equity = 1.0.
+     required = 0.3 * 2.0 = 0.6.  ratio = equity / required = 1.0 / 0.6 = 5/3.
+     No breach. *)
+  let check price expected_ratio =
+    let bars = [| bar "2020-01-01" price price;
+                  bar "2020-01-02" price price |] in
+    let margin : Engine.margin =
+      { financing_rate = 0.; maintenance_override = None;
+        ratios = [| 0.5 |]; loan_term_months = None }
+    in
+    let result =
+      Engine.run ~profile:us_profile [| ("us/TEST", bars) |]
+        { Engine.targets = [| [| 2.; 1. |] |] }
+        [| zero_costs |] ~margin ~capital:None ~fill:Engine.Close_same
+    in
+    (match result.margin_stats.Engine.min_maintenance with
+     | Some ratio -> assert_close ~tolerance:1e-12 expected_ratio ratio
+     | None -> assert false)
+  in
+  (* > $6: required = 0.3 * 2.0 = 0.6; equity/required = 5/3 *)
+  check 10. (5. /. 3.);
+  (* $2.50-$6: required = 0.5 * 2.0 = 1.0; equity/required = 1.0 *)
+  check 4. 1.;
+  (* < $2.50: required = 1.0 * 2.0 = 2.0; equity/required = 0.5
+     This band triggers a breach (equity 1.0 < required 2.0).
+     The min_maintenance is 0.5 regardless. *)
+  check 2. 0.5
+
+let test_us_maintenance_breach () =
+  (* Entry at $10, target 2.0, ratio 0.5 → mv = 2.0, loan = 1.0.
+     Bar 1: price drops to $7.  mv = 1.4, loan = 1.0, equity = 0.4.
+     required = 0.3 * 1.4 = 0.42.  equity 0.4 < 0.42 → breach.
+     Margin call scheduled on 2020-01-02. *)
+  let bars =
+    [| bar "2020-01-01" 10. 10.;
+       bar "2020-01-02" 7. 7.;
+       bar "2020-01-03" 7. 7. |]
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.; maintenance_override = None;
+      ratios = [| 0.5 |]; loan_term_months = None }
+  in
+  let result =
+    Engine.run ~profile:us_profile [| ("us/TEST", bars) |]
+      { Engine.targets = [| [| 2.; 2.; 0. |] |] }
+      [| zero_costs |] ~margin ~capital:None ~fill:Engine.Close_same
+  in
+  assert (result.margin_stats.Engine.margin_call_dates = ["2020-01-02"]);
+  (* min_maintenance = equity/required = 0.4/0.42 = 20/21 at bar-1 close *)
+  (match result.margin_stats.Engine.min_maintenance with
+   | Some ratio -> assert_close ~tolerance:1e-12 (20. /. 21.) ratio
+   | None -> assert false);
+  assert_close ~tolerance:1e-12 0.4 (final_equity result)
+
+let test_us_minimum_cure () =
+  (* Entry at $10, target 2.0, ratio 0.5 → mv = 2.0, loan = 1.0.
+     Bar 1: price $7.  mv = 1.4, equity = 0.4, required = 0.42.  Breach.
+     Bar 2: cure at open $7.  Sell fraction f = 1/21 of margin:
+       sell_amount = 1.4/21, repay loan 1.0/21.
+       After: mv = 1.4*20/21, loan = 20/21, cash = 0.4/21.
+       equity = 0.4, required = 0.3 * 1.4*20/21 = 0.4.  Exactly restored.
+     Position survives partially (margin still > 0). *)
+  let bars =
+    [| bar "2020-01-01" 10. 10.;
+       bar "2020-01-02" 7. 7.;
+       bar "2020-01-03" 7. 7. |]
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.; maintenance_override = None;
+      ratios = [| 0.5 |]; loan_term_months = None }
+  in
+  let result =
+    Engine.run ~profile:us_profile [| ("us/TEST", bars) |]
+      { Engine.targets = [| [| 2.; 2.; 2. |] |] }
+      [| zero_costs |] ~margin ~capital:None ~fill:Engine.Close_same
+  in
+  (* Position survives: margin inventory > 0 after cure, no bankruptcy *)
+  assert (not (List.exists (fun (_, eq) -> eq <= 0.) result.equity_curve));
+  (* Cure sells the minimum amount; equity = 0.4 at bar-2 close *)
+  assert_close ~tolerance:1e-12 0.4 (final_equity result);
+  (* Exactly one margin call *)
+  assert (result.margin_stats.Engine.margin_call_dates = ["2020-01-02"])
+
+let test_us_maintenance_flat_override () =
+  (* Same price drop as breach test, but --maintenance-ratio 20 (= 0.2)
+     overrides the tiered table.
+     required = 0.2 * 1.4 = 0.28.  equity = 0.4 >= 0.28 → no breach. *)
+  let bars =
+    [| bar "2020-01-01" 10. 10.;
+       bar "2020-01-02" 7. 7.;
+       bar "2020-01-03" 7. 7. |]
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.; maintenance_override = Some 0.2;
+      ratios = [| 0.5 |]; loan_term_months = None }
+  in
+  let result =
+    Engine.run ~profile:us_profile [| ("us/TEST", bars) |]
+      { Engine.targets = [| [| 2.; 2.; 0. |] |] }
+      [| zero_costs |] ~margin ~capital:None ~fill:Engine.Close_same
+  in
+  (* No margin call with the low flat override *)
+  assert (result.margin_stats.Engine.margin_call_dates = []);
+  (* min_maintenance = equity / (flat_rate * total_value)
+     At bar 1: equity = 0.4, required = 0.2 * 1.4 = 0.28,
+     ratio = 0.4 / 0.28 = 10/7. *)
+  (match result.margin_stats.Engine.min_maintenance with
+   | Some ratio -> assert_close ~tolerance:1e-12 (10. /. 7.) ratio
+   | None -> assert false)
+
+let test_tw_maintenance_override_none () =
+  (* TW with maintenance_override = None uses the default 130% threshold.
+     Same fixture as test_engine_margin_call: mv = 2.5, loan = 1.5.
+     At bar 2: price 76, mv = 1.9, ratio = 1.9/1.5 = 1.2667 < 1.3 → call.
+     This verifies TW default behavior is intact with the option type. *)
+  let bars =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 80. 80.;
+       bar "2020-01-03" 76. 76.;
+       bar "2020-01-06" 76. 90.;
+       bar "2020-01-07" 90. 90. |]
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.; maintenance_override = None;
+      ratios = [| 0.6 |]; loan_term_months = None }
+  in
+  let result =
+    Engine.run ~profile:tw_profile [| ("tw/TEST", bars) |]
+      { Engine.targets = [| [| 2.5; 2.5; 2.5; 2.5; 1.0 |] |] }
+      [| zero_costs |] ~margin ~capital:None ~fill:Engine.Close_same
+  in
+  assert_close ~tolerance:1e-12 0.4 (final_equity result);
+  assert (result.margin_stats.Engine.margin_call_dates = ["2020-01-03"]);
+  (match result.margin_stats.Engine.min_maintenance with
+   | Some ratio -> assert_close ~tolerance:1e-12 (1.9 /. 1.5) ratio
+   | None -> assert false)
+
+
 let () =
   test_profile_of_market ();
   test_parser ();
@@ -3985,4 +4125,9 @@ let () =
   test_taf_inactive_without_capital ();
   test_taf_zero_for_tw ();
   test_taf_zero_cap_means_uncapped ();
+  test_us_tiered_maintenance ();
+  test_us_maintenance_breach ();
+  test_us_minimum_cure ();
+  test_us_maintenance_flat_override ();
+  test_tw_maintenance_override_none ();
   print_endline "ok"
