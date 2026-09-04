@@ -173,6 +173,7 @@ US dividends become cash on their ex-date with no receivable period. When divide
 
 ### Gap between simulation and the real market
 
+- The live daemon implements the close-fill assumption by evaluating a provisional bar 15 minutes before the close and submitting a market-on-close order.
 - Leveraged-ETF house requirements (2x 50%, 3x 75%) and short tiers are not auto-classified. Use `--maintenance-ratio` to set the correct rate.
 - The concentration rule (single position at 70% of equities value with a margin balance of $100,000 or more raises that position to 50%) is not modeled.
 - Intraday buying power (4x) and the intraday margin framework are out of scope. The engine is end-of-day.

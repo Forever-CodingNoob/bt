@@ -247,29 +247,46 @@ let log_fill date client_order_id = function
          filled-qty=%.10g"
         date client_order_id order.status price order.filled_qty
 
-let rejected_order (order : Alpaca.order_t) =
-  match order.status with
-  | "rejected" -> failwith "Alpaca rejected the order"
-  | _ -> ()
+let terminal_order_status = function
+  | "filled" | "canceled" | "expired" | "rejected" | "stopped" -> true
+  | _ -> false
+
+let rec poll_fill mode date client_order_id deadline =
+  let order = Alpaca.order_by_client_id mode client_order_id in
+  match order with
+  | Some order when terminal_order_status order.status ->
+      log_fill date client_order_id (Some order)
+  | _ when Unix.gettimeofday () >= deadline ->
+      log_fill date client_order_id order
+  | _ ->
+      Unix.sleepf 15.;
+      poll_fill mode date client_order_id deadline
+
+let finish_order mode next_close date client_order_id
+    (order : Alpaca.order_t) =
+  if terminal_order_status order.status then
+    log_fill date client_order_id (Some order)
+  else begin
+    sleep_until next_close;
+    poll_fill mode date client_order_id
+      (float_of_int (rfc3339_seconds next_close + (5 * 60)))
+  end
 
 let execute_decision mode symbol next_close decision =
   log_decision decision;
   match decision.action with
   | Skip _ -> ()
   | Order { side; qty; id } ->
-      let submit_at = shift_rfc3339 next_close (-10 * 60) in
-      sleep_until submit_at;
       let order =
         match Alpaca.order_by_client_id mode id with
         | Some order -> order
         | None ->
             Alpaca.submit_moc mode ~symbol ~qty ~side ~client_order_id:id
       in
-      rejected_order order;
-      sleep_until next_close;
-      Unix.sleepf 1.;
-      log_fill decision.provisional.date id
-        (Alpaca.order_by_client_id mode id)
+      (match order.status with
+       | "rejected" -> failwith "Alpaca rejected the order"
+       | _ ->
+           finish_order mode next_close decision.provisional.date id order)
 
 let run mode ~strat_path ~data_dir =
   let ast = Dsl.parse_file strat_path in
@@ -293,8 +310,15 @@ let run mode ~strat_path ~data_dir =
     | exception error ->
         log "date=unknown error=%s order=skip"
           (Printexc.to_string error);
-        Unix.sleepf 60.;
-        cycle ()
+        let rec resume_next_session () =
+          Unix.sleepf 60.;
+          match Alpaca.clock mode with
+          | exception _ -> resume_next_session ()
+          | recovered ->
+              sleep_until recovered.next_open;
+              cycle ()
+        in
+        resume_next_session ()
     | clock ->
         if not clock.is_open then begin
           sleep_until clock.next_open;
@@ -307,21 +331,38 @@ let run mode ~strat_path ~data_dir =
           | `Post_close ->
               sleep_until clock.next_open;
               cycle ()
-          | (`Decide | `Submit_window) ->
-              (match decide mode ~strat_path ~data_dir with
-               | decision ->
-                   (match
-                      execute_decision mode symbol clock.next_close decision
-                    with
-                    | () -> sleep_until clock.next_open
-                    | exception error ->
-                        log "date=%s error=%s order=skip"
-                          decision.provisional.date (Printexc.to_string error);
-                        sleep_until clock.next_open)
-               | exception error ->
-                   log "date=%s error=%s order=skip"
-                     (timestamp_date clock.timestamp) (Printexc.to_string error);
-                   sleep_until clock.next_open);
+          | (`Decide | `Submit_window as phase) ->
+              let date = timestamp_date clock.timestamp in
+              let id = client_order_id ~symbol ~date in
+              (match Alpaca.order_by_client_id mode id with
+               | Some order ->
+                   log "date=%s order=existing:%s fill=pending" date id;
+                   finish_order mode clock.next_close date id order;
+                   sleep_until clock.next_open
+               | None ->
+                   (match phase with
+                    | `Submit_window ->
+                        log
+                          "date=%s error=missed MOC submission cutoff order=skip"
+                          date;
+                        sleep_until clock.next_open
+                    | `Decide ->
+                        (match decide mode ~strat_path ~data_dir with
+                         | decision ->
+                             (match
+                                execute_decision mode symbol clock.next_close
+                                  decision
+                              with
+                              | () -> sleep_until clock.next_open
+                              | exception error ->
+                                  log "date=%s error=%s order=skip"
+                                    decision.provisional.date
+                                    (Printexc.to_string error);
+                                  sleep_until clock.next_open)
+                         | exception error ->
+                             log "date=%s error=%s order=skip" date
+                               (Printexc.to_string error);
+                             sleep_until clock.next_open)));
               cycle ()
   in
   cycle ()

@@ -11,6 +11,7 @@
   - [Cache files](#cache-files)
   - [Price adjustments](#price-adjustments)
 - [`bt target`](#bt-target)
+- [`bt live`](#bt-live)
 - [`bt run`](#bt-run)
   - [Run arguments and options](#run-arguments-and-options)
   - [Cost defaults](#cost-defaults)
@@ -30,6 +31,7 @@ bt run STRAT... [--baseline M/SYM] [--from D] [--to D]
        [--financing-ratio PERCENT] [--loan-term-months N] [--dividend-tax PERCENT]
        [--capital TWD] [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]
 bt target STRAT [--live] [--data-dir DIR]
+bt live STRAT [--live] [--data-dir DIR]
 ```
 
 ## `bt fetch`
@@ -118,6 +120,23 @@ Paper trading is the default. `--live` selects the live Alpaca account and API e
 Set `TIINGO_TOKEN`, `APCA_API_KEY_ID`, and `APCA_API_SECRET_KEY` in the environment. The Alpaca key variables must contain credentials for the account selected by the mode.
 
 Output is one field per line: `fetched-through`, the provisional bar's `date`, `open`, `high`, `low`, `close`, and `volume`, then `target`, `equity`, and `held`. The final `action` is `order` or `skip`. An order also prints `side`, `quantity`, and `client-order-id`; a skip prints `reason`. The command never submits the printed order.
+
+## `bt live`
+
+Runs the close-scheduled trading daemon for one US strategy. Paper trading is the default; `--live` selects the live Alpaca account and API endpoint. Taiwan strategies stop with `live trading supports us only`.
+
+The daemon derives every phase from Alpaca's `next_close`. It refreshes Tiingo history and evaluates the provisional daily bar 15 minutes before the close, then queries today's deterministic client order ID before submitting a whole-share market-on-close order by 10 minutes before the close. After the close it logs the fill and sleeps until the next open.
+
+| Argument or option | Default | Description |
+|---|---|---|
+| `STRAT` | - | Read one strategy containing exactly one US stock declaration. |
+| `--live` | paper | Use the live Alpaca account instead of paper. |
+| `--data-dir DIR` | `data/` | Set the Tiingo cache directory. |
+| `-h`, `-help`, `--help` | - | Print the live options and exit with code 0. |
+
+Set `TIINGO_TOKEN`, `APCA_API_KEY_ID`, and `APCA_API_SECRET_KEY` in the environment. At startup the daemon prints the mode, account number, and equity, and refuses inactive or trading-blocked accounts.
+
+Logs are append-only ASCII text. Each decision identifies the session date, fetched-through date, provisional close, target, equity, held shares, order or skip reason, and fill state. A stale cache, fetch or snapshot error, evaluation error, or order rejection logs one error line and skips the day without placing another order. Restarts recompute desired shares from the account and query the deterministic client order ID before submission, so no local state file is needed.
 
 ## `bt run`
 
