@@ -40,6 +40,91 @@ let below_threshold ~delta ~price =
 let client_order_id ~symbol ~date =
   Printf.sprintf "bt-%s-%s" symbol date
 
+let int_field value offset length =
+  int_of_string (String.sub value offset length)
+
+let timezone_start value =
+  let rec find offset =
+    if offset >= String.length value then
+      failwith (Printf.sprintf "invalid RFC3339 timestamp: %s" value)
+    else
+      match value.[offset] with
+      | 'Z' | '+' | '-' -> offset
+      | _ -> find (offset + 1)
+  in
+  find 19
+
+let timezone_offset value start =
+  match value.[start] with
+  | 'Z' -> 0
+  | ('+' | '-') as sign ->
+      let seconds =
+        (int_field value (start + 1) 2 * 60
+         + int_field value (start + 4) 2)
+        * 60
+      in
+      if sign = '+' then seconds else -seconds
+  | _ -> assert false
+
+let days_from_civil year month day =
+  let year = if month <= 2 then year - 1 else year in
+  let era = year / 400 in
+  let year_of_era = year - (era * 400) in
+  let month_prime = month + (if month > 2 then -3 else 9) in
+  let day_of_year = ((153 * month_prime + 2) / 5) + day - 1 in
+  let day_of_era =
+    (year_of_era * 365) + (year_of_era / 4) - (year_of_era / 100)
+    + day_of_year
+  in
+  (era * 146097) + day_of_era - 719468
+
+let rfc3339_seconds value =
+  if String.length value < 20 then
+    failwith (Printf.sprintf "invalid RFC3339 timestamp: %s" value);
+  let days =
+    days_from_civil (int_field value 0 4) (int_field value 5 2)
+      (int_field value 8 2)
+  in
+  let local =
+    (days * 86400)
+    + (int_field value 11 2 * 3600)
+    + (int_field value 14 2 * 60)
+    + int_field value 17 2
+  in
+  let start = timezone_start value in
+  local - timezone_offset value start
+
+let shift_rfc3339 value seconds =
+  let start = timezone_start value in
+  let offset = timezone_offset value start in
+  let shifted =
+    Unix.gmtime (float_of_int (rfc3339_seconds value + seconds + offset))
+  in
+  Printf.sprintf "%04d-%02d-%02dT%02d:%02d:%02d%s"
+    (shifted.tm_year + 1900) (shifted.tm_mon + 1) shifted.tm_mday
+    shifted.tm_hour shifted.tm_min shifted.tm_sec
+    (String.sub value start (String.length value - start))
+
+let next_actions ~now ~next_close =
+  let now = rfc3339_seconds now in
+  let close = rfc3339_seconds next_close in
+  let decide_at = close - (15 * 60) in
+  let submit_at = close - (10 * 60) in
+  if now < decide_at then
+    `Sleep_until (shift_rfc3339 next_close (-15 * 60))
+  else if now < submit_at then
+    `Decide
+  else if now < close then
+    `Submit_window
+  else
+    `Post_close
+
+let startup_ok (account : Alpaca.account_t) =
+  match account.status, account.trading_blocked with
+  | "ACTIVE", false -> Ok ()
+  | "ACTIVE", true -> Error "account trading is blocked"
+  | status, _ -> Error (Printf.sprintf "account status is %s" status)
+
 let decide mode ~strat_path ~data_dir =
   let ast = Dsl.parse_file strat_path in
   match Dsl.stocks_of ~filename:strat_path ast with
@@ -100,3 +185,143 @@ let decide mode ~strat_path ~data_dir =
   | [_, "tw", _] | [_, _, _] ->
       failwith "live trading supports us only"
   | _ -> failwith "live trading requires exactly one stock"
+
+let printable_ascii value =
+  String.map
+    (fun character ->
+      if character >= ' ' && character <= '~' then character else '?')
+    value
+
+let log format =
+  Printf.ksprintf
+    (fun line ->
+      print_endline (printable_ascii line);
+      flush stdout)
+    format
+
+let mode_name = function
+  | Paper -> "paper"
+  | Live -> "live"
+
+let sleep_until timestamp =
+  let delay =
+    float_of_int (rfc3339_seconds timestamp) -. Unix.gettimeofday ()
+  in
+  if delay > 0. then Unix.sleepf delay
+
+let timestamp_date timestamp =
+  if String.length timestamp < 10 then
+    failwith (Printf.sprintf "invalid RFC3339 timestamp: %s" timestamp);
+  String.sub timestamp 0 10
+
+let order_description = function
+  | Skip reason -> Printf.sprintf "skip:%s" reason
+  | Order { side; qty; id } ->
+      let side =
+        match side with
+        | `Buy -> "buy"
+        | `Sell -> "sell"
+      in
+      Printf.sprintf "%s:%d:%s" side qty id
+
+let log_decision (decision : decision) =
+  log
+    "date=%s fetched-through=%s provisional-close=%.10g target=%.10g \
+     equity=%.10g held=%.10g order=%s fill=pending"
+    decision.provisional.date decision.fetched_through decision.provisional.c
+    decision.target decision.equity decision.held
+    (order_description decision.action)
+
+let log_fill date client_order_id = function
+  | None ->
+      log "date=%s client-order-id=%s fill-status=missing fill-price=- filled-qty=0"
+        date client_order_id
+  | Some (order : Alpaca.order_t) ->
+      let price =
+        match order.filled_avg_price with
+        | Some value -> Printf.sprintf "%.10g" value
+        | None -> "-"
+      in
+      log
+        "date=%s client-order-id=%s fill-status=%s fill-price=%s \
+         filled-qty=%.10g"
+        date client_order_id order.status price order.filled_qty
+
+let rejected_order (order : Alpaca.order_t) =
+  match order.status with
+  | "rejected" -> failwith "Alpaca rejected the order"
+  | _ -> ()
+
+let execute_decision mode symbol next_close decision =
+  log_decision decision;
+  match decision.action with
+  | Skip _ -> ()
+  | Order { side; qty; id } ->
+      let submit_at = shift_rfc3339 next_close (-10 * 60) in
+      sleep_until submit_at;
+      let order =
+        match Alpaca.order_by_client_id mode id with
+        | Some order -> order
+        | None ->
+            Alpaca.submit_moc mode ~symbol ~qty ~side ~client_order_id:id
+      in
+      rejected_order order;
+      sleep_until next_close;
+      Unix.sleepf 1.;
+      log_fill decision.provisional.date id
+        (Alpaca.order_by_client_id mode id)
+
+let run mode ~strat_path ~data_dir =
+  let ast = Dsl.parse_file strat_path in
+  let symbol =
+    match Dsl.stocks_of ~filename:strat_path ast with
+    | [_, "us", symbol] -> symbol
+    | [_, "tw", _] | [_, _, _] ->
+        failwith "live trading supports us only"
+    | _ -> failwith "live trading requires exactly one stock"
+  in
+  let account = Alpaca.account mode in
+  let () =
+    match startup_ok account with
+    | Ok () -> ()
+    | Error reason -> failwith reason
+  in
+  log "startup mode=%s account=%s equity=%.10g" (mode_name mode)
+    account.account_number account.equity;
+  let rec cycle () =
+    match Alpaca.clock mode with
+    | exception error ->
+        log "date=unknown error=%s order=skip"
+          (Printexc.to_string error);
+        Unix.sleepf 60.;
+        cycle ()
+    | clock ->
+        if not clock.is_open then begin
+          sleep_until clock.next_open;
+          cycle ()
+        end else
+          match next_actions ~now:clock.timestamp ~next_close:clock.next_close with
+          | `Sleep_until timestamp ->
+              sleep_until timestamp;
+              cycle ()
+          | `Post_close ->
+              sleep_until clock.next_open;
+              cycle ()
+          | (`Decide | `Submit_window) ->
+              (match decide mode ~strat_path ~data_dir with
+               | decision ->
+                   (match
+                      execute_decision mode symbol clock.next_close decision
+                    with
+                    | () -> sleep_until clock.next_open
+                    | exception error ->
+                        log "date=%s error=%s order=skip"
+                          decision.provisional.date (Printexc.to_string error);
+                        sleep_until clock.next_open)
+               | exception error ->
+                   log "date=%s error=%s order=skip"
+                     (timestamp_date clock.timestamp) (Printexc.to_string error);
+                   sleep_until clock.next_open);
+              cycle ()
+  in
+  cycle ()

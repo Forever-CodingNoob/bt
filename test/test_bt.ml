@@ -4370,26 +4370,73 @@ let test_live_pure_decisions () =
   in
   assert (Live.provisional_bar snapshot = expected)
 
-let test_target_rejects_tw () =
+let test_live_schedule () =
+  let close = "2025-06-24T16:00:00-04:00" in
+  assert
+    (Live.next_actions ~now:"2025-06-24T15:44:59-04:00" ~next_close:close
+     = `Sleep_until "2025-06-24T15:45:00-04:00");
+  assert
+    (Live.next_actions ~now:"2025-06-24T15:45:00-04:00" ~next_close:close
+     = `Decide);
+  assert
+    (Live.next_actions ~now:"2025-06-24T15:49:59-04:00" ~next_close:close
+     = `Decide);
+  assert
+    (Live.next_actions ~now:"2025-06-24T15:50:00-04:00" ~next_close:close
+     = `Submit_window);
+  assert
+    (Live.next_actions ~now:"2025-06-24T16:00:00-04:00" ~next_close:close
+     = `Post_close);
+  let early_close = "2025-11-28T13:00:00-05:00" in
+  assert
+    (Live.next_actions ~now:"2025-11-28T12:44:00-05:00"
+       ~next_close:early_close
+     = `Sleep_until "2025-11-28T12:45:00-05:00");
+  assert
+    (Live.next_actions ~now:"2025-11-28T12:50:00-05:00"
+       ~next_close:early_close
+     = `Submit_window)
+
+let test_live_startup_guard () =
+  let account : Alpaca.account_t =
+    { equity = 10000.;
+      status = "ACTIVE";
+      trading_blocked = false;
+      account_number = "paper-account" }
+  in
+  assert (Live.startup_ok account = Ok ());
+  assert
+    (Live.startup_ok { account with status = "ACCOUNT_CLOSED" }
+     = Error "account status is ACCOUNT_CLOSED");
+  assert
+    (Live.startup_ok { account with trading_blocked = true }
+     = Error "account trading is blocked")
+
+let test_live_commands_reject_tw () =
   let binary = locate ["_build/default/bin/bt.exe"; "../bin/bt.exe"] in
-  let stderr_path = Filename.temp_file "bt-test-target-" ".txt" in
-  Fun.protect
-    ~finally:(fun () ->
-      if Sys.file_exists stderr_path then Sys.remove stderr_path)
-    (fun () ->
-      with_temp_strategy "stock \"tw/00685L\"\ntarget 1.0\n" (fun path ->
-        let command =
-          String.concat " "
-            [ Filename.quote binary;
-              "target";
-              Filename.quote path;
-              ">/dev/null";
-              "2>" ^ Filename.quote stderr_path ]
-        in
-        assert (Sys.command command = 2);
-        assert
-          (contains (read_file stderr_path)
-             "live trading supports us only")))
+  List.iter
+    (fun subcommand ->
+      let stderr_path =
+        Filename.temp_file ("bt-test-" ^ subcommand ^ "-") ".txt"
+      in
+      Fun.protect
+        ~finally:(fun () ->
+          if Sys.file_exists stderr_path then Sys.remove stderr_path)
+        (fun () ->
+          with_temp_strategy "stock \"tw/00685L\"\ntarget 1.0\n" (fun path ->
+            let command =
+              String.concat " "
+                [ Filename.quote binary;
+                  subcommand;
+                  Filename.quote path;
+                  ">/dev/null";
+                  "2>" ^ Filename.quote stderr_path ]
+            in
+            assert (Sys.command command = 2);
+            assert
+              (contains (read_file stderr_path)
+                 "live trading supports us only"))))
+    ["target"; "live"]
 
 let () =
   test_alpaca_base_urls ();
@@ -4400,7 +4447,9 @@ let () =
   test_alpaca_snapshot_parse ();
   test_engine_effective_targets ();
   test_live_pure_decisions ();
-  test_target_rejects_tw ();
+  test_live_schedule ();
+  test_live_startup_guard ();
+  test_live_commands_reject_tw ();
   test_profile_of_market ();
   test_parser ();
   test_default_costs ();

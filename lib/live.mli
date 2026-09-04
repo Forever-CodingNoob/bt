@@ -38,5 +38,17 @@ val below_threshold : delta:int -> price:float -> bool
 (** Build the deterministic daily Alpaca client order identifier. *)
 val client_order_id : symbol:string -> date:string -> string
 
+(** Select the next daemon phase from RFC3339 clock timestamps. *)
+val next_actions :
+  now:string ->
+  next_close:string ->
+  [`Sleep_until of string | `Decide | `Submit_window | `Post_close]
+
+(** Reject inactive or trading-blocked accounts before the daemon starts. *)
+val startup_ok : Alpaca.account_t -> (unit, string) result
+
 (** Compute one live decision without submitting an order. *)
 val decide : mode -> strat_path:string -> data_dir:string -> decision
+
+(** Run the live trading daemon until the process is stopped. *)
+val run : mode -> strat_path:string -> data_dir:string -> unit

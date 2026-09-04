@@ -9,14 +9,16 @@ let usage =
    \         [--dividend-tax PCT] [--financing-rate PCT] [--maintenance-ratio PCT] [--financing-ratio PCT]\n\
    \         [--loan-term-months N]\n\
    \         [--capital TWD] [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]\n\
-   \  bt target STRAT [--live] [--data-dir DIR]"
+   \  bt target STRAT [--live] [--data-dir DIR]\n\
+   \  bt live STRAT [--live] [--data-dir DIR]"
 
 let help =
   usage ^
   "\n\ncommands:\n\
    \  fetch  Download market data from FinMind into the local cache.\n\
    \  run    Run strategies with cached data and compare them with a baseline.\n\
-   \  target Print one live decision without submitting an order.\n\n\
+   \  target Print one live decision without submitting an order.\n\
+   \  live   Run the close-scheduled Alpaca trading daemon.\n\n\
    Fetch requires FINMIND_TOKEN.\n\
    Full reference: docs/cli.md"
 
@@ -529,12 +531,12 @@ let print_decision (decision : Btlib.Live.decision) =
       Printf.printf "action: skip\n";
       Printf.printf "reason: %s\n" reason
 
-let target argv =
+let live_command_args command argv =
   let strat_path = ref None in
-  let live = ref false in
+  let use_live = ref false in
   let data_dir = ref "data" in
   let rec options =
-    [ ("--live", Arg.Set live, "use the live Alpaca account");
+    [ ("--live", Arg.Set use_live, "use the live Alpaca account");
       ("--data-dir", Arg.Set_string data_dir, "cache directory");
       ("-h",
        Arg.Unit
@@ -560,24 +562,35 @@ let target argv =
   let strat_path =
     match !strat_path with
     | Some path -> path
-    | None -> usage_error "target: one STRAT file is required"
+    | None ->
+        usage_error (Printf.sprintf "%s: one STRAT file is required" command)
   in
   let ast = Btlib.Dsl.parse_file strat_path in
   let market =
     match Btlib.Dsl.stocks_of ~filename:strat_path ast with
     | [_, market, _] -> market
-    | _ -> usage_error "target: strategy must declare exactly one stock"
+    | _ ->
+        usage_error
+          (Printf.sprintf
+             "%s: strategy must declare exactly one stock" command)
   in
   match market with
   | "us" ->
       let mode =
-        match !live with
+        match !use_live with
         | false -> Btlib.Live.Paper
         | true -> Btlib.Live.Live
       in
-      Btlib.Live.decide mode ~strat_path ~data_dir:!data_dir
-      |> print_decision
+      strat_path, mode, !data_dir
   | "tw" | _ -> usage_error "live trading supports us only"
+
+let target argv =
+  let strat_path, mode, data_dir = live_command_args "target" argv in
+  Btlib.Live.decide mode ~strat_path ~data_dir |> print_decision
+
+let live argv =
+  let strat_path, mode, data_dir = live_command_args "live" argv in
+  Btlib.Live.run mode ~strat_path ~data_dir
 
 let dispatch () =
   if Array.length Sys.argv < 2 then begin
@@ -589,6 +602,7 @@ let dispatch () =
   | "fetch" -> fetch (Array.sub Sys.argv 1 (Array.length Sys.argv - 1))
   | "run" -> run (Array.sub Sys.argv 1 (Array.length Sys.argv - 1))
   | "target" -> target (Array.sub Sys.argv 1 (Array.length Sys.argv - 1))
+  | "live" -> live (Array.sub Sys.argv 1 (Array.length Sys.argv - 1))
   | command -> usage_error (Printf.sprintf "unknown subcommand %S" command)
 
 let () =
