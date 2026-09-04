@@ -46,6 +46,7 @@ let buy_hold_strategy_path () =
 let fixture_path () =
   locate ["test/fixtures/synthetic.csv"; "fixtures/synthetic.csv"]
 
+
 let bar date o c : Data.bar =
   { date; o; h = max o c +. 1.; l = min o c -. 1.; c; v = 1000. }
 
@@ -1875,6 +1876,11 @@ let read_file path =
   Fun.protect
     ~finally:(fun () -> close_in input)
     (fun () -> really_input_string input (in_channel_length input))
+let alpaca_fixture name =
+  read_file
+    (locate
+       [Filename.concat "test/fixtures/alpaca" name;
+        Filename.concat "fixtures/alpaca" name])
 
 let test_dividend_tax_cli () =
   let root = Filename.temp_file "bt-test-dividend-tax-" "" in
@@ -4230,7 +4236,83 @@ let test_alias_qualified_labels () =
       let labels = Dsl.labels_of_stocks stocks in
       assert (labels = ["tw/0050"; "tw/00632R"]))
 
+let test_alpaca_base_urls () =
+  assert
+    (Alpaca.base_url Alpaca.Paper = "https://paper-api.alpaca.markets");
+  assert (Alpaca.base_url Alpaca.Live = "https://api.alpaca.markets")
+
+let test_alpaca_clock_parse () =
+  let actual = Alpaca.parse_clock (alpaca_fixture "clock.json") in
+  (* Each expected field is copied from the documented clock response. *)
+  let expected : Alpaca.clock_t =
+    { timestamp = "2025-06-24T14:15:22-04:00";
+      is_open = true;
+      next_open = "2025-06-25T09:30:00-04:00";
+      next_close = "2025-06-24T16:00:00-04:00" }
+  in
+  assert (actual = expected)
+
+let test_alpaca_account_parse () =
+  let actual = Alpaca.parse_account (alpaca_fixture "account.json") in
+  (* "103820.56" parses exactly to the expected decimal float. *)
+  let expected : Alpaca.account_t =
+    { equity = 103820.56;
+      status = "ACTIVE";
+      trading_blocked = false;
+      account_number = "010203ABCD" }
+  in
+  assert (actual = expected)
+
+let test_alpaca_position_parse () =
+  (* The documented quantity string "5" parses to 5 whole shares. *)
+  assert
+    (Alpaca.parse_position_qty ~http_code:200
+       (alpaca_fixture "position.json") = 5.);
+  (* Alpaca uses HTTP 404 to represent no open position. *)
+  assert (Alpaca.parse_position_qty ~http_code:404 "" = 0.)
+
+let test_alpaca_order_parse () =
+  let actual = Alpaca.parse_order (alpaca_fixture "order.json") in
+  (* The unfilled example reports string quantity "0" and null fill price. *)
+  let expected : Alpaca.order_t =
+    { id = "7b08df51-c1ac-453c-99f9-323a5f075f0d";
+      status = "accepted";
+      filled_avg_price = None;
+      filled_qty = 0. }
+  in
+  let () = assert (actual = expected) in
+  let filled =
+    Alpaca.parse_order
+      {|{"id":"filled-id","status":"filled","filled_avg_price":"172.55","filled_qty":"2"}|}
+  in
+  (* Decimal fill strings "172.55" and "2" parse to the reported fill values. *)
+  let filled_expected : Alpaca.order_t =
+    { id = "filled-id";
+      status = "filled";
+      filled_avg_price = Some 172.55;
+      filled_qty = 2. }
+  in
+  assert (filled = filled_expected)
+
+let test_alpaca_snapshot_parse () =
+  let actual = Alpaca.parse_snapshot (alpaca_fixture "snapshot.json") in
+  (* OHLCV comes from dailyBar; latest comes from latestTrade.p. *)
+  let expected : Alpaca.snapshot_t =
+    { day_open = 172.62;
+      day_high = 173.71;
+      day_low = 171.6618;
+      latest = 172.55;
+      day_volume = 56457696. }
+  in
+  assert (actual = expected)
+
 let () =
+  test_alpaca_base_urls ();
+  test_alpaca_clock_parse ();
+  test_alpaca_account_parse ();
+  test_alpaca_position_parse ();
+  test_alpaca_order_parse ();
+  test_alpaca_snapshot_parse ();
   test_profile_of_market ();
   test_parser ();
   test_default_costs ();
