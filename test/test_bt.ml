@@ -4217,7 +4217,18 @@ let test_alias_qualified_labels () =
       let ast = Dsl.parse_file path in
       let stocks = Dsl.stocks_of ~filename:path ast in
       let labels = Dsl.labels_of_stocks stocks in
-      assert (labels = ["tw/00685L"]))
+      assert (labels = ["tw/00685L"]));
+  (* Distinct symbols with aliases: each symbol once → bare labels *)
+  with_temp_strategy
+    "stock \"tw/0050\" as etf50\n\
+     stock \"tw/00632R\" as inverse\n\
+     etf50.target 0.6\n\
+     inverse.target 0.4\n"
+    (fun path ->
+      let ast = Dsl.parse_file path in
+      let stocks = Dsl.stocks_of ~filename:path ast in
+      let labels = Dsl.labels_of_stocks stocks in
+      assert (labels = ["tw/0050"; "tw/00632R"]))
 
 let () =
   test_profile_of_market ();

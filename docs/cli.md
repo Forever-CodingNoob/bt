@@ -175,7 +175,6 @@ The engine closes a final open exposure at the last close in both modes. It appl
 `bt run` prints a report table to standard output. The table has one column for each strategy and, when requested, one baseline column. It shows Total return, CAGR, Sharpe, MaxDD, and Calmar. The lines below the table show each strategy's trade count and win rate, the common date range, and the fill mode.
 The `name:` line after the table joins each strategy's stock labels with `+`. When the same symbol appears under multiple aliases, the label carries a `#alias` suffix (for example `tw/00685L#core+tw/00685L#trade`).
 
-
 If a strategy had a loan on at least one bar, `bt run` also prints a margin line:
 
 ```text
