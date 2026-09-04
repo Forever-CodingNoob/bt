@@ -99,6 +99,7 @@ type market_profile = {
   settlement_lag : int;
   maintenance : maintenance_model;
   default_financing_rate : float;
+  default_financing_ratio : float;
 }
 
 let profile_of_market = function
@@ -106,12 +107,14 @@ let profile_of_market = function
       { interest_day_count = 365.;
         settlement_lag = 2;
         maintenance = Collateral_over_loan;
-        default_financing_rate = 6.35 }
+        default_financing_rate = 6.35;
+        default_financing_ratio = 0.6 }
   | "us" ->
       { interest_day_count = 360.;
         settlement_lag = 1;
         maintenance = Equity_over_required;
-        default_financing_rate = 6.25 }
+        default_financing_rate = 6.25;
+        default_financing_ratio = 0.5 }
   | market ->
       invalid_arg
         (Printf.sprintf "Engine.profile_of_market: unknown market %S" market)
@@ -154,6 +157,27 @@ let taf_dollars (costs : costs) ~shares =
 
 let clamp_target value =
   if Float.is_nan value || value < 0. then 0. else value
+
+let effective_targets ~financing_ratios targets =
+  if Array.length financing_ratios <> Array.length targets then
+    invalid_arg "Engine.effective_targets: length mismatch";
+  let need = ref 0. in
+  let effective =
+    Array.mapi
+      (fun index target ->
+        let target = clamp_target target in
+        need :=
+          !need +. (target *. (1. -. financing_ratios.(index)));
+        target)
+      targets
+  in
+  let scale = if !need > 1. then 1. /. !need else 1. in
+  let () =
+    Array.iteri
+      (fun index target -> effective.(index) <- target *. scale)
+      effective
+  in
+  effective, scale < 1.
 
 let day_number date =
   let year = int_of_string (String.sub date 0 4) in
@@ -862,18 +886,10 @@ let run ?dividends ?(dividend_tax = 0.)
     pending_liquidation := false
   in
   let effective t =
-    let raw =
-      Array.init asset_count
-        (fun index -> clamp_target strategy.targets.(index).(t))
+    let targets =
+      Array.init asset_count (fun index -> strategy.targets.(index).(t))
     in
-    let need =
-      fold_assets
-        (fun need index ->
-          need +. (raw.(index) *. (1. -. margin.ratios.(index))))
-        0.
-    in
-    let scale = if need > 1. then 1. /. need else 1. in
-    Array.map (fun value -> value *. scale) raw, scale < 1.
+    effective_targets ~financing_ratios:margin.ratios targets
   in
   let differs eff =
     fold_assets

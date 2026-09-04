@@ -66,6 +66,7 @@ type market_profile = {
   settlement_lag : int;
   maintenance : maintenance_model;
   default_financing_rate : float;
+  default_financing_ratio : float;
 }
 
 (** Return the market profile. Fails on unknown markets. *)
@@ -73,6 +74,10 @@ val profile_of_market : string -> market_profile
 
 (** Return the default transaction costs for a market and symbol. *)
 val default_costs : market:string -> symbol:string -> costs
+
+(** Clamp invalid targets and rescale a bar's portfolio to its funding cap. *)
+val effective_targets :
+  financing_ratios:float array -> float array -> float array * bool
 
 (** Run a synchronized multi-asset backtest. [dividends] defaults to
     no events. [dividend_tax] is the fraction withheld at creation. *)

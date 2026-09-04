@@ -4309,6 +4309,23 @@ let test_alpaca_snapshot_parse () =
   in
   assert (actual = expected)
 
+let test_engine_effective_targets () =
+  let ratio =
+    (Engine.profile_of_market "us").Engine.default_financing_ratio
+  in
+  let effective target =
+    match
+      Engine.effective_targets ~financing_ratios:[| ratio |] [| target |]
+    with
+    | [| value |], _ -> value
+    | _ -> assert false
+  in
+  assert_close 0.5 ratio;
+  assert_close 0. (effective (-1.));
+  assert_close 0. (effective Float.nan);
+  assert_close 2. (effective 2.5);
+  assert_close 1.994 (effective 1.994)
+
 let test_live_pure_decisions () =
   (* 1.994 * 10000 / 500 = 39.88, truncated toward zero to 39;
      the negative case truncates -39.88 toward zero to -39. *)
@@ -4381,6 +4398,7 @@ let () =
   test_alpaca_position_parse ();
   test_alpaca_order_parse ();
   test_alpaca_snapshot_parse ();
+  test_engine_effective_targets ();
   test_live_pure_decisions ();
   test_target_rejects_tw ();
   test_profile_of_market ();

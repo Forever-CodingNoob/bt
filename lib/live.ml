@@ -72,7 +72,14 @@ let decide mode ~strat_path ~data_dir =
       let target =
         match strategy.Engine.targets with
         | [| targets |] when Array.length targets > 0 ->
-            targets.(Array.length targets - 1)
+            let raw = targets.(Array.length targets - 1) in
+            let profile = Engine.profile_of_market "us" in
+            let effective, _ =
+              Engine.effective_targets
+                ~financing_ratios:[| profile.default_financing_ratio |]
+                [| raw |]
+            in
+            effective.(0)
         | _ -> failwith "live trading requires exactly one stock target"
       in
       let account = Alpaca.account mode in
