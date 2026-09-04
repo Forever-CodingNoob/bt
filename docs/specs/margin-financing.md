@@ -137,9 +137,9 @@ a missing cache defaults to 60% with
 
 ## CLI
 
-- `--financing-rate PERCENT` — annual financing rate, default 6.35.
-- `--maintenance-ratio PERCENT` — default 130.
-- `--financing-ratio PERCENT` — forces one uniform financing ratio for
+- `--financing-rate PERCENT` - annual financing rate, default 6.35.
+- `--maintenance-ratio PERCENT` - default 130.
+- `--financing-ratio PERCENT` - forces one uniform financing ratio for
   every asset and skips classification.
 
 Flags apply to strategies and baseline alike; the baseline at target
@@ -150,7 +150,7 @@ Flags apply to strategies and baseline alike; the baseline at target
 Remove the footer `Exposure above 1.0 uses daily-reset leverage.`
 (now false). When a loan existed at any bar of any strategy column,
 print one line per affected strategy:
-`<name>: margin — financing 6.35%/yr, min maintenance 145.20%, margin calls 1, clamps 0`
+`<name>: margin - financing 6.35%/yr, min maintenance 145.20%, margin calls 1, clamps 0`
 with the run's actual values. No table changes.
 
 ## Result changes

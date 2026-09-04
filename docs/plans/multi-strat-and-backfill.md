@@ -38,9 +38,9 @@
 - Consumes: existing `Dsl.parse_file : string -> Ast.file`, `Dsl.compile`.
 - Produces (Task 3 relies on these exact names):
   - `Ast.stmt` gains `| Stock of string`.
-  - `Dsl.stock_of : filename:string -> Ast.file -> string * string` — returns `(market, symbol)`; errors (via `failwith`, message prefixed `<filename>: `) on zero `stock` statements ("add a stock statement, e.g. stock \"tw/00685L\""), on more than one ("multiple stocks per strat are not supported yet"), on a malformed string (expected shape `market/symbol` with market `tw` or `us`).
-  - `Dsl.compile_ast : Ast.file -> params:(string * float) list -> Data.bar array -> Engine.strategy` — the existing compile body, taking a parsed file. `Stock _` statements are ignored by compilation.
-  - `Dsl.compile : string -> params:(string * float) list -> Data.bar array -> Engine.strategy` stays as `parse_file` + `compile_ast` (tests keep working; a strat without `stock` still compiles — requiring `stock` is `bt run`'s job through `stock_of`).
+  - `Dsl.stock_of : filename:string -> Ast.file -> string * string` - returns `(market, symbol)`; errors (via `failwith`, message prefixed `<filename>: `) on zero `stock` statements ("add a stock statement, e.g. stock \"tw/00685L\""), on more than one ("multiple stocks per strat are not supported yet"), on a malformed string (expected shape `market/symbol` with market `tw` or `us`).
+  - `Dsl.compile_ast : Ast.file -> params:(string * float) list -> Data.bar array -> Engine.strategy` - the existing compile body, taking a parsed file. `Stock _` statements are ignored by compilation.
+  - `Dsl.compile : string -> params:(string * float) list -> Data.bar array -> Engine.strategy` stays as `parse_file` + `compile_ast` (tests keep working; a strat without `stock` still compiles - requiring `stock` is `bt run`'s job through `stock_of`).
 
 - [ ] **Step 1: Lexer**
 
@@ -138,7 +138,7 @@ Run `eval $(opam env) && dune build --root . && dune test --root . --force`; bot
 
 **Interfaces:**
 - Consumes: `fetch_rows`, `append_rows`, `rewrite_rows`, `first_cached_date`, `last_cached_date`, `normalize_row`, `row_date` in `lib/data.ml` (read the file first; names are current as of this plan).
-- Produces: `Data.prepend_rows : header:string -> rows_path:string -> cache_path:string -> before:string -> unit` — writes header, then rows from `rows_path` whose date is `< before`, then every data row of the existing cache, atomically (temp file + rename, like `rewrite_rows`).
+- Produces: `Data.prepend_rows : header:string -> rows_path:string -> cache_path:string -> before:string -> unit` - writes header, then rows from `rows_path` whose date is `< before`, then every data row of the existing cache, atomically (temp file + rename, like `rewrite_rows`).
 
 - [ ] **Step 1: `prepend_rows` in `lib/data.ml`**
 
@@ -165,7 +165,7 @@ Where `tw_expression`/`tw_header` are the existing TW jq expression and header (
 
 - [ ] **Step 3: fetch CLI defaults and positional form**
 
-In `bin/bt.ml` fetch (read it first): change the `--from` default `"2010-01-01"` to `"1994-10-01"`. Replace the anonymous-argument rejection with: one positional argument of shape `market/symbol` sets `market` and `symbol` (split on the first `/`; malformed → `Arg.Bad` naming the expected shape); flags still work; a second positional is an error. If both a positional and the flags set the symbol, the last one parsed wins (document in `--help` text as "positional MARKET/SYMBOL is equivalent to --market and --symbol").
+In `bin/bt.ml` fetch (read it first): change the `--from` default `"2010-01-01"` to `"1994-10-01"`. Replace the anonymous-argument rejection with: one positional argument of shape `market/symbol` sets `market` and `symbol` (split on the first `/`; malformed -> `Arg.Bad` naming the expected shape); flags still work; a second positional is an error. If both a positional and the flags set the symbol, the last one parsed wins (document in `--help` text as "positional MARKET/SYMBOL is equivalent to --market and --symbol").
 
 - [ ] **Step 4: Prepend unit test**
 
@@ -234,22 +234,22 @@ let filter_dates ~keep bars =
 
 Read the current `run` function first. New flow (replace `overlap_bars`; delete `--market`/`--symbol` and any separate baseline-market option, plus the old single-strat wiring):
 
-1. Anonymous args accumulate as strat paths (at least one required). Duplicate basenames (extension stripped) → usage error. Basename `baseline` with `--baseline` given → usage error.
+1. Anonymous args accumulate as strat paths (at least one required). Duplicate basenames (extension stripped) -> usage error. Basename `baseline` with `--baseline` given -> usage error.
 2. Parse each strat once (`Dsl.parse_file`), get `(market, symbol)` via `Dsl.stock_of`.
 3. `--baseline M/SYM` parses with the same split helper as fetch's positional.
 4. Load bars per strat (and baseline) with `Data.load` over the CLI range.
-5. Compute the common date set: for each bar array build the sorted date list; keep dates present in ALL arrays (fold `List.filter` over a string-set built with `Hashtbl` or sorted-list intersection; tail-recursive). Fewer than 2 common dates → error `strats have fewer than 2 common trading dates`.
+5. Compute the common date set: for each bar array build the sorted date list; keep dates present in ALL arrays (fold `List.filter` over a string-set built with `Hashtbl` or sorted-list intersection; tail-recursive). Fewer than 2 common dates -> error `strats have fewer than 2 common trading dates`.
 6. `Data.filter_dates` every array to the common set.
 7. Per strat: `Dsl.compile_ast`, per-strat `Engine.default_costs` from its market/symbol, apply CLI cost overrides, `Engine.run ~fill`.
 8. Baseline: `{ target = Array.make n 1.0 }` on its filtered bars, its own default costs plus overrides.
-9. `-p` validation moves across strats: collect declared params of every strat (expose the existing declared-params helper from `Dsl` as `Dsl.declared_params_ast : Ast.file -> (string * float) list` if not already public); error if an override matches none of the strats. Pass the full `params` list to every `compile_ast` (unknown names for THAT strat are filtered by the caller before the call — build the per-strat subset from its declared list).
+9. `-p` validation moves across strats: collect declared params of every strat (expose the existing declared-params helper from `Dsl` as `Dsl.declared_params_ast : Ast.file -> (string * float) list` if not already public); error if an override matches none of the strats. Pass the full `params` list to every `compile_ast` (unknown names for THAT strat are filtered by the caller before the call - build the per-strat subset from its declared list).
 10. `Report.print_many`, `Report.stem`, `Report.write_outputs`, then `Report.write_png ~stem` unless `--no-plot`.
 
 - [ ] **Step 3: Report generalization in `lib/report.ml`**
 
 Read the file first. Replace `print`/`write_csvs`/`write_equity_csv`/`write_trades_csv` with the interfaces above:
 
-- Table: column width 12 stays; header row = `Metric`, one column per strat basename (truncate a name longer than 12 to its last 12 chars), `baseline` last when present. Each metric row prints the per-strat formatted value; when a baseline exists, append a marker to each strat cell: `format_value ^ " W"` or `" L"` (lower-wins only for MaxDD; `n/a` cells get no marker). Below the table, per strat: `<name>: <stock> — trades N (win rate X); ` then the shared `Date range: ...; fill: ...` line. The leverage footer prints if ANY strat's max target exceeds 1.
+- Table: column width 12 stays; header row = `Metric`, one column per strat basename (truncate a name longer than 12 to its last 12 chars), `baseline` last when present. Each metric row prints the per-strat formatted value; when a baseline exists, append a marker to each strat cell: `format_value ^ " W"` or `" L"` (lower-wins only for MaxDD; `n/a` cells get no marker). Below the table, per strat: `<name>: <stock> - trades N (win rate X); ` then the shared `Date range: ...; fill: ...` line. The leverage footer prints if ANY strat's max target exceeds 1.
 - CSV: header `date,<name1>,...,baseline?`; rows zip the equity curves (all curves share the common date set by construction; assert equal lengths, fail loudly otherwise).
 - Fill logs: one `<name>.trades.csv` per strat, existing format. Baseline writes none.
 - `write_png ~out_dir ~stem` runs `python3 out/plot.py <out_dir>/<stem>.csv <out_dir>/<stem>.png`. `plot_script` is unchanged (header-driven).
@@ -267,7 +267,7 @@ target 1.0
 - [ ] **Step 5: Tests**
 
 - `Report.stem`: `stem ~names:["a"; "b"] ~out_name:None = "a_vs_b"`; `stem ~names:["a"] ~out_name:(Some "x") = "x"`.
-- Two-strat integration on the fixture (no network): build two temp strats that both name the fixture's data through direct `Dsl.compile` + `Engine.run` (the CLI layer is exercised in live verification). Strat A: the golden sma_cross body (fast=5, slow=20) — final equity must still equal 1.7291207425596153 under `Open_next`. Strat B: `target 1.0` — expected final equity computed in-test from the fixture itself: `last_close /. first_close` with zero costs under `Close_same` (an independent formula, not a frozen constant). Assert both.
+- Two-strat integration on the fixture (no network): build two temp strats that both name the fixture's data through direct `Dsl.compile` + `Engine.run` (the CLI layer is exercised in live verification). Strat A: the golden sma_cross body (fast=5, slow=20) - final equity must still equal 1.7291207425596153 under `Open_next`. Strat B: `target 1.0` - expected final equity computed in-test from the fixture itself: `last_close /. first_close` with zero costs under `Close_same` (an independent formula, not a frozen constant). Assert both.
 - `Dsl.stock_of` reserved-name interplay is CLI-level; leave to live verification.
 
 - [ ] **Step 6: Build, test, stage**
@@ -279,7 +279,7 @@ Build and test clean; `git add -A`; do not commit.
 ### Task 4: Documentation
 
 **Files:**
-- Modify: `README.md` (Commands, DSL statements, outputs; READ FIRST — user-authored sections must survive)
+- Modify: `README.md` (Commands, DSL statements, outputs; READ FIRST - user-authored sections must survive)
 - Modify: `docs/cli.md` (run section rewrite, fetch defaults, positional form, out-name; READ FIRST)
 - Modify: `CONTRIBUTING.md` (only if it references removed flags; READ FIRST)
 

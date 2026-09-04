@@ -282,7 +282,7 @@ In the `let () =` runner: delete `test_detect_splits ();`, add `test_back_adjust
 - [ ] **Step 2: Run the tests to verify the new one fails**
 
 Run: `dune build && dune runtest 2>&1 | head -5`
-Expected: `test_load_events` FAILS — `Data.load` does not read `.events.csv` yet, so `bars.(0).c` is still 306. (`test_back_adjust_events` passes already: `back_adjust` composition is existing behavior that these tests pin down.)
+Expected: `test_load_events` FAILS - `Data.load` does not read `.events.csv` yet, so `bars.(0).c` is still 306. (`test_back_adjust_events` passes already: `back_adjust` composition is existing behavior that these tests pin down.)
 
 - [ ] **Step 3: Implement the load path and delete the heuristic**
 
@@ -334,7 +334,7 @@ git commit -m "feat: adjust TW prices with exact event factors"
 
 - [ ] **Step 1: Update the docs**
 
-`README.md` lines 160-162 — replace the heuristic bullet with:
+`README.md` lines 160-162 - replace the heuristic bullet with:
 
 ```markdown
 - The loader adjusts TW prices for splits, capital reductions, and par
@@ -344,7 +344,7 @@ git commit -m "feat: adjust TW prices with exact event factors"
   `data/tw/<symbol>.events.csv`.
 ```
 
-`docs/cli.md` line 93 (Price adjustments section) — replace the heuristic paragraph with:
+`docs/cli.md` line 93 (Price adjustments section) - replace the heuristic paragraph with:
 
 ```markdown
 `bt fetch` also downloads split, capital-reduction, and par-value-change
@@ -354,7 +354,7 @@ factors together with the dividend factors during the same load step. If
 the file is missing, `bt` prints a warning and loads unadjusted prices.
 ```
 
-`CONTRIBUTING.md` line 7 — change the module table entry to:
+`CONTRIBUTING.md` line 7 - change the module table entry to:
 
 ```
 lib/data.ml      FinMind fetch, CSV cache, dividend and corporate-action adjustment

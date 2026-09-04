@@ -232,13 +232,13 @@ Drift-affected updates to existing tests (derivation comments required in the co
   (sell costs are 1% of each position's value; B's buy was free).
 - `test_multi_stock_cli` holds b at 0.5 for three bars: the last equity value becomes 1.37 (`v_a = 1.21`, `v_b = 0.66`, cash `-0.5`, financing off in this task). Update the comment and expectation; day-2 equity stays 1.15.
 - `test_baseline_output_header` constructs an `Engine.result` literal: add `margin_stats = { min_maintenance = None; margin_calls = 0; clamps = 0 }`.
-- Every other existing test either uses targets in {0,1} or changes its target every bar (single-bar windows are algebraically identical under drift), so their values stay untouched. If any other expectation fails, stop and report — do not adjust values without a derivation.
+- Every other existing test either uses targets in {0,1} or changes its target every bar (single-bar windows are algebraically identical under drift), so their values stay untouched. If any other expectation fails, stop and report - do not adjust values without a derivation.
 - Direct `Engine.run` callsites from sub-project B's tests (`test_engine_portfolio_close`, `test_engine_portfolio_open`, `test_engine_portfolio_costs`, `test_engine_portfolio_min_fee`, and any other) gain `~margin:(no_margin <asset count>)`; golden and DSL tests already flow through `run_single` or get the same mechanical addition where they call `Engine.run` directly.
 
 - [ ] **Step 2: Verify they fail**
 
 Run: `opam exec -- dune build 2>&1 | head -10`
-Expected: compile errors — `Engine.margin` is unbound and `run` lacks `~margin`.
+Expected: compile errors - `Engine.margin` is unbound and `run` lacks `~margin`.
 
 - [ ] **Step 3: Implement the engine**
 
@@ -562,7 +562,7 @@ let fetch_stockinfo ~token ~cache_path =
 Wire it into `fetch`'s tw branch after `fetch_events`, with
 `~cache_path:(Filename.concat directory "stockinfo.csv")`.
 
-The lookup (place after `read_dividends`; `unquote` already exists —
+The lookup (place after `read_dividends`; `unquote` already exists -
 `rewrite_rows` unquotes only the first field, so `type` and `date` stay
 quoted in the cache):
 
@@ -630,12 +630,12 @@ Co-authored-by: ChatGPT <noreply@openai.com>"
 
 - [ ] **Step 1: Write the failing tests**
 
-Update `test_multi_stock_cli`: add `--financing-rate 0` to the command (expected last equity stays 1.37 — drift only). Add a leveraged variant test `test_margin_cli` right after it, reusing the same fixture-writing shape with a strat whose targets are `a.target 2.0` and no b position, command flags `--fee-bps 0 --tax-bps 0 --slip-bps 0 --min-fee 0 --financing-ratio 60` (financing rate left at its 6.35 default), and assertions: exit 0; stdout (captured to a file) contains `margin — financing 6.35%/yr` and `margin calls 0`; stdout does NOT contain `daily-reset`. Keep the temp-dir cleanup pattern.
+Update `test_multi_stock_cli`: add `--financing-rate 0` to the command (expected last equity stays 1.37 - drift only). Add a leveraged variant test `test_margin_cli` right after it, reusing the same fixture-writing shape with a strat whose targets are `a.target 2.0` and no b position, command flags `--fee-bps 0 --tax-bps 0 --slip-bps 0 --min-fee 0 --financing-ratio 60` (financing rate left at its 6.35 default), and assertions: exit 0; stdout (captured to a file) contains `margin - financing 6.35%/yr` and `margin calls 0`; stdout does NOT contain `daily-reset`. Keep the temp-dir cleanup pattern.
 
 - [ ] **Step 2: Verify they fail**
 
 Run: `opam exec -- dune build && opam exec -- dune runtest 2>&1 | tail -3`
-Expected: `test_multi_stock_cli` fails — `--financing-rate` is not a known flag (usage error, exit 2).
+Expected: `test_multi_stock_cli` fails - `--financing-rate` is not a known flag (usage error, exit 2).
 
 - [ ] **Step 3: Implement**
 
@@ -666,7 +666,7 @@ Expected: `test_multi_stock_cli` fails — `--financing-rate` is not a known fla
 
 ```ocaml
       Printf.printf
-        "%s: margin — financing %.2f%%/yr, min maintenance %s, margin calls %d, clamps %d\n"
+        "%s: margin - financing %.2f%%/yr, min maintenance %s, margin calls %d, clamps %d\n"
         name financing_rate (format_percent ratio)
         stats.Engine.margin_calls stats.Engine.clamps
 ```
@@ -713,7 +713,7 @@ _build/default/bin/bt.exe run /sandbox/research/strategies/channel_ladder.strat 
   --out-name margin_smoke --no-plot
 ```
 
-Expected: tests print `ok`. The run prints the metric table, then a `channel_ladder: margin — financing 6.35%/yr, ...` line (the tuned params hold targets near 2x, so a loan exists), and no `daily-reset` text. CAGR must land below the pre-margin close-fill value (56.70% was the free-leverage number) — record the new numbers in the report file for the controller.
+Expected: tests print `ok`. The run prints the metric table, then a `channel_ladder: margin - financing 6.35%/yr, ...` line (the tuned params hold targets near 2x, so a loan exists), and no `daily-reset` text. CAGR must land below the pre-margin close-fill value (56.70% was the free-leverage number) - record the new numbers in the report file for the controller.
 
 - [ ] **Step 3: Commit**
 

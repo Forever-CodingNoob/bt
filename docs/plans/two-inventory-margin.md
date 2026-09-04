@@ -67,13 +67,13 @@ Freeze the plan after convergence, then execute: sells, refinance legs, buys. No
 
 - After each close with `sum(loans) > 0`: `maintenance = sum(margin_values) / sum(loans)`; track the minimum; below the threshold, record the call date and schedule liquidation.
 - Liquidation at next open: for every asset, sell the ENTIRE margin inventory, repay `loans` and `interests` from proceeds, remainder to cash. Cash inventories untouched. `prev_eff` untouched (fills resume only on target change).
-- Solvency guard (equity <= 0 with any inventory open): sell everything; repay what proceeds allow; any residual loan/interest stays on the books so equity stays negative; freeze (`bankrupt`). Cash never goes negative — the residual liability carries the deficit.
+- Solvency guard (equity <= 0 with any inventory open): sell everything; repay what proceeds allow; any residual loan/interest stays on the books so equity stays negative; freeze (`bankrupt`). Cash never goes negative - the residual liability carries the deficit.
 - Final force-close: sell everything at last close (margin inventory first), settle loans and interest.
 
 #### Report
 
 `lib/report.ml` margin line becomes:
-`<name>: margin — financing %.2f%%/yr, min maintenance <pct>, margin calls %d, refinances %d, clamps %d`.
+`<name>: margin - financing %.2f%%/yr, min maintenance <pct>, margin calls %d, refinances %d, clamps %d`.
 
 #### Hand-derived test expectations (zero cost, ratio 0.6, flat prices unless stated)
 
@@ -94,16 +94,16 @@ Write each as a registered test with the derivation comment:
 - [ ] **Step 2: Verify the new tests fail and sentinels pass**
 - [ ] **Step 3: Implement the engine rework per the formulas**
 - [ ] **Step 4: Full verification; list all margin-test re-derivations in the report**
-- [ ] **Step 5: Commit** — message `feat: two-inventory margin engine` with the ChatGPT trailer.
+- [ ] **Step 5: Commit** - message `feat: two-inventory margin engine` with the ChatGPT trailer.
 
 ---
 
 ### Task 2: Docs, changelog, and smoke
 
 **Files:**
-- Modify: `docs/strategy.md`, `docs/cli.md`, `README.md`, `CONTRIBUTING.md`, `CHANGELOG.md` (untracked working file — edit, do not add to git)
+- Modify: `docs/strategy.md`, `docs/cli.md`, `README.md`, `CONTRIBUTING.md`, `CHANGELOG.md` (untracked working file - edit, do not add to git)
 
-- [ ] **Step 1: Update docs** — margin semantics per the spec: two inventories, collateral-only maintenance (166.7% at entry for TWSE), refinancing with costs, calls liquidate margin inventory only, interest at repayment, marginability assumption disclosed. Surgical edits; read each section first.
+- [ ] **Step 1: Update docs** - margin semantics per the spec: two inventories, collateral-only maintenance (166.7% at entry for TWSE), refinancing with costs, calls liquidate margin inventory only, interest at repayment, marginability assumption disclosed. Surgical edits; read each section first.
 - [ ] **Step 2: Smoke**
 
 ```bash
@@ -113,6 +113,6 @@ cp _build/default/bin/bt.exe bt-test10.exe
   --out-name two_inv --no-plot 2>&1 | tail -8
 ```
 
-Record the full table and margin line in the report; calls may now appear — that is expected, not a defect.
+Record the full table and margin line in the report; calls may now appear - that is expected, not a defect.
 
-- [ ] **Step 3: Commit docs** (not CHANGELOG.md) — message `docs: two-inventory margin semantics` with the ChatGPT trailer.
+- [ ] **Step 3: Commit docs** (not CHANGELOG.md) - message `docs: two-inventory margin semantics` with the ChatGPT trailer.

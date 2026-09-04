@@ -60,16 +60,16 @@ bot can execute.
 
 Per asset i:
 
-- `cash_value_i >= 0` — market value of the cash inventory.
-- `margin_value_i >= 0` — market value of the margin inventory.
-- `loan_i >= 0` — 融資金額, set at purchase, reduced only by
+- `cash_value_i >= 0` - market value of the cash inventory.
+- `margin_value_i >= 0` - market value of the margin inventory.
+- `loan_i >= 0` - 融資金額, set at purchase, reduced only by
   repayment.
-- `interest_i >= 0` — accrued financing interest liability.
+- `interest_i >= 0` - accrued financing interest liability.
 
 Account:
 
-- `cash >= 0` — settled cash, floored at zero after each complete funding sequence.
-- `debt >= 0` — residual account-level liability that cannot be assigned to a surviving inventory.
+- `cash >= 0` - settled cash, floored at zero after each complete funding sequence.
+- `debt >= 0` - residual account-level liability that cannot be assigned to a surviving inventory.
 
 ```
 equity = cash + sum(cash_value_i + margin_value_i)
@@ -166,7 +166,7 @@ Bankruptcy occurs when equity is non-positive: the engine sells every remaining 
 The margin line becomes:
 
 ```
-<name>: margin — financing 6.35%/yr, min maintenance 145.20%, margin calls 1, refinances 3, clamps 0
+<name>: margin - financing 6.35%/yr, min maintenance 145.20%, margin calls 1, refinances 3, clamps 0
 ```
 
 `min maintenance` now reflects the collateral-only formula.

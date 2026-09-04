@@ -348,7 +348,7 @@ Port the existing frozen-literal tests to the new API (same sample bars, same li
 - [ ] **Step 7: Build and test**
 
 Run: `eval $(opam env) && dune build --root . && dune test --root . --force`
-Expected: build clean, `ok`. The golden literal must pass unchanged; if it fails, the `Open_next` path deviates from the old engine — fix the engine, never the literal.
+Expected: build clean, `ok`. The golden literal must pass unchanged; if it fails, the `Open_next` path deviates from the old engine - fix the engine, never the literal.
 
 - [ ] **Step 8: Stage and report**
 
@@ -527,7 +527,7 @@ Note the order inside the loop: reset wins on a tie, per spec.
 
 - [ ] **Step 6: Tests**
 
-Add to `test/test_bt.ml` (uses `with_temp_strategy` and `assert_failure` helpers already present; write DSL sources with `\n` separators — the parser is now line-based):
+Add to `test/test_bt.ml` (uses `with_temp_strategy` and `assert_failure` helpers already present; write DSL sources with `\n` separators - the parser is now line-based):
 
 ```ocaml
 let dsl_bars =

@@ -2148,7 +2148,7 @@ let test_margin_cli () =
       let stdout = read_file stdout_path in
       assert
         (contains stdout
-           "margin: margin — financing 6.35%/yr, min maintenance 250.00%, margin calls 0, refinances 0, clamps 1");
+           "margin: margin - financing 6.35%/yr, min maintenance 250.00%, margin calls 0, refinances 0, clamps 1");
       assert (not (contains stdout "daily-reset")))
 
 let test_event_transform () =
@@ -3918,7 +3918,7 @@ let test_taf_zero_cap_means_uncapped () =
 
 let test_us_tiered_maintenance () =
   (* Band 1: price > $6, tier = 30%.
-     Entry at $10, target 2.0, ratio 0.5 → mv = 2.0, loan = 1.0, equity = 1.0.
+     Entry at $10, target 2.0, ratio 0.5 -> mv = 2.0, loan = 1.0, equity = 1.0.
      required = 0.3 * 2.0 = 0.6.  ratio = equity / required = 1.0 / 0.6 = 5/3.
      No breach. *)
   let check price expected_ratio =
@@ -3947,9 +3947,9 @@ let test_us_tiered_maintenance () =
   check 2. 0.5
 
 let test_us_maintenance_breach () =
-  (* Entry at $10, target 2.0, ratio 0.5 → mv = 2.0, loan = 1.0.
+  (* Entry at $10, target 2.0, ratio 0.5 -> mv = 2.0, loan = 1.0.
      Bar 1: price drops to $7.  mv = 1.4, loan = 1.0, equity = 0.4.
-     required = 0.3 * 1.4 = 0.42.  equity 0.4 < 0.42 → breach.
+     required = 0.3 * 1.4 = 0.42.  equity 0.4 < 0.42 -> breach.
      Margin call scheduled on 2020-01-02. *)
   let bars =
     [| bar "2020-01-01" 10. 10.;
@@ -3973,7 +3973,7 @@ let test_us_maintenance_breach () =
   assert_close ~tolerance:1e-12 0.4 (final_equity result)
 
 let test_us_minimum_cure () =
-  (* Entry at $10, target 2.0, ratio 0.5 → mv = 2.0, loan = 1.0.
+  (* Entry at $10, target 2.0, ratio 0.5 -> mv = 2.0, loan = 1.0.
      Bar 1: price $7.  mv = 1.4, equity = 0.4, required = 0.42.  Breach.
      Bar 2: cure at open $7.  Sell fraction f = 1/21 of margin:
        sell_amount = 1.4/21, repay loan 1.0/21.
@@ -4004,7 +4004,7 @@ let test_us_minimum_cure () =
 let test_us_maintenance_flat_override () =
   (* Same price drop as breach test, but --maintenance-ratio 20 (= 0.2)
      overrides the tiered table.
-     required = 0.2 * 1.4 = 0.28.  equity = 0.4 >= 0.28 → no breach. *)
+     required = 0.2 * 1.4 = 0.28.  equity = 0.4 >= 0.28 -> no breach. *)
   let bars =
     [| bar "2020-01-01" 10. 10.;
        bar "2020-01-02" 7. 7.;
@@ -4031,7 +4031,7 @@ let test_us_maintenance_flat_override () =
 let test_tw_maintenance_override_none () =
   (* TW with maintenance_override = None uses the default 130% threshold.
      Same fixture as test_engine_margin_call: mv = 2.5, loan = 1.5.
-     At bar 2: price 76, mv = 1.9, ratio = 1.9/1.5 = 1.2667 < 1.3 → call.
+     At bar 2: price 76, mv = 1.9, ratio = 1.9/1.5 = 1.2667 < 1.3 -> call.
      This verifies TW default behavior is intact with the option type. *)
   let bars =
     [| bar "2020-01-01" 100. 100.;
@@ -4057,7 +4057,7 @@ let test_tw_maintenance_override_none () =
 
 
 let test_us_cure_interest_single_charge () =
-  (* Entry at $10, target 2.0, ratio 0.5 → mv = 2.0, loan = 1.0.
+  (* Entry at $10, target 2.0, ratio 0.5 -> mv = 2.0, loan = 1.0.
      financing_rate 36%/yr (/360) so 0.001 per day per unit principal.
      Bar 0 (2020-01-02 Thu): entry, no interest (T+1 lag).
      Bar 1 (2020-01-03 Fri): price $7, mv = 1.4. No interest (bar 1,
@@ -4065,7 +4065,7 @@ let test_us_cure_interest_single_charge () =
        required = 0.42. Breach.
      Bar 2 (2020-01-06 Mon): 3 calendar days of interest:
        1.0 * 0.36 * 3/360 = 0.003.  equity = 0.397.
-       Cure at open. Tail = 1 day (Mon→Tue) = 0.001.
+       Cure at open. Tail = 1 day (Mon->Tue) = 0.001.
        The sold fraction's settlement includes the tail.  The surviving
        lots keep their original interest and accrue normally.
      Bar 3 (2020-01-07 Tue): accrue 1 day. target goes to 0, sell all.
@@ -4139,11 +4139,11 @@ let test_cure_shortfall_preserves_liability () =
 
 
 let test_us_cure_tail_aware () =
-  (* Entry $10, target 2.0, ratio 0.5 → mv = 2.0, loan = 1.0.
-     financing_rate 36% → 0.001/day on 360-day basis.
+  (* Entry $10, target 2.0, ratio 0.5 -> mv = 2.0, loan = 1.0.
+     financing_rate 36% -> 0.001/day on 360-day basis.
      Bar 1 ($7): equity = 0.4, required = 0.42.  Breach.
-     Bar 2 cure: 3 days interest (Fri→Mon) = 0.003, equity = 0.397.
-       Deficit = 0.023.  Tail = 1 day (Mon→Tue) = 0.001.
+     Bar 2 cure: 3 days interest (Fri->Mon) = 0.003, equity = 0.397.
+       Deficit = 0.023.  Tail = 1 day (Mon->Tue) = 0.001.
        Relief must subtract the tail-interest drain (0.001/0.7 per
        dollar of margin sold) so the cure is boundary-exact:
          relief = (0.21 - 0.001) / 0.7 = 0.209/0.7
@@ -4218,7 +4218,7 @@ let test_alias_qualified_labels () =
       let stocks = Dsl.stocks_of ~filename:path ast in
       let labels = Dsl.labels_of_stocks stocks in
       assert (labels = ["tw/00685L"]));
-  (* Distinct symbols with aliases: each symbol once → bare labels *)
+  (* Distinct symbols with aliases: each symbol once -> bare labels *)
   with_temp_strategy
     "stock \"tw/0050\" as etf50\n\
      stock \"tw/00632R\" as inverse\n\

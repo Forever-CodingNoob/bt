@@ -117,7 +117,7 @@ let test_loan_sell_then_buy () =
 - [ ] **Step 2: Verify they fail**
 
 Run: `opam exec -- dune build && opam exec -- dune runtest 2>&1 | tail -5`
-Expected: `test_loan_order_independence` fails — the two runs give different maintenance ratios because of order-dependent loan allocation.
+Expected: `test_loan_order_independence` fails - the two runs give different maintenance ratios because of order-dependent loan allocation.
 
 - [ ] **Step 3: Implement the two-pass fill**
 
@@ -174,7 +174,7 @@ New `trade` signature and the changed section (replacing lines 128-174):
   in
 ```
 
-Note: OCaml optional arguments before `()` — the call sites become `trade index ~date ~price ~desired ()` for sells (loan_delta defaults to 0.) and `trade index ~date ~price ~desired ~loan_delta ()` for buys.
+Note: OCaml optional arguments before `()` - the call sites become `trade index ~date ~price ~desired ()` for sells (loan_delta defaults to 0.) and `trade index ~date ~price ~desired ~loan_delta ()` for buys.
 
 **b)** Replace `apply_fills` (lines 265-275) with:
 
@@ -246,7 +246,7 @@ Note: OCaml optional arguments before `()` — the call sites become `trade inde
 - The `liquidate` helper calls `sell_out`; no change.
 - Any direct `trade` call outside `apply_fills` (there should be none after sub-project B; verify by searching for `trade ` in the file).
 
-**Important caveat on the buy-value estimation:** The `buy_values` computation above estimates each buy's value increase using the pre-buy equity. But `trade` calls are sequential and each one changes equity via costs. The estimate is close but not exact when costs are nonzero. The loan allocation uses these estimates only to set proportions; the actual position sizing still happens inside `trade` with the real sequential equity. The loan amounts will be slightly off from the ideal formula, but the key property — order-independence — holds because the proportion computation does not depend on execution order. Add a comment noting this approximation.
+**Important caveat on the buy-value estimation:** The `buy_values` computation above estimates each buy's value increase using the pre-buy equity. But `trade` calls are sequential and each one changes equity via costs. The estimate is close but not exact when costs are nonzero. The loan allocation uses these estimates only to set proportions; the actual position sizing still happens inside `trade` with the real sequential equity. The loan amounts will be slightly off from the ideal formula, but the key property - order-independence - holds because the proportion computation does not depend on execution order. Add a comment noting this approximation.
 
 - [ ] **Step 4: Verify build and tests pass**
 

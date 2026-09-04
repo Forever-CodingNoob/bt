@@ -86,7 +86,7 @@ let test_parser_aliases () =
 - [ ] **Step 2: Verify it fails**
 
 Run: `opam exec -- dune build 2>&1 | head -20`
-Expected: compile errors — `Ast.Stock` and friends have the old arities.
+Expected: compile errors - `Ast.Stock` and friends have the old arities.
 
 - [ ] **Step 3: Implement the syntax**
 
@@ -293,7 +293,7 @@ let test_engine_vwap_trip () =
 - [ ] **Step 2: Verify they fail**
 
 Run: `opam exec -- dune build 2>&1 | head -20`
-Expected: compile errors — `Engine.strategy` has no `targets` field yet.
+Expected: compile errors - `Engine.strategy` has no `targets` field yet.
 
 - [ ] **Step 3: Implement the portfolio engine**
 
@@ -593,7 +593,7 @@ let test_multi_stock_errors () =
 - [ ] **Step 2: Verify they fail**
 
 Run: `opam exec -- dune build 2>&1 | head -10`
-Expected: compile error — `Dsl.stocks_of` is unbound and `compile_ast` has no `~assets`.
+Expected: compile error - `Dsl.stocks_of` is unbound and `compile_ast` has no `~assets`.
 
 - [ ] **Step 3: Implement multi-stock compilation**
 
@@ -624,7 +624,7 @@ type context = {
       Series (Series.atr bars (expect_period expression period))
 ```
 
-Every other builtin rejects a qualifier: in `eval`'s `Call` arm, when the qualifier is `Some q` and the name is not `"atr"`, fail with `Printf.sprintf "only atr takes a stock alias, not %s" name`. Pass the qualifier through `eval` → `eval_call`.
+Every other builtin rejects a qualifier: in `eval`'s `Call` arm, when the qualifier is `Some q` and the name is not `"atr"`, fail with `Printf.sprintf "only atr takes a stock alias, not %s" name`. Pass the qualifier through `eval` -> `eval_call`.
 
 2. `series_environment` gains an optional prefix:
 
@@ -797,7 +797,7 @@ In `bin/bt.ml`:
 - [ ] **Step 4: Verify build and tests pass**
 
 Run: `opam exec -- dune build && opam exec -- dune runtest`
-Expected: build clean, tests print `ok` — including every existing single-stock test through the new `compile`/`compile_ast` path.
+Expected: build clean, tests print `ok` - including every existing single-stock test through the new `compile`/`compile_ast` path.
 
 - [ ] **Step 5: Commit**
 

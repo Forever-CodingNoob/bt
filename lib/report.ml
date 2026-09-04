@@ -124,7 +124,7 @@ let print_many ~columns ~baseline ~fill ~stocks ~financing_rate =
           | Some rate -> format_percent rate
         in
         let () =
-          Printf.printf "%s: %s — trades %d (win rate %s);\n"
+          Printf.printf "%s: %s - trades %d (win rate %s);\n"
             name stock (List.length result.Engine.trips) win_rate
         in
         let stats = result.Engine.margin_stats in
@@ -132,7 +132,7 @@ let print_many ~columns ~baseline ~fill ~stocks ~financing_rate =
         | None -> ()
         | Some ratio ->
             Printf.printf
-              "%s: margin — financing %.2f%%/yr, min maintenance %s, margin calls %d, refinances %d, clamps %d\n"
+              "%s: margin - financing %.2f%%/yr, min maintenance %s, margin calls %d, refinances %d, clamps %d\n"
               name financing_rate (format_percent ratio)
               (List.length stats.Engine.margin_call_dates)
               stats.Engine.refinances stats.Engine.clamps)

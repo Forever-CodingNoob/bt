@@ -72,6 +72,7 @@ dune test --root . --force   # all asserts must pass
 - Put one space on each side of `=`. Do not align code with extra spaces.
 - Network and JSON work goes through `curl` and `jq` as subprocesses. Do not parse JSON in OCaml.
 - Do not embed Python (or other foreign code) in `.ml` files. Python scripts are standalone files in `scripts/`.
+- ASCII-only typography in code and docs (no arrows, em dashes, typographic quotes; CJK content terms allowed).
 
 ## Tests
 

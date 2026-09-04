@@ -38,13 +38,13 @@ Downloads price data and stores it in a local CSV cache. Taiwan data comes from 
 
 | Argument or option | Default | Description |
 |---|---|---|
-| `MARKET/SYMBOL` | — | Select one market and symbol, for example `tw/0050`. The market must be `tw` or `us`. Use this argument or use both options below. |
-| `--market tw\|us` | — | Select the Taiwan or US market when you do not use the positional argument. |
-| `--symbol SYM` | — | Select the symbol when you do not use the positional argument. |
+| `MARKET/SYMBOL` | - | Select one market and symbol, for example `tw/0050`. The market must be `tw` or `us`. Use this argument or use both options below. |
+| `--market tw\|us` | - | Select the Taiwan or US market when you do not use the positional argument. |
+| `--symbol SYM` | - | Select the symbol when you do not use the positional argument. |
 | `--from YYYY-MM-DD` | `1994-10-01` | Set the first date to request. |
 | `--to YYYY-MM-DD` | today | Set the last date to request. |
 | `--data-dir DIR` | `data/` | Set the cache directory. |
-| `-h`, `-help`, `--help` | — | Print the fetch options to standard output and exit with code 0. |
+| `-h`, `-help`, `--help` | - | Print the fetch options to standard output and exit with code 0. |
 
 ### API tokens
 
@@ -111,20 +111,20 @@ Loads one or more strategy files and their cached prices. Each strategy file sel
 
 | Argument or option | Default | Description |
 |---|---|---|
-| `STRAT...` | — | Read one or more strategies from these files. At least one file is required. The file basename without its extension becomes the strategy name. |
-| `--baseline M/SYM` | — | Add a buy-and-hold baseline for this market and symbol. |
+| `STRAT...` | - | Read one or more strategies from these files. At least one file is required. The file basename without its extension becomes the strategy name. |
+| `--baseline M/SYM` | - | Add a buy-and-hold baseline for this market and symbol. |
 | `--from YYYY-MM-DD` | first cached common date | Set the first date to load. |
 | `--to YYYY-MM-DD` | last cached common date | Set the last date to load. |
-| `-p name=value` | — | Override each matching strategy `param` with a float value. Repeat for more parameters. The command rejects a name that no strategy declares. |
+| `-p name=value` | - | Override each matching strategy `param` with a float value. Repeat for more parameters. The command rejects a name that no strategy declares. |
 | `--fill open\|close` | `close` | Select the fill mode. |
-| `--capital TWD` | — | Set the portfolio starting value in TWD. Enables the per-order minimum fee. |
+| `--capital TWD` | - | Set the portfolio starting value in TWD. Enables the per-order minimum fee. |
 | `--fee-bps F` | per market | Override the fee in basis points for all strategies and the baseline. |
 | `--tax-bps F` | per symbol class | Override the sell tax in basis points for all strategies and the baseline. |
 | `--slip-bps F` | `0` | Override slippage in basis points for all strategies and the baseline. |
 | `--min-fee F` | `20` (with `--capital`) | Override the minimum commission per order in TWD. Applies only with `--capital`. |
 | `--dividend-tax PERCENT` | `0` | Reduce every TW receivable and US cash dividend at creation. Represents dividend income tax and the NHI supplementary premium. |
 | `--financing-rate PERCENT` | TW 6.35, US 6.25 | Set the annual financing rate. |
-| `--maintenance-ratio PERCENT` | TW 130 (collateral/loan), US tiered | Set a flat maintenance threshold for either market. When unset, TW uses 130% collateral over loan and US uses the tiered table (100% below $2.50, 50% $2.50–$6, 30% above $6). |
+| `--maintenance-ratio PERCENT` | TW 130 (collateral/loan), US tiered | Set a flat maintenance threshold for either market. When unset, TW uses 130% collateral over loan and US uses the tiered table (100% below $2.50, 50% $2.50-$6, 30% above $6). |
 | `--per-share-fee F` | US 0.000195, TW 0 | Override the per-share sell fee in dollars. Applies only with `--capital`. |
 | `--per-share-cap F` | US 9.79, TW 0 | Override the per-share sell fee cap in dollars per order. Use 0 for uncapped. Applies only with `--capital`. |
 | `--financing-ratio PERCENT` | TW 60, US 50 | Set the fresh-loan financing ratio for every asset. TW defaults from cached stockinfo (TWSE/TPEX 60%). US defaults to the Reg T initial-margin ratio of 50%. |
@@ -132,8 +132,8 @@ Loads one or more strategy files and their cached prices. Each strategy file sel
 | `--data-dir DIR` | `data/` | Set the cache directory. |
 | `--out-dir DIR` | `out/` | Set the output directory. |
 | `--out-name NAME` | strategy names joined with `_vs_` | Set the equity CSV and PNG stem. |
-| `--no-plot` | — | Do not run the plot script or update the equity PNG. |
-| `-h`, `-help`, `--help` | — | Print the run options to standard output and exit with code 0. |
+| `--no-plot` | - | Do not run the plot script or update the equity PNG. |
+| `-h`, `-help`, `--help` | - | Print the run options to standard output and exit with code 0. |
 
 > [!NOTE]
 > The four margin options and `--dividend-tax` apply to every strategy and the baseline. US assets ignore `--loan-term-months`.
@@ -153,10 +153,10 @@ One basis point is 0.01%. One hundred basis points are 1%.
 
 | Market and symbol | Fee | Minimum fee | Sell tax | Per-share sell fee | Slippage |
 |---|---|---|---|---|---|
-| US | 0 bps (0%) | — | 0.206 bps (SEC fee, effective 2026-04-04) | $0.000195/share, $0.01 floor, $9.79 cap (TAF, effective 2026-01-01) | 0 bps (0%) |
-| Taiwan ordinary bond ETF (`00...B`) | 3.99 bps (0.0399%) | 20 TWD per order | 0 bps (0%) through 2026-12-31 | — | 0 bps (0%) |
-| Other Taiwan `00` or `02` ETN | 3.99 bps (0.0399%) | 20 TWD per order | 10 bps (0.10%) | — | 0 bps (0%) |
-| Other Taiwan symbol | 3.99 bps (0.0399%) | 20 TWD per order | 30 bps (0.30%) | — | 0 bps (0%) |
+| US | 0 bps (0%) | - | 0.206 bps (SEC fee, effective 2026-04-04) | $0.000195/share, $0.01 floor, $9.79 cap (TAF, effective 2026-01-01) | 0 bps (0%) |
+| Taiwan ordinary bond ETF (`00...B`) | 3.99 bps (0.0399%) | 20 TWD per order | 0 bps (0%) through 2026-12-31 | - | 0 bps (0%) |
+| Other Taiwan `00` or `02` ETN | 3.99 bps (0.0399%) | 20 TWD per order | 10 bps (0.10%) | - | 0 bps (0%) |
+| Other Taiwan symbol | 3.99 bps (0.0399%) | 20 TWD per order | 30 bps (0.30%) | - | 0 bps (0%) |
 
 Leveraged and inverse bond ETFs end in `L` or `R`, not `B`, so they use the 10 bps ETF rate.
 
@@ -178,7 +178,7 @@ The `name:` line after the table joins each strategy's stock labels with `+`. Wh
 If a strategy had a loan on at least one bar, `bt run` also prints a margin line:
 
 ```text
-channel_ladder: margin — financing 6.35%/yr, min maintenance 145.20%, margin calls 1, refinances 3, clamps 0
+channel_ladder: margin - financing 6.35%/yr, min maintenance 145.20%, margin calls 1, refinances 3, clamps 0
 ```
 
 A strategy that never had a loan has no margin line.

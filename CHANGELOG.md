@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tiingo end-of-day US data source with canonical four-file cache layout (raw OHLCV, events, cash dividends, dividend factors).
 - Split-factor snap to nearest small rational p/q (p,q at most 50) for exact price and volume restatement.
 - Market profile (`profile_of_market`) carries interest day count, settlement lag, maintenance model, and default financing rate per market. One pure function replaces hardcoded constants.
-- US tiered maintenance: 100% below $2.50, 50% $2.50–$6, 30% above $6 (Alpaca overnight table). Breach at close schedules a next-open minimum cure that sells the smallest fraction of margin inventory restoring equity to the required level.
+- US tiered maintenance: 100% below $2.50, 50% $2.50-$6, 30% above $6 (Alpaca overnight table). Breach at close schedules a next-open minimum cure that sells the smallest fraction of margin inventory restoring equity to the required level.
 - US default costs modeled on Alpaca: SEC fee 0.206 bps sells-only (effective 2026-04-04), FINRA TAF $0.000195/share with $0.01 floor and $9.79 cap (effective 2026-01-01), zero commission.
 - `--per-share-fee` and `--per-share-cap` flags override the per-share sell fee and its cap.
 - US interest uses /360 day count and T+1 settlement lag.
@@ -32,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cache files grouped into per-symbol subdirectories: `data/<market>/<SYMBOL>/<SYMBOL>.csv`. The shared `data/tw/stockinfo.csv` stays at the market level.
 - `margin.maintenance_ratio : float` replaced by `margin.maintenance_override : float option`. Unset means the default model for each market (tiered for US, 130% collateral/loan for TW). An explicit value overrides with a flat rate.
 - `--financing-rate` and `--maintenance-ratio` defaults resolve per market profile instead of hardcoded values.
+- Terminal report lines use ASCII hyphens instead of em dashes.
 
 ### Removed
 
