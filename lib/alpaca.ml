@@ -15,6 +15,8 @@ type account_t = {
 }
 
 type snapshot_t = {
+  day_date : string;
+  prev_day_date : string;
   day_open : float;
   day_high : float;
   day_low : float;
@@ -133,11 +135,13 @@ let parse_position_qty ~http_code raw =
 let parse_snapshot raw =
   match
     jq_fields "snapshot"
-      "[.dailyBar.o, .dailyBar.h, .dailyBar.l, .latestTrade.p, .dailyBar.v] | @tsv"
+      "[.dailyBar.t[0:10], .prevDailyBar.t[0:10], .dailyBar.o, .dailyBar.h, .dailyBar.l, .latestTrade.p, .dailyBar.v] | @tsv"
       raw
   with
-  | [day_open; day_high; day_low; latest; day_volume] ->
-      { day_open = float_field "snapshot dailyBar.o" day_open;
+  | [day_date; prev_day_date; day_open; day_high; day_low; latest; day_volume] ->
+      { day_date;
+        prev_day_date;
+        day_open = float_field "snapshot dailyBar.o" day_open;
         day_high = float_field "snapshot dailyBar.h" day_high;
         day_low = float_field "snapshot dailyBar.l" day_low;
         latest = float_field "snapshot latestTrade.p" latest;

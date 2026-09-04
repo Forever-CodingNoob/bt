@@ -19,6 +19,8 @@ type account_t = {
 
 (** Alpaca snapshot fields used to build a provisional daily bar. *)
 type snapshot_t = {
+  day_date : string;
+  prev_day_date : string;
   day_open : float;
   day_high : float;
   day_low : float;

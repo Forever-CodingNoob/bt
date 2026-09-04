@@ -8,13 +8,15 @@ let usage =
    \         [--per-share-fee F] [--per-share-cap F]\n\
    \         [--dividend-tax PCT] [--financing-rate PCT] [--maintenance-ratio PCT] [--financing-ratio PCT]\n\
    \         [--loan-term-months N]\n\
-   \         [--capital TWD] [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]"
+   \         [--capital TWD] [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]\n\
+   \  bt target STRAT [--live] [--data-dir DIR]"
 
 let help =
   usage ^
   "\n\ncommands:\n\
    \  fetch  Download market data from FinMind into the local cache.\n\
-   \  run    Run strategies with cached data and compare them with a baseline.\n\n\
+   \  run    Run strategies with cached data and compare them with a baseline.\n\
+   \  target Print one live decision without submitting an order.\n\n\
    Fetch requires FINMIND_TOKEN.\n\
    Full reference: docs/cli.md"
 
@@ -500,6 +502,83 @@ let run argv =
   if not !no_plot then
     Btlib.Report.write_png ~out_dir:!out_dir ~stem:output_stem
 
+let print_decision (decision : Btlib.Live.decision) =
+  let bar = decision.provisional in
+  Printf.printf "fetched-through: %s\n" decision.fetched_through;
+  Printf.printf "provisional-date: %s\n" bar.date;
+  Printf.printf "provisional-open: %.10g\n" bar.o;
+  Printf.printf "provisional-high: %.10g\n" bar.h;
+  Printf.printf "provisional-low: %.10g\n" bar.l;
+  Printf.printf "provisional-close: %.10g\n" bar.c;
+  Printf.printf "provisional-volume: %.10g\n" bar.v;
+  Printf.printf "target: %.10g\n" decision.target;
+  Printf.printf "equity: %.10g\n" decision.equity;
+  Printf.printf "held: %.10g\n" decision.held;
+  match decision.action with
+  | Btlib.Live.Order { side; qty; id } ->
+      let side =
+        match side with
+        | `Buy -> "buy"
+        | `Sell -> "sell"
+      in
+      Printf.printf "action: order\n";
+      Printf.printf "side: %s\n" side;
+      Printf.printf "quantity: %d\n" qty;
+      Printf.printf "client-order-id: %s\n" id
+  | Btlib.Live.Skip reason ->
+      Printf.printf "action: skip\n";
+      Printf.printf "reason: %s\n" reason
+
+let target argv =
+  let strat_path = ref None in
+  let live = ref false in
+  let data_dir = ref "data" in
+  let rec options =
+    [ ("--live", Arg.Set live, "use the live Alpaca account");
+      ("--data-dir", Arg.Set_string data_dir, "cache directory");
+      ("-h",
+       Arg.Unit
+         (fun () -> raise (Arg.Help (Arg.usage_string options usage))),
+       "show this help") ]
+  in
+  let anonymous value =
+    match !strat_path with
+    | None -> strat_path := Some value
+    | Some _ ->
+        raise
+          (Arg.Bad
+             (Printf.sprintf
+                "unexpected argument %S; expected one STRAT file" value))
+  in
+  (try Arg.parse_argv argv options anonymous usage with
+   | Arg.Bad message ->
+       prerr_string message;
+       exit 2
+   | Arg.Help message ->
+       print_string message;
+       exit 0);
+  let strat_path =
+    match !strat_path with
+    | Some path -> path
+    | None -> usage_error "target: one STRAT file is required"
+  in
+  let ast = Btlib.Dsl.parse_file strat_path in
+  let market =
+    match Btlib.Dsl.stocks_of ~filename:strat_path ast with
+    | [_, market, _] -> market
+    | _ -> usage_error "target: strategy must declare exactly one stock"
+  in
+  match market with
+  | "us" ->
+      let mode =
+        match !live with
+        | false -> Btlib.Live.Paper
+        | true -> Btlib.Live.Live
+      in
+      Btlib.Live.decide mode ~strat_path ~data_dir:!data_dir
+      |> print_decision
+  | "tw" | _ -> usage_error "live trading supports us only"
+
 let dispatch () =
   if Array.length Sys.argv < 2 then begin
     prerr_endline help;
@@ -509,6 +588,7 @@ let dispatch () =
   | "--help" | "-h" | "help" -> print_endline help
   | "fetch" -> fetch (Array.sub Sys.argv 1 (Array.length Sys.argv - 1))
   | "run" -> run (Array.sub Sys.argv 1 (Array.length Sys.argv - 1))
+  | "target" -> target (Array.sub Sys.argv 1 (Array.length Sys.argv - 1))
   | command -> usage_error (Printf.sprintf "unknown subcommand %S" command)
 
 let () =

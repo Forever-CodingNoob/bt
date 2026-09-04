@@ -10,6 +10,7 @@
   - [API tokens](#api-tokens)
   - [Cache files](#cache-files)
   - [Price adjustments](#price-adjustments)
+- [`bt target`](#bt-target)
 - [`bt run`](#bt-run)
   - [Run arguments and options](#run-arguments-and-options)
   - [Cost defaults](#cost-defaults)
@@ -28,6 +29,7 @@ bt run STRAT... [--baseline M/SYM] [--from D] [--to D]
        [--financing-rate PERCENT] [--maintenance-ratio PERCENT]
        [--financing-ratio PERCENT] [--loan-term-months N] [--dividend-tax PERCENT]
        [--capital TWD] [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]
+bt target STRAT [--live] [--data-dir DIR]
 ```
 
 ## `bt fetch`
@@ -99,6 +101,23 @@ The engine loads two price series for every asset. The signal series includes ca
 For Taiwan, `<symbol>.div.csv` supplies the full dividend adjustment to the signal series and `<symbol>.cashdiv.csv` separates the cash component for the money series and ledger. `<symbol>.events.csv` supplies exact split, capital-reduction, and par-value-change factors to both price series. Share-count event factors also restate earlier volume to the post-event share basis. Cash-dividend factors do not change volume.
 
 For US assets, `<symbol>.div.csv` supplies the dividend adjustment to the signal series and `<symbol>.cashdiv.csv` separates the cash component for the money series and ledger. `<symbol>.events.csv` supplies exact split factors to both price series and restates earlier volume to the post-split share basis.
+
+## `bt target`
+
+Runs one decision cycle for a US strategy and prints what the live daemon would do without submitting an order. The command fetches Tiingo history through Alpaca's previous daily bar, appends Alpaca's current snapshot as a provisional bar, and evaluates the strategy through the same DSL compiler used by `bt run`. Taiwan strategies stop with `live trading supports us only`.
+
+Paper trading is the default. `--live` selects the live Alpaca account and API endpoint.
+
+| Argument or option | Default | Description |
+|---|---|---|
+| `STRAT` | - | Read one strategy containing exactly one US stock declaration. |
+| `--live` | paper | Use the live Alpaca account instead of paper. |
+| `--data-dir DIR` | `data/` | Set the Tiingo cache directory. |
+| `-h`, `-help`, `--help` | - | Print the target options and exit with code 0. |
+
+Set `TIINGO_TOKEN`, `APCA_API_KEY_ID`, and `APCA_API_SECRET_KEY` in the environment. The Alpaca key variables must contain credentials for the account selected by the mode.
+
+Output is one field per line: `fetched-through`, the provisional bar's `date`, `open`, `high`, `low`, `close`, and `volume`, then `target`, `equity`, and `held`. The final `action` is `order` or `skip`. An order also prints `side`, `quantity`, and `client-order-id`; a skip prints `reason`. The command never submits the printed order.
 
 ## `bt run`
 

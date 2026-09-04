@@ -46,7 +46,6 @@ let buy_hold_strategy_path () =
 let fixture_path () =
   locate ["test/fixtures/synthetic.csv"; "fixtures/synthetic.csv"]
 
-
 let bar date o c : Data.bar =
   { date; o; h = max o c +. 1.; l = min o c -. 1.; c; v = 1000. }
 
@@ -1876,6 +1875,7 @@ let read_file path =
   Fun.protect
     ~finally:(fun () -> close_in input)
     (fun () -> really_input_string input (in_channel_length input))
+
 let alpaca_fixture name =
   read_file
     (locate
@@ -4296,15 +4296,83 @@ let test_alpaca_order_parse () =
 
 let test_alpaca_snapshot_parse () =
   let actual = Alpaca.parse_snapshot (alpaca_fixture "snapshot.json") in
-  (* OHLCV comes from dailyBar; latest comes from latestTrade.p. *)
+  (* Dates are the dailyBar and prevDailyBar timestamp prefixes.
+     OHLCV comes from dailyBar; latest comes from latestTrade.p. *)
   let expected : Alpaca.snapshot_t =
-    { day_open = 172.62;
+    { day_date = "2022-08-16";
+      prev_day_date = "2022-08-15";
+      day_open = 172.62;
       day_high = 173.71;
       day_low = 171.6618;
       latest = 172.55;
       day_volume = 56457696. }
   in
   assert (actual = expected)
+
+let test_live_pure_decisions () =
+  (* 1.994 * 10000 / 500 = 39.88, truncated toward zero to 39;
+     the negative case truncates -39.88 toward zero to -39. *)
+  assert (Live.desired_shares ~target:1.994 ~equity:10000. ~price:500. = 39);
+  assert (Live.desired_shares ~target:(-1.994) ~equity:10000. ~price:500. = -39);
+  (* Round 5.4 to 5 and 5.6 to 6 before subtracting from 39. *)
+  assert (Live.order_delta ~desired:39 ~held:5.4 = 34);
+  assert (Live.order_delta ~desired:39 ~held:5.6 = 33);
+  (* One share at $0.99 is below $1 for either side; at $1 it is not. *)
+  assert (Live.below_threshold ~delta:1 ~price:0.99);
+  assert (Live.below_threshold ~delta:(-1) ~price:0.99);
+  assert (not (Live.below_threshold ~delta:1 ~price:1.));
+  (* The identifier is the fixed prefix, symbol, and session date. *)
+  assert
+    (Live.client_order_id ~symbol:"SPY" ~date:"2025-06-24"
+     = "bt-SPY-2025-06-24");
+  (* Matching the prior session is fresh; an older cache is stale. *)
+  assert
+    (Live.cache_is_fresh ~last_cached:"2025-06-23"
+       ~prev_trading_day:"2025-06-23");
+  assert
+    (not
+       (Live.cache_is_fresh ~last_cached:"2025-06-20"
+          ~prev_trading_day:"2025-06-23"));
+  let snapshot : Alpaca.snapshot_t =
+    { day_date = "2025-06-24";
+      prev_day_date = "2025-06-23";
+      day_open = 500.;
+      day_high = 505.;
+      day_low = 498.;
+      latest = 503.;
+      day_volume = 12345. }
+  in
+  let expected : Data.bar =
+    (* Every bar field maps directly from the snapshot's current session. *)
+    { date = "2025-06-24";
+      o = 500.;
+      h = 505.;
+      l = 498.;
+      c = 503.;
+      v = 12345. }
+  in
+  assert (Live.provisional_bar snapshot = expected)
+
+let test_target_rejects_tw () =
+  let binary = locate ["_build/default/bin/bt.exe"; "../bin/bt.exe"] in
+  let stderr_path = Filename.temp_file "bt-test-target-" ".txt" in
+  Fun.protect
+    ~finally:(fun () ->
+      if Sys.file_exists stderr_path then Sys.remove stderr_path)
+    (fun () ->
+      with_temp_strategy "stock \"tw/00685L\"\ntarget 1.0\n" (fun path ->
+        let command =
+          String.concat " "
+            [ Filename.quote binary;
+              "target";
+              Filename.quote path;
+              ">/dev/null";
+              "2>" ^ Filename.quote stderr_path ]
+        in
+        assert (Sys.command command = 2);
+        assert
+          (contains (read_file stderr_path)
+             "live trading supports us only")))
 
 let () =
   test_alpaca_base_urls ();
@@ -4313,6 +4381,8 @@ let () =
   test_alpaca_position_parse ();
   test_alpaca_order_parse ();
   test_alpaca_snapshot_parse ();
+  test_live_pure_decisions ();
+  test_target_rejects_tw ();
   test_profile_of_market ();
   test_parser ();
   test_default_costs ();
