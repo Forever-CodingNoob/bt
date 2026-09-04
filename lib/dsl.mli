@@ -8,6 +8,11 @@ val declared_params_ast : Ast.stmt list -> (string * float) list
 val stocks_of :
   filename:string -> Ast.stmt list -> (string option * string * string) list
 
+(** Build engine labels from [stocks_of] output.  When the same
+    (market, symbol) pair appears under multiple aliases the label
+    gains a [#alias] suffix; otherwise the label is [market/symbol]. *)
+val labels_of_stocks : (string option * string * string) list -> string list
+
 (** Compile a parsed strategy against its aliased asset data. *)
 val compile_ast :
   Ast.stmt list ->

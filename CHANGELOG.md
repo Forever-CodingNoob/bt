@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - A strategy may declare the same stock symbol multiple times under distinct aliases (needed for analog runs mapping several legs to one underlying); duplicate-alias and mixed-alias guards remain.
+- When the same market/symbol appears under multiple aliases, the engine labels each leg `market/symbol#alias` so trades.csv rows and the report header are attributable per leg.
 
 ## [0.7.0] - 2026-09-02
 

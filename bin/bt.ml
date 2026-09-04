@@ -409,11 +409,7 @@ let run argv =
         let strategy =
           Btlib.Dsl.compile_ast input.ast ~params ~assets:assets_for_compile
         in
-        let labels =
-          List.map
-            (fun (_, market, symbol) -> market ^ "/" ^ symbol)
-            input.stocks
-        in
+        let labels = Btlib.Dsl.labels_of_stocks input.stocks in
         let engine_assets =
           Array.of_list
             (List.map2

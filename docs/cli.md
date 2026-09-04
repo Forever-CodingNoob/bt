@@ -173,6 +173,8 @@ The engine closes a final open exposure at the last close in both modes. It appl
 ## Run outputs
 
 `bt run` prints a report table to standard output. The table has one column for each strategy and, when requested, one baseline column. It shows Total return, CAGR, Sharpe, MaxDD, and Calmar. The lines below the table show each strategy's trade count and win rate, the common date range, and the fill mode.
+The `name:` line after the table joins each strategy's stock labels with `+`. When the same symbol appears under multiple aliases, the label carries a `#alias` suffix (for example `tw/00685L#core+tw/00685L#trade`).
+
 
 If a strategy had a loan on at least one bar, `bt run` also prints a margin line:
 
@@ -187,7 +189,7 @@ The default stem joins strategy names in argument order with `_vs_`. A single st
 | File | Content |
 |---|---|
 | `<stem>.csv` | All equity curves. Header: `date`, each strategy name in argument order, and `baseline` when requested. |
-| `<name>.trades.csv` | One fill log per strategy. Header: `date,stock,price,from_exposure,to_exposure`. One row per fill per stock. No baseline fill log. |
+| `<name>.trades.csv` | One fill log per strategy. Header: `date,stock,price,from_exposure,to_exposure`. One row per fill per stock. When the same symbol appears under multiple aliases, the `stock` column carries `market/symbol#alias`. No baseline fill log. |
 | `<stem>.png` | Equity graph. Not created with `--no-plot`. |
 
 `--out-name` changes only `<stem>.csv` and `<stem>.png`, not `<name>.trades.csv`.

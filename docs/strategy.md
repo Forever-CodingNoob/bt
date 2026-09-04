@@ -103,6 +103,11 @@ Compilation fails for:
   in an aliased file; or
 - a qualified builtin other than `atr`.
 
+When the same market/symbol appears under more than one alias, the engine
+labels each leg `market/symbol#alias` so that trades.csv rows and the report
+header are attributable per leg. A symbol declared only once keeps the bare
+`market/symbol` label.
+
 ## Grammar (BNF)
 
 ```

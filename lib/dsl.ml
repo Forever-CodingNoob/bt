@@ -434,6 +434,26 @@ let stocks_of ~filename statements =
       alias, market, symbol)
     declared
 
+
+let labels_of_stocks stocks =
+  let counts = Hashtbl.create 4 in
+  List.iter
+    (fun (_, market, symbol) ->
+      let key = (market, symbol) in
+      let n = match Hashtbl.find_opt counts key with
+        | Some n -> n + 1 | None -> 1 in
+      Hashtbl.replace counts key n)
+    stocks;
+  List.map
+    (fun (alias, market, symbol) ->
+      let base = market ^ "/" ^ symbol in
+      if Hashtbl.find counts (market, symbol) > 1 then
+        match alias with
+        | Some a -> base ^ "#" ^ a
+        | None -> base
+      else base)
+    stocks
+
 let compile_ast statements ~params ~assets =
   let declarations = declared_params_ast statements in
   let () = validate_overrides declarations params in

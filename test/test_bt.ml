@@ -4173,6 +4173,52 @@ let test_us_cure_tail_aware () =
   assert (result.margin_stats.Engine.margin_call_dates = ["2020-01-03"]);
   assert_close ~tolerance:1e-12 0.396 (final_equity result)
 
+
+let test_alias_qualified_labels () =
+  (* Two aliases for the same (market, symbol) must produce distinct
+     alias-qualified labels; a single declaration stays bare. *)
+  let shared_bars =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 100. 110.;
+       bar "2020-01-03" 110. 110. |]
+  in
+  (* Duplicate-symbol: labels must carry #alias *)
+  with_temp_strategy
+    "stock \"tw/00685L\" as core\n\
+     stock \"tw/00685L\" as trade\n\
+     core.target 0.6\n\
+     trade.target 0.4\n"
+    (fun path ->
+      let ast = Dsl.parse_file path in
+      let stocks = Dsl.stocks_of ~filename:path ast in
+      let labels = Dsl.labels_of_stocks stocks in
+      assert (labels = ["tw/00685L#core"; "tw/00685L#trade"]);
+      (* Engine.run with qualified labels: fills carry them *)
+      let strategy =
+        Dsl.compile_ast ast ~params:[]
+          ~assets:[(Some "core", shared_bars); (Some "trade", shared_bars)]
+      in
+      let result =
+        Engine.run ~profile:tw_profile
+          [| ("tw/00685L#core", shared_bars);
+             ("tw/00685L#trade", shared_bars) |]
+          strategy [| zero_costs; zero_costs |]
+          ~margin:(no_margin 2) ~capital:None ~fill:Engine.Close_same
+      in
+      let fill_stocks =
+        List.map (fun (f : Engine.fill_event) -> f.stock) result.fills
+      in
+      assert (List.mem "tw/00685L#core" fill_stocks);
+      assert (List.mem "tw/00685L#trade" fill_stocks));
+  (* Single declaration: label stays bare *)
+  with_temp_strategy
+    "stock \"tw/00685L\"\ntarget 0.6\n"
+    (fun path ->
+      let ast = Dsl.parse_file path in
+      let stocks = Dsl.stocks_of ~filename:path ast in
+      let labels = Dsl.labels_of_stocks stocks in
+      assert (labels = ["tw/00685L"]))
+
 let () =
   test_profile_of_market ();
   test_parser ();
@@ -4184,6 +4230,7 @@ let () =
   test_multi_stock_errors ();
   test_duplicate_symbol_aliases ();
   test_indicators ();
+  test_alias_qualified_labels ();
   test_target_style ();
   test_hold_tie_break ();
   test_order_style ();
