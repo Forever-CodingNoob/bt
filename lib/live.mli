@@ -44,6 +44,9 @@ val next_actions :
   next_close:string ->
   [`Sleep_until of string | `Decide | `Submit_window | `Post_close]
 
+(** Whether an MOC may still be submitted for this session. *)
+val can_submit_moc : now:string -> next_close:string -> bool
+
 (** Reject inactive or trading-blocked accounts before the daemon starts. *)
 val startup_ok : Alpaca.account_t -> (unit, string) result
 

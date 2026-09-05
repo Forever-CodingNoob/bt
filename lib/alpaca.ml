@@ -205,8 +205,9 @@ let request ?(method_ = "GET") ?body ?root mode ~path =
       let perform body_args =
         let status, http =
           run_capture "/usr/bin/curl"
-            (["-sS"; "-X"; method_; "-H"; "@" ^ header_path;
-              "-o"; response_path; "-w"; "%{http_code}"]
+            (["-sS"; "--max-time"; "60"; "-X"; method_;
+              "-H"; "@" ^ header_path; "-o"; response_path;
+              "-w"; "%{http_code}"]
              @ body_args @ [root ^ path])
         in
         match process_ok status with

@@ -4373,6 +4373,13 @@ let test_live_pure_decisions () =
 let test_live_schedule () =
   let close = "2025-06-24T16:00:00-04:00" in
   assert
+    (Live.can_submit_moc ~now:"2025-06-24T15:49:59-04:00"
+       ~next_close:close);
+  assert
+    (not
+       (Live.can_submit_moc ~now:"2025-06-24T15:50:00-04:00"
+          ~next_close:close));
+  assert
     (Live.next_actions ~now:"2025-06-24T15:44:59-04:00" ~next_close:close
      = `Sleep_until "2025-06-24T15:45:00-04:00");
   assert
