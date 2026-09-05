@@ -1,4 +1,4 @@
 (library
  (name broker)
  (wrapped false)
- (libraries lang))
+ (libraries data engine lang))

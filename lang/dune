@@ -1,7 +1,7 @@
 (library
  (name lang)
  (wrapped false)
- (libraries series engine))
+ (libraries data series engine))
 
 (ocamllex lexer)
 
