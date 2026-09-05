@@ -95,6 +95,7 @@ bt fetch us/SYM --bars 1m [--data-dir DIR]
 ## Non-goals
 
 - Short selling (reserved in the language, refused by the engine).
+- Multi-stock intraday strategies: an intraday strategy declares exactly one stock (the unaliased form); aliased multi-stock files are rejected by `bt daytrade` with `day trading strategies declare exactly one stock`.
 - Overnight holding on intraday bars, extended-hours sessions, sub-minute data.
 - TW intraday data or trading.
 - Day-trade calls, broker liquidation, the $25k eligibility rule.
