@@ -6,6 +6,7 @@
 - [Documentation map](#documentation-map)
 - [Build and test](#build-and-test)
 - [Style rules](#style-rules)
+- [Documentation style](#documentation-style)
 - [Tests](#tests)
 - [Fetching test data](#fetching-test-data)
 - [Data cache layout](#data-cache-layout)
@@ -15,25 +16,29 @@
 ## Module layout
 
 ```
-bin/bt.ml          CLI dispatch: fetch | run
+bin/bt.ml          CLI dispatch: fetch | run | target | live
+lib/alpaca.ml      Alpaca REST client: trading + market data via curl and jq
+lib/alpaca.mli     Alpaca REST interface
 lib/ast.ml         Strategy AST types
 lib/ast.mli        AST interface
-lib/lexer.mll      Lexer (ocamllex)
-lib/parser.mly     Grammar (ocamlyacc)
-lib/dsl.ml         Evaluator; compiles a script to Engine.strategy
-lib/dsl.mli        DSL interface
 lib/data.ml        FinMind/Tiingo fetch, CSV cache, two-plane adjustment
 lib/data.mli       Data interface
-lib/series.ml      Indicators on float arrays
-lib/series.mli     Series interface
+lib/dsl.ml         Evaluator; compiles a script to Engine.strategy
+lib/dsl.mli        DSL interface
 lib/engine.ml      Portfolio engine (per-asset targets, two-inventory margin accounting)
 lib/engine.mli     Engine interface
+lib/lexer.mll      Lexer (ocamllex)
+lib/live.ml        Live decision cycle and close-scheduled daemon
+lib/live.mli       Live interface
 lib/metrics.ml     CAGR, Sharpe, MaxDD, Calmar, trade statistics
 lib/metrics.mli    Metrics interface
+lib/parser.mly     Grammar (ocamlyacc)
 lib/report.ml      Terminal table, CSV output, PNG plot
 lib/report.mli     Report interface
+lib/series.ml      Indicators on float arrays
+lib/series.mli     Series interface
 test/test_bt.ml    Assert-based tests (dune test)
-test/fixtures/     Synthetic CSV data for tests
+test/fixtures/     Synthetic CSV data and recorded Alpaca JSON responses (test/fixtures/alpaca/)
 examples/          Strategy examples
 scripts/plot.py    Equity graph renderer (run directly by bt)
 ```
@@ -74,6 +79,17 @@ dune test --root . --force   # all asserts must pass
 - Do not embed Python (or other foreign code) in `.ml` files. Python scripts are standalone files in `scripts/`.
 - ASCII-only typography in code and docs (no arrows, em dashes, typographic quotes; CJK content terms allowed).
 
+## Documentation style
+
+- Use one H1 per document. Keep a disciplined H2-H4 hierarchy; use H5 or H6 only for genuinely nested material.
+- Avoid essay walls: use short paragraphs under precise headers, with at most one introductory sentence before the first subsection.
+- GitHub alerts have fixed semantics: `> [!NOTE]` provides context, `> [!TIP]` gives usage advice, `> [!IMPORTANT]` states load-bearing semantics, `> [!WARNING]` identifies fidelity gaps, and `> [!CAUTION]` marks destructive or irreversible actions. Alerts carry real content, never decoration.
+- Use tables for enumerable content. Option tables in `docs/cli.md` include a `Default` column; defaults never hide inside descriptions.
+- Keep a full-depth table of contents in every document, covering every header level.
+- Use ASCII-only typography. Never hard-wrap mid-sentence.
+- Follow Keep a Changelog 1.1.0 in `CHANGELOG.md`: behavior-changing commits add entries under `[Unreleased]`; releases are git tags plus GitHub pre-releases.
+- Put design specs in `docs/specs/` and implementation plans in `docs/plans/`, with simple undated filenames that state the content.
+
 ## Tests
 
 - Tests are plain asserts in `test/test_bt.ml`. Do not add a test framework.
@@ -85,10 +101,16 @@ dune test --root . --force   # all asserts must pass
 
 ## Fetching test data
 
-Each `bt-test<N>.exe` in the repo root is a firewall-approved binary snapshot. To fetch fresh market data for a test environment, copy the latest `bt-test<N>.exe` and run:
+Firewall egress approval is scoped to a binary's hash. After every rebuild, copy the current build to a fresh name and make it executable:
 
 ```sh
-./bt-test<N>.exe fetch tw/0050
+cp _build/default/bin/bt.exe bt-test<n+1>.exe && chmod +x bt-test<n+1>.exe
+```
+
+Run fetches through that fresh name, never through an `_build/` path directly:
+
+```sh
+./bt-test<n+1>.exe fetch tw/0050
 ```
 
 These binaries are gitignored.
@@ -120,8 +142,8 @@ Do not change these types or formats:
 - The engine assumes every Taiwan symbol is marginable at the standard TWSE or TPEX ratio. Broker eligibility and reduced ratios, including possible limits on leveraged ETFs such as 00685L, are outside the model.
 - TW cache header: `date,open,high,low,close,volume`
 - Dividend cache header: `date,factor`
-- US cache header: `date,open,high,low,close,adj_close,volume`
-- Fill log header: `date,stock,price,from_exposure,to_exposure`
+- US cache header: `date,open,high,low,close,volume`
+- Fill log header: `date,stock,price,from_exposure,to_exposure`; `stock` is `market/symbol`, or `market/symbol#alias` when the same symbol is declared under multiple aliases.
 
 ## How to add an indicator
 
