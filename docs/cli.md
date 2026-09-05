@@ -11,7 +11,15 @@
   - [Cache files](#cache-files)
   - [Price adjustments](#price-adjustments)
 - [`bt target`](#bt-target)
+  - [Target options](#target-options)
+  - [Environment](#environment)
+  - [Decision cycle](#decision-cycle)
+  - [Output fields](#output-fields)
 - [`bt live`](#bt-live)
+  - [Live options](#live-options)
+  - [Environment and startup](#environment-and-startup)
+  - [Daily schedule](#daily-schedule)
+  - [Failure handling and logs](#failure-handling-and-logs)
 - [`bt run`](#bt-run)
   - [Run arguments and options](#run-arguments-and-options)
   - [Cost defaults](#cost-defaults)
@@ -106,38 +114,130 @@ For US assets, `<symbol>.div.csv` supplies the dividend adjustment to the signal
 
 ## `bt target`
 
-Runs one decision cycle for a US strategy and prints what the live daemon would do without submitting an order. The command fetches Tiingo history through Alpaca's previous daily bar, appends Alpaca's current snapshot as a provisional bar, and evaluates the strategy through the same DSL compiler used by `bt run`. Taiwan strategies stop with `live trading supports us only`.
+Runs one decision cycle and prints what the live daemon would do without submitting an order.
 
-Paper trading is the default. `--live` selects the live Alpaca account and API endpoint.
+### Target options
+
+> [!IMPORTANT]
+> `bt target` accepts US strategies only and uses the paper account by default. A Taiwan strategy stops with `live trading supports us only`.
 
 | Argument or option | Default | Description |
 |---|---|---|
 | `STRAT` | - | Read one strategy containing exactly one US stock declaration. |
-| `--live` | paper | Use the live Alpaca account instead of paper. |
+| `--live` | paper | Use the live Alpaca account and API endpoint instead of paper; this command still does not submit an order. |
 | `--data-dir DIR` | `data/` | Set the Tiingo cache directory. |
 | `--provisional-close PRICE` | - | Use a positive PRICE for a local provisional bar instead of requesting Alpaca's snapshot; the output is marked `provisional: override PRICE`. |
 | `-h`, `-help`, `--help` | - | Print the target options and exit with code 0. |
 
-Set `TIINGO_TOKEN`, `APCA_API_KEY_ID`, and `APCA_API_SECRET_KEY` in the environment. The Alpaca key variables must contain credentials for the account selected by the mode.
+> [!TIP]
+> Use `--provisional-close PRICE` for dry runs outside market hours, when a current Alpaca snapshot is unavailable or unsuitable.
 
-Output is one field per line: `fetched-through`, the provisional bar's `date`, `open`, `high`, `low`, `close`, and `volume`, then `target`, `equity`, and `held`. The final `action` is `order` or `skip`. An order also prints `side`, `quantity`, and `client-order-id`; a skip prints `reason`. The command never submits the printed order.
+### Environment
+
+| Variable | Purpose |
+|---|---|
+| `TIINGO_TOKEN` | Authenticate the Tiingo history request. |
+| `APCA_API_KEY_ID` | Identify the selected paper or live Alpaca account. |
+| `APCA_API_SECRET_KEY` | Authenticate the selected paper or live Alpaca account. |
+
+The Alpaca key variables must contain credentials for the account selected by the mode.
+
+### Decision cycle
+
+The command fetches Tiingo history through Alpaca's previous daily bar, appends Alpaca's current snapshot as a provisional bar, and evaluates the strategy through the same DSL compiler used by `bt run`.
+
+> [!WARNING]
+> The free Alpaca IEX feed can produce a provisional price that differs from the consolidated tape. Alpaca paper accounts also do not simulate dividends, so paper cash and equity can diverge from a live account.
+
+### Output fields
+
+The command writes one field per line.
+
+| Field | Meaning |
+|---|---|
+| `provisional` | Report `override PRICE` when `--provisional-close` supplies the provisional bar. |
+| `fetched-through` | Show the last date fetched from Tiingo. |
+| `provisional-date` | Show the provisional bar's date. |
+| `provisional-open` | Show the provisional bar's open. |
+| `provisional-high` | Show the provisional bar's high. |
+| `provisional-low` | Show the provisional bar's low. |
+| `provisional-close` | Show the provisional bar's close. |
+| `provisional-volume` | Show the provisional bar's volume. |
+| `target` | Show the exposure selected by the strategy. |
+| `equity` | Show the account equity used to size the decision. |
+| `held` | Show the current share position. |
+| `action` | Report `order` or `skip`. |
+| `side` | Report `buy` or `sell` for an order. |
+| `quantity` | Report the whole-share quantity for an order. |
+| `client-order-id` | Report the deterministic identifier for an order. |
+| `reason` | Explain a skipped action. |
+
+> [!IMPORTANT]
+> `bt target` prints the proposed action but never submits an order, even with `--live`.
 
 ## `bt live`
 
-Runs the close-scheduled trading daemon for one US strategy. Paper trading is the default; `--live` selects the live Alpaca account and API endpoint. Taiwan strategies stop with `live trading supports us only`.
+Runs the close-scheduled trading daemon for one US strategy.
 
-The daemon derives every phase from Alpaca's `next_close`. It refreshes Tiingo history and evaluates the provisional daily bar 15 minutes before the close, then queries today's deterministic client order ID before submitting a whole-share market-on-close order by 10 minutes before the close. After the close it logs the fill and sleeps until the next open.
+### Live options
+
+> [!IMPORTANT]
+> `bt live` accepts US strategies only and uses the paper account by default. A Taiwan strategy stops with `live trading supports us only`.
 
 | Argument or option | Default | Description |
 |---|---|---|
 | `STRAT` | - | Read one strategy containing exactly one US stock declaration. |
-| `--live` | paper | Use the live Alpaca account instead of paper. |
+| `--live` | paper | Use the live Alpaca account and API endpoint instead of paper. |
 | `--data-dir DIR` | `data/` | Set the Tiingo cache directory. |
 | `-h`, `-help`, `--help` | - | Print the live options and exit with code 0. |
 
-Set `TIINGO_TOKEN`, `APCA_API_KEY_ID`, and `APCA_API_SECRET_KEY` in the environment. At startup the daemon prints the mode, account number, and equity, and refuses inactive or trading-blocked accounts.
+> [!CAUTION]
+> `bt live --live` submits real-money market-on-close orders. Confirm the credentials, account, and strategy before starting it.
 
-Logs are append-only ASCII text. Each decision identifies the session date, fetched-through date, provisional close, target, equity, held shares, order or skip reason, and fill state. A stale cache, fetch or snapshot error, evaluation error, or order rejection logs one error line and skips the day without placing another order. Restarts recompute desired shares from the account and query the deterministic client order ID before submission, so no local state file is needed.
+### Environment and startup
+
+| Variable | Purpose |
+|---|---|
+| `TIINGO_TOKEN` | Authenticate the Tiingo history request. |
+| `APCA_API_KEY_ID` | Identify the selected paper or live Alpaca account. |
+| `APCA_API_SECRET_KEY` | Authenticate the selected paper or live Alpaca account. |
+
+At startup the daemon prints the mode, account number, and equity, and refuses inactive or trading-blocked accounts.
+
+### Daily schedule
+
+The daemon derives every phase from Alpaca's `next_close`.
+
+| Phase | Timing | Action |
+|---|---|---|
+| Evaluate | 15 minutes before the close | Refresh Tiingo history and evaluate the provisional daily bar. |
+| Submit | By 10 minutes before the close | Query today's deterministic client order ID, then submit a whole-share market-on-close order when needed. |
+| Reconcile | After the close | Log the fill. |
+| Sleep | After reconciliation | Sleep until the next open. |
+
+> [!WARNING]
+> The free Alpaca IEX feed can produce a provisional price that differs from the consolidated tape. Alpaca paper accounts also do not simulate dividends, so paper cash and equity can diverge from a live account.
+
+### Failure handling and logs
+
+Logs are append-only ASCII text.
+
+| Log value | Meaning |
+|---|---|
+| Session date | Identify the trading session. |
+| Fetched-through date | Record the last historical bar. |
+| Provisional close | Record the price used for the decision. |
+| Target | Record the strategy exposure. |
+| Equity | Record the account equity used for sizing. |
+| Held shares | Record the current position. |
+| Order or skip reason | Record the action or why no order was placed. |
+| Fill state | Record post-close reconciliation. |
+
+> [!IMPORTANT]
+> A stale cache, fetch or snapshot error, evaluation error, or order rejection logs one error line and skips the day without placing another order.
+
+> [!NOTE]
+> Restarts recompute desired shares from the account and query the deterministic client order ID before submission, so no local state file is needed.
 
 ## `bt run`
 
