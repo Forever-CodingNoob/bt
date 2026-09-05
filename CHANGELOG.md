@@ -7,10 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-05
+
 ### Added
 
-- Paper-by-default Alpaca live trading with dry-run `bt target` decisions and the close-scheduled, restart-safe `bt live` daemon.
-- `bt target --provisional-close PRICE` for stale-session-safe dry runs using an explicitly marked local provisional bar.
+- Alpaca live trading, paper mode by default: `bt live STRAT` runs a close-scheduled daemon that fetches Tiingo history, evaluates the strategy on a provisional bar 15 minutes before the US close, and submits one whole-share market-on-close order; `--live` switches to the real-money endpoint and is the only way to reach it.
+- `bt target STRAT` prints one complete decision (fetched-through date, provisional bar, target, account equity, held position, proposed order) without submitting anything.
+- `bt target --provisional-close PRICE` dry-runs the full decision path outside market hours with an explicitly marked local provisional bar.
+- Daemon fail-safe rules: every failure (stale cache, stale snapshot session, API or transport error, rejected order) logs one line and skips the day; submissions are refused after the market-on-close cutoff even if the decision ran late; a deterministic `bt-<symbol>-<date>` client order id is checked before submitting, so restarts never double-order; the daemon keeps no state file - the account is the state.
+- Credentials come from `APCA_API_KEY_ID` and `APCA_API_SECRET_KEY`; live trading supports the us market only, enforced at strategy load.
+- `Engine.effective_targets` exposes the backtester's target normalization (NaN and negative clamp plus the funding cap) so live decisions trade on exactly the values a backtest would fill.
 
 ## [0.7.5] - 2026-09-04
 
@@ -158,7 +164,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Return-based engine with daily close-to-close signal prices.
 - TW dividend back-adjustment via FinMind factors.
 
-[Unreleased]: https://github.com/Forever-CodingNoob/bt/compare/v0.7.5...HEAD
+[Unreleased]: https://github.com/Forever-CodingNoob/bt/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/Forever-CodingNoob/bt/compare/v0.7.5...v0.8.0
 [0.7.5]: https://github.com/Forever-CodingNoob/bt/compare/v0.7.0...v0.7.5
 [0.7.0]: https://github.com/Forever-CodingNoob/bt/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/Forever-CodingNoob/bt/compare/v0.5.0...v0.6.0
