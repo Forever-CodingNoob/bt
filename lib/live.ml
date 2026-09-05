@@ -25,6 +25,15 @@ let provisional_bar (snapshot : Alpaca.snapshot_t) : Data.bar =
     c = snapshot.latest;
     v = snapshot.day_volume }
 
+let override_snapshot ~session_date ~prev_day_date ~price : Alpaca.snapshot_t =
+  { day_date = session_date;
+    prev_day_date;
+    day_open = price;
+    day_high = price;
+    day_low = price;
+    latest = price;
+    day_volume = 0. }
+
 let cache_is_fresh ~last_cached ~prev_trading_day =
   last_cached = prev_trading_day
 
@@ -49,6 +58,17 @@ let below_threshold ~delta ~price =
 
 let client_order_id ~symbol ~date =
   Printf.sprintf "bt-%s-%s" symbol date
+
+let decide_action ~symbol ~date ~target ~equity ~price ~held =
+  let desired = desired_shares ~target ~equity ~price in
+  let delta = order_delta ~desired ~held in
+  if below_threshold ~delta ~price then
+    Skip "below $1 minimum order value"
+  else
+    Order
+      { side = (if delta > 0 then `Buy else `Sell);
+        qty = abs delta;
+        id = client_order_id ~symbol ~date }
 
 let int_field value offset length =
   int_of_string (String.sub value offset length)
@@ -140,11 +160,30 @@ let startup_ok (account : Alpaca.account_t) =
   | "ACTIVE", true -> Error "account trading is blocked"
   | status, _ -> Error (Printf.sprintf "account status is %s" status)
 
-let decide mode ~session_date ~strat_path ~data_dir =
+let decide ?provisional_close mode ~session_date ~strat_path ~data_dir =
   let ast = Dsl.parse_file strat_path in
   match Dsl.stocks_of ~filename:strat_path ast with
   | [alias, "us", symbol] ->
-      let snapshot = Alpaca.snapshot symbol in
+      let snapshot =
+        match provisional_close with
+        | None -> Alpaca.snapshot symbol
+        | Some price ->
+            let cache_path =
+              Filename.concat
+                (Filename.concat (Filename.concat data_dir "us") symbol)
+                (symbol ^ ".csv")
+            in
+            let prev_day_date =
+              match Data.last_cached_date cache_path with
+              | Some date -> date
+              | None ->
+                  failwith
+                    (Printf.sprintf
+                       "%s has no cached rows; run bt fetch us/%s"
+                       cache_path symbol)
+            in
+            override_snapshot ~session_date ~prev_day_date ~price
+      in
       let () =
         Data.fetch ~market:"us" ~symbol ~from_:None
           ~to_:snapshot.prev_day_date ~data_dir
@@ -191,16 +230,9 @@ let decide mode ~session_date ~strat_path ~data_dir =
       let account = Alpaca.account mode in
       let equity = account.equity in
       let held = Alpaca.position_qty mode symbol in
-      let desired = desired_shares ~target ~equity ~price:provisional.c in
-      let delta = order_delta ~desired ~held in
       let action =
-        if below_threshold ~delta ~price:provisional.c then
-          Skip "below $1 minimum order value"
-        else
-          Order
-            { side = (if delta > 0 then `Buy else `Sell);
-              qty = abs delta;
-              id = client_order_id ~symbol ~date:provisional.date }
+        decide_action ~symbol ~date:provisional.date ~target ~equity
+          ~price:provisional.c ~held
       in
       { fetched_through; provisional; target; equity; held; action }
   | [_, "tw", _] | [_, _, _] ->

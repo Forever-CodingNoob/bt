@@ -4378,7 +4378,33 @@ let test_live_pure_decisions () =
       c = 503.;
       v = 12345. }
   in
-  assert (Live.provisional_bar snapshot = expected)
+  assert (Live.provisional_bar snapshot = expected);
+  let override =
+    Live.override_snapshot ~session_date:"2025-06-24"
+      ~prev_day_date:"2025-06-23" ~price:650.
+  in
+  let expected_override : Alpaca.snapshot_t =
+    { day_date = "2025-06-24";
+      prev_day_date = "2025-06-23";
+      day_open = 650.;
+      day_high = 650.;
+      day_low = 650.;
+      latest = 650.;
+      day_volume = 0. }
+  in
+  assert (override = expected_override);
+  assert
+    (Live.snapshot_session ~session_date:"2025-06-24"
+       ~provisional_date:override.day_date
+     = `Proceed);
+  (* 1.0 * $100000 / $650 = 153.846..., truncated to 153 shares. *)
+  assert
+    (Live.decide_action ~symbol:"SPY" ~date:override.day_date
+       ~target:1. ~equity:100000. ~price:override.latest ~held:0.
+     = Live.Order
+         { side = `Buy;
+           qty = 153;
+           id = "bt-SPY-2025-06-24" })
 
 let test_live_schedule () =
   let close = "2025-06-24T16:00:00-04:00" in
@@ -4455,6 +4481,70 @@ let test_live_commands_reject_tw () =
                  "live trading supports us only"))))
     ["target"; "live"]
 
+let test_target_rejects_invalid_provisional_close () =
+  let binary = locate ["_build/default/bin/bt.exe"; "../bin/bt.exe"] in
+  List.iter
+    (fun price ->
+      let stderr_path =
+        Filename.temp_file "bt-test-provisional-close-" ".txt"
+      in
+      Fun.protect
+        ~finally:(fun () ->
+          if Sys.file_exists stderr_path then Sys.remove stderr_path)
+        (fun () ->
+          with_temp_strategy "stock \"us/SPY\"\ntarget 1.0\n" (fun path ->
+            let command =
+              String.concat " "
+                [ Filename.quote binary;
+                  "target";
+                  Filename.quote path;
+                  "--provisional-close";
+                  Filename.quote price;
+                  ">/dev/null";
+                  "2>" ^ Filename.quote stderr_path ]
+            in
+            assert (Sys.command command = 2);
+            let stderr = read_file stderr_path in
+            assert
+              (contains stderr
+                 "target: --provisional-close must be a positive float");
+            assert (not (contains stderr "target: target:")))))
+    (* Zero, negatives, NaN, and infinity are not positive finite prices. *)
+    ["0"; "-1"; "nan"; "inf"];
+  let output_path = Filename.temp_file "bt-test-target-help-" ".txt" in
+  Fun.protect
+    ~finally:(fun () ->
+      if Sys.file_exists output_path then Sys.remove output_path)
+    (fun () ->
+      let command =
+        String.concat " "
+          [ Filename.quote binary;
+            "target";
+            "--help";
+            ">" ^ Filename.quote output_path ]
+      in
+      assert (Sys.command command = 0);
+      assert (contains (read_file output_path) "--provisional-close"));
+  (* The daemon parser rejects the target-only override before any API call. *)
+  let stderr_path = Filename.temp_file "bt-test-live-override-" ".txt" in
+  Fun.protect
+    ~finally:(fun () ->
+      if Sys.file_exists stderr_path then Sys.remove stderr_path)
+    (fun () ->
+      with_temp_strategy "stock \"us/SPY\"\ntarget 1.0\n" (fun path ->
+        let command =
+          String.concat " "
+            [ Filename.quote binary;
+              "live";
+              Filename.quote path;
+              "--provisional-close";
+              "650";
+              ">/dev/null";
+              "2>" ^ Filename.quote stderr_path ]
+        in
+        assert (Sys.command command = 2);
+        assert (contains (read_file stderr_path) "unknown option")))
+
 let () =
   test_alpaca_base_urls ();
   test_alpaca_clock_parse ();
@@ -4467,6 +4557,7 @@ let () =
   test_live_schedule ();
   test_live_startup_guard ();
   test_live_commands_reject_tw ();
+  test_target_rejects_invalid_provisional_close ();
   test_profile_of_market ();
   test_parser ();
   test_default_costs ();

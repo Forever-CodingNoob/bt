@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Paper-by-default Alpaca live trading with dry-run `bt target` decisions and the close-scheduled, restart-safe `bt live` daemon.
+- `bt target --provisional-close PRICE` for stale-session-safe dry runs using an explicitly marked local provisional bar.
 
 ## [0.7.5] - 2026-09-04
 

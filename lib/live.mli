@@ -23,6 +23,13 @@ type decision = {
 (** Build today's provisional OHLCV bar from an Alpaca snapshot. *)
 val provisional_bar : Alpaca.snapshot_t -> Data.bar
 
+(** Build a local provisional snapshot at an explicit closing price. *)
+val override_snapshot :
+  session_date:string ->
+  prev_day_date:string ->
+  price:float ->
+  Alpaca.snapshot_t
+
 (** Whether the cache ends at the previous trading session. *)
 val cache_is_fresh : last_cached:string -> prev_trading_day:string -> bool
 
@@ -44,6 +51,16 @@ val below_threshold : delta:int -> price:float -> bool
 (** Build the deterministic daily Alpaca client order identifier. *)
 val client_order_id : symbol:string -> date:string -> string
 
+(** Size a decision and return its order or minimum-value skip. *)
+val decide_action :
+  symbol:string ->
+  date:string ->
+  target:float ->
+  equity:float ->
+  price:float ->
+  held:float ->
+  action
+
 (** Select the next daemon phase from RFC3339 clock timestamps. *)
 val next_actions :
   now:string ->
@@ -61,6 +78,7 @@ val startup_ok : Alpaca.account_t -> (unit, string) result
 
 (** Compute one live decision without submitting an order. *)
 val decide :
+  ?provisional_close:float ->
   mode ->
   session_date:string ->
   strat_path:string ->

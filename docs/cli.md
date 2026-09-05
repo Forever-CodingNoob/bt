@@ -30,7 +30,7 @@ bt run STRAT... [--baseline M/SYM] [--from D] [--to D]
        [--financing-rate PERCENT] [--maintenance-ratio PERCENT]
        [--financing-ratio PERCENT] [--loan-term-months N] [--dividend-tax PERCENT]
        [--capital TWD] [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]
-bt target STRAT [--live] [--data-dir DIR]
+bt target STRAT [--live] [--data-dir DIR] [--provisional-close PRICE]
 bt live STRAT [--live] [--data-dir DIR]
 ```
 
@@ -115,6 +115,7 @@ Paper trading is the default. `--live` selects the live Alpaca account and API e
 | `STRAT` | - | Read one strategy containing exactly one US stock declaration. |
 | `--live` | paper | Use the live Alpaca account instead of paper. |
 | `--data-dir DIR` | `data/` | Set the Tiingo cache directory. |
+| `--provisional-close PRICE` | - | Use a positive PRICE for a local provisional bar instead of requesting Alpaca's snapshot; the output is marked `provisional: override PRICE`. |
 | `-h`, `-help`, `--help` | - | Print the target options and exit with code 0. |
 
 Set `TIINGO_TOKEN`, `APCA_API_KEY_ID`, and `APCA_API_SECRET_KEY` in the environment. The Alpaca key variables must contain credentials for the account selected by the mode.

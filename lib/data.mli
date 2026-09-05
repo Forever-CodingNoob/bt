@@ -35,6 +35,9 @@ val fetch :
   data_dir:string ->
   unit
 
+(** Return the final dated row in a CSV cache, if any. *)
+val last_cached_date : string -> string option
+
 (** Load both price planes and dated dividend cash events. *)
 val load_asset :
   market:string ->

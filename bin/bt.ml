@@ -9,7 +9,7 @@ let usage =
    \         [--dividend-tax PCT] [--financing-rate PCT] [--maintenance-ratio PCT] [--financing-ratio PCT]\n\
    \         [--loan-term-months N]\n\
    \         [--capital TWD] [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]\n\
-   \  bt target STRAT [--live] [--data-dir DIR]\n\
+   \  bt target STRAT [--live] [--data-dir DIR] [--provisional-close PRICE]\n\
    \  bt live STRAT [--live] [--data-dir DIR]"
 
 let help =
@@ -504,7 +504,12 @@ let run argv =
   if not !no_plot then
     Btlib.Report.write_png ~out_dir:!out_dir ~stem:output_stem
 
-let print_decision (decision : Btlib.Live.decision) =
+let print_decision provisional_close (decision : Btlib.Live.decision) =
+  let () =
+    match provisional_close with
+    | None -> ()
+    | Some price -> Printf.printf "provisional: override %.10g\n" price
+  in
   let bar = decision.provisional in
   Printf.printf "fetched-through: %s\n" decision.fetched_through;
   Printf.printf "provisional-date: %s\n" bar.date;
@@ -531,18 +536,19 @@ let print_decision (decision : Btlib.Live.decision) =
       Printf.printf "action: skip\n";
       Printf.printf "reason: %s\n" reason
 
-let live_command_args command argv =
+let live_command_args command extra_options argv =
   let strat_path = ref None in
   let use_live = ref false in
   let data_dir = ref "data" in
-  let rec options =
+  let rec options () =
     [ ("--live", Arg.Set use_live, "use the live Alpaca account");
       ("--data-dir", Arg.Set_string data_dir, "cache directory");
       ("-h",
        Arg.Unit
-         (fun () -> raise (Arg.Help (Arg.usage_string options usage))),
-       "show this help") ]
+         (fun () -> raise (Arg.Help (Arg.usage_string (options ()) usage))),
+       "show this help") ] @ extra_options
   in
+  let options = options () in
   let anonymous value =
     match !strat_path with
     | None -> strat_path := Some value
@@ -585,15 +591,32 @@ let live_command_args command argv =
   | "tw" | _ -> usage_error "live trading supports us only"
 
 let target argv =
-  let strat_path, mode, data_dir = live_command_args "target" argv in
+  let provisional_close = ref None in
+  let extra_options =
+    [ ("--provisional-close",
+       Arg.Float
+         (fun price ->
+           if Float.is_finite price && price > 0. then
+             provisional_close := Some price
+           else
+             raise
+               (Arg.Bad
+                  "--provisional-close must be a positive float")),
+       "override the provisional close with a positive price") ]
+  in
+  let strat_path, mode, data_dir =
+    live_command_args "target" extra_options argv
+  in
   let clock = Btlib.Alpaca.clock mode in
-  Btlib.Live.decide mode
-    ~session_date:(Btlib.Live.timestamp_date clock.timestamp)
-    ~strat_path ~data_dir
-  |> print_decision
+  let decision =
+    Btlib.Live.decide ?provisional_close:!provisional_close mode
+      ~session_date:(Btlib.Live.timestamp_date clock.timestamp)
+      ~strat_path ~data_dir
+  in
+  print_decision !provisional_close decision
 
 let live argv =
-  let strat_path, mode, data_dir = live_command_args "live" argv in
+  let strat_path, mode, data_dir = live_command_args "live" [] argv in
   Btlib.Live.run mode ~strat_path ~data_dir
 
 let dispatch () =
