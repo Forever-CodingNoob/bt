@@ -28,6 +28,16 @@ let provisional_bar (snapshot : Alpaca.snapshot_t) : Data.bar =
 let cache_is_fresh ~last_cached ~prev_trading_day =
   last_cached = prev_trading_day
 
+let snapshot_session ~fetched_through ~provisional_date =
+  if provisional_date <= fetched_through then
+    `Skip
+      (Printf.sprintf
+         "stale snapshot session: provisional %s is not newer than fetched \
+          through %s"
+         provisional_date fetched_through)
+  else
+    `Proceed
+
 let desired_shares ~target ~equity ~price =
   int_of_float (target *. equity /. price)
 
@@ -155,6 +165,14 @@ let decide mode ~strat_path ~data_dir =
                fetched_through snapshot.prev_day_date)
       in
       let provisional = provisional_bar snapshot in
+      let () =
+        match
+          snapshot_session ~fetched_through
+            ~provisional_date:provisional.date
+        with
+        | `Proceed -> ()
+        | `Skip reason -> failwith reason
+      in
       let bars = Array.append asset.signal [| provisional |] in
       let strategy =
         Dsl.compile_ast ast ~params:[] ~assets:[alias, bars]

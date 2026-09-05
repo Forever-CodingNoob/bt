@@ -26,6 +26,12 @@ val provisional_bar : Alpaca.snapshot_t -> Data.bar
 (** Whether the cache ends at the previous trading session. *)
 val cache_is_fresh : last_cached:string -> prev_trading_day:string -> bool
 
+(** Reject snapshots whose daily bar does not advance the cache session. *)
+val snapshot_session :
+  fetched_through:string ->
+  provisional_date:string ->
+  [`Proceed | `Skip of string]
+
 (** Convert target exposure to whole shares, truncating toward zero. *)
 val desired_shares : target:float -> equity:float -> price:float -> int
 

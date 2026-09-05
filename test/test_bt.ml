@@ -4350,6 +4350,16 @@ let test_live_pure_decisions () =
     (not
        (Live.cache_is_fresh ~last_cached:"2025-06-20"
           ~prev_trading_day:"2025-06-23"));
+  assert
+    (Live.snapshot_session ~fetched_through:"2025-06-23"
+       ~provisional_date:"2025-06-23"
+     = `Skip
+         "stale snapshot session: provisional 2025-06-23 is not newer than \
+          fetched through 2025-06-23");
+  assert
+    (Live.snapshot_session ~fetched_through:"2025-06-23"
+       ~provisional_date:"2025-06-24"
+     = `Proceed);
   let snapshot : Alpaca.snapshot_t =
     { day_date = "2025-06-24";
       prev_day_date = "2025-06-23";
