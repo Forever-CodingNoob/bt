@@ -12,7 +12,7 @@ Replace the flat `lib/` + single `btlib` library with cryptoline-style per-conce
 ```
 lang/      ast.ml ast.mli lexer.mll parser.mly dsl.ml dsl.mli   strategy language
 series/    series.ml series.mli                                 indicators
-data/      data.ml data.mli                                     fetch, cache, adjustment
+market/    data.ml data.mli                                     fetch, cache, adjustment (library keeps `(name data)`; the `data/` directory stays cache-only)
 engine/    engine.ml engine.mli                                 portfolio simulation
 metrics/   metrics.ml metrics.mli                               performance statistics
 report/    report.ml report.mli                                 tables, CSV, plots
@@ -30,7 +30,7 @@ test/      test_bt.ml, fixtures/                                unchanged locati
 
 ## Source-edit budget
 
-The ONLY source edits are mechanical `Btlib.` prefix deletions in `bin/bt.ml` and `test/test_bt.ml` (the flat library was wrapped; the new libraries are not). No other `.ml`/`.mli` line changes anywhere. Moves use `git mv` so history follows renames.
+The ONLY source edits remove `Btlib` references from `bin/bt.ml` and `test/test_bt.ml` in whatever mechanical form they take (`Btlib.` prefixes or `open Btlib`); the flat library was wrapped, the new libraries are not. No other `.ml`/`.mli` line changes anywhere. Moves use `git mv` so history follows renames.
 
 ## Verification
 
