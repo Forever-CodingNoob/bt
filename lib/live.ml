@@ -28,15 +28,15 @@ let provisional_bar (snapshot : Alpaca.snapshot_t) : Data.bar =
 let cache_is_fresh ~last_cached ~prev_trading_day =
   last_cached = prev_trading_day
 
-let snapshot_session ~fetched_through ~provisional_date =
-  if provisional_date <= fetched_through then
+let snapshot_session ~session_date ~provisional_date =
+  if provisional_date = session_date then
+    `Proceed
+  else
     `Skip
       (Printf.sprintf
-         "stale snapshot session: provisional %s is not newer than fetched \
-          through %s"
-         provisional_date fetched_through)
-  else
-    `Proceed
+         "stale snapshot session: provisional %s does not match clock session \
+          %s"
+         provisional_date session_date)
 
 let desired_shares ~target ~equity ~price =
   int_of_float (target *. equity /. price)
@@ -140,7 +140,7 @@ let startup_ok (account : Alpaca.account_t) =
   | "ACTIVE", true -> Error "account trading is blocked"
   | status, _ -> Error (Printf.sprintf "account status is %s" status)
 
-let decide mode ~strat_path ~data_dir =
+let decide mode ~session_date ~strat_path ~data_dir =
   let ast = Dsl.parse_file strat_path in
   match Dsl.stocks_of ~filename:strat_path ast with
   | [alias, "us", symbol] ->
@@ -166,10 +166,8 @@ let decide mode ~strat_path ~data_dir =
       in
       let provisional = provisional_bar snapshot in
       let () =
-        match
-          snapshot_session ~fetched_through
-            ~provisional_date:provisional.date
-        with
+        match snapshot_session ~session_date
+                ~provisional_date:provisional.date with
         | `Proceed -> ()
         | `Skip reason -> failwith reason
       in
@@ -389,7 +387,9 @@ let run mode ~strat_path ~data_dir =
                             date;
                           sleep_until clock.next_open
                       | `Decide ->
-                          (match decide mode ~strat_path ~data_dir with
+                          (match
+                             decide mode ~session_date:date ~strat_path ~data_dir
+                           with
                            | decision ->
                                (match
                                   execute_decision mode symbol

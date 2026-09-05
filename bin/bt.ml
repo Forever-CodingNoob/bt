@@ -586,7 +586,11 @@ let live_command_args command argv =
 
 let target argv =
   let strat_path, mode, data_dir = live_command_args "target" argv in
-  Btlib.Live.decide mode ~strat_path ~data_dir |> print_decision
+  let clock = Btlib.Alpaca.clock mode in
+  Btlib.Live.decide mode
+    ~session_date:(Btlib.Live.timestamp_date clock.timestamp)
+    ~strat_path ~data_dir
+  |> print_decision
 
 let live argv =
   let strat_path, mode, data_dir = live_command_args "live" argv in

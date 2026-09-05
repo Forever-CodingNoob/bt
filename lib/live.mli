@@ -26,9 +26,9 @@ val provisional_bar : Alpaca.snapshot_t -> Data.bar
 (** Whether the cache ends at the previous trading session. *)
 val cache_is_fresh : last_cached:string -> prev_trading_day:string -> bool
 
-(** Reject snapshots whose daily bar does not advance the cache session. *)
+(** Reject snapshots whose daily bar does not match the clock session. *)
 val snapshot_session :
-  fetched_through:string ->
+  session_date:string ->
   provisional_date:string ->
   [`Proceed | `Skip of string]
 
@@ -53,11 +53,19 @@ val next_actions :
 (** Whether an MOC may still be submitted for this session. *)
 val can_submit_moc : now:string -> next_close:string -> bool
 
+(** Extract the calendar date prefix from an RFC3339 timestamp. *)
+val timestamp_date : string -> string
+
 (** Reject inactive or trading-blocked accounts before the daemon starts. *)
 val startup_ok : Alpaca.account_t -> (unit, string) result
 
 (** Compute one live decision without submitting an order. *)
-val decide : mode -> strat_path:string -> data_dir:string -> decision
+val decide :
+  mode ->
+  session_date:string ->
+  strat_path:string ->
+  data_dir:string ->
+  decision
 
 (** Run the live trading daemon until the process is stopped. *)
 val run : mode -> strat_path:string -> data_dir:string -> unit
