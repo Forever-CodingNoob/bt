@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Source tree restructured into per-concern dune libraries (`lang/`, `series/`, `market/`, `engine/`, `metrics/`, `report/`, `broker/`) replacing the flat `lib/` and its wrapped `btlib`; module names, the CLI, and all behavior are unchanged.
+
 ## [0.8.0] - 2026-09-05
 
 ### Added
