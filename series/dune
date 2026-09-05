@@ -1,0 +1,4 @@
+(library
+ (name series)
+ (wrapped false)
+ (libraries data))

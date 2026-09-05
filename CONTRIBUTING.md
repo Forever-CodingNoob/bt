@@ -17,26 +17,26 @@
 
 ```
 bin/bt.ml          CLI dispatch: fetch | run | target | live
-lib/alpaca.ml      Alpaca REST client: trading + market data via curl and jq
-lib/alpaca.mli     Alpaca REST interface
-lib/ast.ml         Strategy AST types
-lib/ast.mli        AST interface
-lib/data.ml        FinMind/Tiingo fetch, CSV cache, two-plane adjustment
-lib/data.mli       Data interface
-lib/dsl.ml         Evaluator; compiles a script to Engine.strategy
-lib/dsl.mli        DSL interface
-lib/engine.ml      Portfolio engine (per-asset targets, two-inventory margin accounting)
-lib/engine.mli     Engine interface
-lib/lexer.mll      Lexer (ocamllex)
-lib/live.ml        Live decision cycle and close-scheduled daemon
-lib/live.mli       Live interface
-lib/metrics.ml     CAGR, Sharpe, MaxDD, Calmar, trade statistics
-lib/metrics.mli    Metrics interface
-lib/parser.mly     Grammar (ocamlyacc)
-lib/report.ml      Terminal table, CSV output, PNG plot
-lib/report.mli     Report interface
-lib/series.ml      Indicators on float arrays
-lib/series.mli     Series interface
+broker/alpaca.ml   Alpaca REST client: trading + market data via curl and jq
+broker/alpaca.mli  Alpaca REST interface
+lang/ast.ml        Strategy AST types
+lang/ast.mli       AST interface
+data/data.ml       FinMind/Tiingo fetch, CSV cache, two-plane adjustment
+data/data.mli      Data interface
+lang/dsl.ml        Evaluator; compiles a script to Engine.strategy
+lang/dsl.mli       DSL interface
+engine/engine.ml   Portfolio engine (per-asset targets, two-inventory margin accounting)
+engine/engine.mli  Engine interface
+lang/lexer.mll     Lexer (ocamllex)
+broker/live.ml     Live decision cycle and close-scheduled daemon
+broker/live.mli    Live interface
+metrics/metrics.ml CAGR, Sharpe, MaxDD, Calmar, trade statistics
+metrics/metrics.mli Metrics interface
+lang/parser.mly    Grammar (ocamlyacc)
+report/report.ml   Terminal table, CSV output, PNG plot
+report/report.mli  Report interface
+series/series.ml   Indicators on float arrays
+series/series.mli  Series interface
 test/test_bt.ml    Assert-based tests (dune test)
 test/fixtures/     Synthetic CSV data and recorded Alpaca JSON responses (test/fixtures/alpaca/)
 examples/          Strategy examples
@@ -147,7 +147,7 @@ Do not change these types or formats:
 
 ## How to add an indicator
 
-1. Add the function to `lib/series.ml`. Give NaN for the warmup indexes. Export it in `lib/series.mli`.
-2. Add the name and arity to `builtin_arity` in `lib/dsl.ml`.
-3. Add the call case to `eval_call` in `lib/dsl.ml`.
+1. Add the function to `series/series.ml`. Give NaN for the warmup indexes. Export it in `series/series.mli`.
+2. Add the name and arity to `builtin_arity` in `lang/dsl.ml`.
+3. Add the call case to `eval_call` in `lang/dsl.ml`.
 4. Add an exact-value assert to `test/test_bt.ml` with a derivation comment.

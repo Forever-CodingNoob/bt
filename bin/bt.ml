@@ -81,7 +81,7 @@ let fetch argv =
    | "tw" | "us" -> ()
    | _ -> usage_error "fetch: --market must be tw or us");
   if !symbol = "" then usage_error "fetch: --symbol is required";
-  Btlib.Data.fetch ~market:!market ~symbol:!symbol ~from_:!from_ ~to_:!to_
+  Data.fetch ~market:!market ~symbol:!symbol ~from_:!from_ ~to_:!to_
     ~data_dir:!data_dir
 
 let parse_parameter parameters value =
@@ -100,23 +100,23 @@ let parse_parameter parameters value =
       raise (Arg.Bad (Printf.sprintf "invalid parameter %S; expected name=value" value))
 
 let apply_cost_overrides defaults fee_bps tax_bps slip_bps min_fee
-    per_share_fee per_share_cap : Btlib.Engine.costs =
+    per_share_fee per_share_cap : Engine.costs =
   { fee_bps =
-      (match fee_bps with Some value -> value | None -> defaults.Btlib.Engine.fee_bps);
+      (match fee_bps with Some value -> value | None -> defaults.Engine.fee_bps);
     tax_bps =
-      (match tax_bps with Some value -> value | None -> defaults.Btlib.Engine.tax_bps);
+      (match tax_bps with Some value -> value | None -> defaults.Engine.tax_bps);
     slip_bps =
-      (match slip_bps with Some value -> value | None -> defaults.Btlib.Engine.slip_bps);
+      (match slip_bps with Some value -> value | None -> defaults.Engine.slip_bps);
     min_fee =
-      (match min_fee with Some value -> value | None -> defaults.Btlib.Engine.min_fee);
+      (match min_fee with Some value -> value | None -> defaults.Engine.min_fee);
     per_share_sell_fee =
       (match per_share_fee with
        | Some value -> value
-       | None -> defaults.Btlib.Engine.per_share_sell_fee);
+       | None -> defaults.Engine.per_share_sell_fee);
     per_share_sell_cap =
       (match per_share_cap with
        | Some value -> value
-       | None -> defaults.Btlib.Engine.per_share_sell_cap) }
+       | None -> defaults.Engine.per_share_sell_cap) }
 
 let load_asset ~market ~symbol ~from_ ~to_ ~data_dir =
   let cache_path =
@@ -137,14 +137,14 @@ let load_asset ~market ~symbol ~from_ ~to_ ~data_dir =
     failwith
       (Printf.sprintf "%s not found; run %s" cache_path (Buffer.contents command))
   end;
-  Btlib.Data.load_asset ~market ~symbol ~from_ ~to_ ~data_dir
+  Data.load_asset ~market ~symbol ~from_ ~to_ ~data_dir
 
 type strategy_input = {
   name : string;
   stocks : (string option * string * string) list;
-  ast : Btlib.Ast.file;
+  ast : Ast.file;
   declarations : (string * float) list;
-  assets : Btlib.Data.loaded_asset list;
+  assets : Data.loaded_asset list;
 }
 
 let strategy_name path =
@@ -156,7 +156,7 @@ let common_dates = function
       let initial =
         Array.to_list
           (Array.map
-             (fun (bar : Btlib.Data.bar) -> bar.date)
+             (fun (bar : Data.bar) -> bar.date)
              first)
         |> List.sort_uniq String.compare
       in
@@ -164,13 +164,13 @@ let common_dates = function
         (fun common bars ->
           let present = Hashtbl.create (Array.length bars) in
           Array.iter
-            (fun (bar : Btlib.Data.bar) ->
+            (fun (bar : Data.bar) ->
               Hashtbl.replace present bar.date ())
             bars;
           List.filter (fun date -> Hashtbl.mem present date) common)
         initial rest
 
-let baseline_strategy length : Btlib.Engine.strategy =
+let baseline_strategy length : Engine.strategy =
   { targets = [| Array.make length 1. |] }
 
 let run argv =
@@ -195,7 +195,7 @@ let run argv =
   let out_dir = ref "out" in
   let out_name = ref None in
   let no_plot = ref false in
-  let fill = ref Btlib.Engine.Close_same in
+  let fill = ref Engine.Close_same in
   let rec options =
     [ ("--from", Arg.String (fun value -> from_ := Some value), "start date");
       ("--to", Arg.String (fun value -> to_ := Some value), "end date");
@@ -208,8 +208,8 @@ let run argv =
        Arg.String
          (fun value ->
            match value with
-           | "open" -> fill := Btlib.Engine.Open_next
-           | "close" -> fill := Btlib.Engine.Close_same
+           | "open" -> fill := Engine.Open_next
+           | "close" -> fill := Engine.Close_same
            | _ -> raise (Arg.Bad "--fill must be open or close")),
        "fill mode: open or close (default close)");
       ("--capital",
@@ -276,9 +276,9 @@ let run argv =
   let parsed =
     List.map2
       (fun path name ->
-        let ast = Btlib.Dsl.parse_file path in
-        let stocks = Btlib.Dsl.stocks_of ~filename:path ast in
-        (name, ast, stocks, Btlib.Dsl.declared_params_ast ast))
+        let ast = Dsl.parse_file path in
+        let stocks = Dsl.stocks_of ~filename:path ast in
+        (name, ast, stocks, Dsl.declared_params_ast ast))
       strategy_files names
   in
   let all_markets =
@@ -299,11 +299,11 @@ let run argv =
         if List.for_all (( = ) first) rest then first
         else usage_error "run: all stocks must share one market"
   in
-  let profile = Btlib.Engine.profile_of_market market in
+  let profile = Engine.profile_of_market market in
   let financing_rate =
     match !financing_rate with
     | Some v -> v
-    | None -> profile.Btlib.Engine.default_financing_rate
+    | None -> profile.Engine.default_financing_rate
   in
   let maintenance_override =
     match !maintenance_ratio with
@@ -346,14 +346,14 @@ let run argv =
     List.concat_map
       (fun input ->
         List.map
-          (fun asset -> asset.Btlib.Data.signal)
+          (fun asset -> asset.Data.signal)
           input.assets)
       inputs
   in
   let arrays =
     match baseline_asset with
     | None -> arrays
-    | Some (_, _, asset) -> arrays @ [asset.Btlib.Data.signal]
+    | Some (_, _, asset) -> arrays @ [asset.Data.signal]
   in
   let dates = common_dates arrays in
   if List.length dates < 2 then
@@ -361,9 +361,9 @@ let run argv =
   let keep = Hashtbl.create (List.length dates) in
   List.iter (fun date -> Hashtbl.replace keep date ()) dates;
   let filter bars =
-    Btlib.Data.filter_dates ~keep:(fun date -> Hashtbl.mem keep date) bars
+    Data.filter_dates ~keep:(fun date -> Hashtbl.mem keep date) bars
   in
-  let filter_asset (asset : Btlib.Data.loaded_asset) =
+  let filter_asset (asset : Data.loaded_asset) =
     { asset with
       money = filter asset.money;
       signal = filter asset.signal }
@@ -391,7 +391,7 @@ let run argv =
   let ratio_for market symbol =
     match !financing_ratio with
     | Some percent -> percent /. 100.
-    | None -> Btlib.Data.financing_ratio ~market ~data_dir:!data_dir ~symbol
+    | None -> Data.financing_ratio ~market ~data_dir:!data_dir ~symbol
   in
   let configured_loan_term =
     if !loan_term_months = 0 then None else Some !loan_term_months
@@ -407,23 +407,23 @@ let run argv =
         let assets_for_compile =
           List.map2
             (fun (alias, _, _) asset ->
-              alias, asset.Btlib.Data.signal)
+              alias, asset.Data.signal)
             input.stocks input.assets
         in
         let strategy =
-          Btlib.Dsl.compile_ast input.ast ~params ~assets:assets_for_compile
+          Dsl.compile_ast input.ast ~params ~assets:assets_for_compile
         in
-        let labels = Btlib.Dsl.labels_of_stocks input.stocks in
+        let labels = Dsl.labels_of_stocks input.stocks in
         let engine_assets =
           Array.of_list
             (List.map2
-               (fun label asset -> label, asset.Btlib.Data.money)
+               (fun label asset -> label, asset.Data.money)
                labels input.assets)
         in
         let dividends =
           Array.of_list
             (List.map
-               (fun asset -> asset.Btlib.Data.dividends)
+               (fun asset -> asset.Data.dividends)
                input.assets)
         in
         let costs =
@@ -431,7 +431,7 @@ let run argv =
             (List.map
                (fun (_, market, symbol) ->
                  apply_cost_overrides
-                   (Btlib.Engine.default_costs ~market ~symbol)
+                   (Engine.default_costs ~market ~symbol)
                    !fee_bps !tax_bps !slip_bps !min_fee
                    !per_share_fee !per_share_cap)
                input.stocks)
@@ -440,7 +440,7 @@ let run argv =
           Array.of_list
             (List.map (fun (_, market, symbol) -> ratio_for market symbol) input.stocks)
         in
-        let margin_config : Btlib.Engine.margin =
+        let margin_config : Engine.margin =
           { financing_rate = financing_rate /. 100.;
             maintenance_override;
             ratios;
@@ -453,7 +453,7 @@ let run argv =
               else None }
         in
         let result =
-          Btlib.Engine.run ~dividends
+          Engine.run ~dividends
             ~dividend_tax:(!dividend_tax /. 100.)
             engine_assets strategy costs
             ~profile ~margin:margin_config ~capital:!capital ~fill:!fill
@@ -465,13 +465,13 @@ let run argv =
     match baseline_asset with
     | None -> None
     | Some (market, symbol, asset) ->
-        let bars = asset.Btlib.Data.money in
-        let defaults = Btlib.Engine.default_costs ~market ~symbol in
+        let bars = asset.Data.money in
+        let defaults = Engine.default_costs ~market ~symbol in
         let costs =
           apply_cost_overrides defaults !fee_bps !tax_bps !slip_bps !min_fee
             !per_share_fee !per_share_cap
         in
-        let margin_config : Btlib.Engine.margin =
+        let margin_config : Engine.margin =
           { financing_rate = financing_rate /. 100.;
             maintenance_override;
             ratios = [| ratio_for market symbol |];
@@ -481,7 +481,7 @@ let run argv =
                | _ -> None) }
         in
         Some
-          (Btlib.Engine.run ~dividends:[| asset.Btlib.Data.dividends |]
+          (Engine.run ~dividends:[| asset.Data.dividends |]
              ~dividend_tax:(!dividend_tax /. 100.)
              [| (market ^ "/" ^ symbol, bars) |]
              (baseline_strategy (Array.length bars)) [| costs |]
@@ -494,17 +494,17 @@ let run argv =
   let stocks =
     List.map (fun (name, stock, _) -> name, stock) runs
   in
-  let output_stem = Btlib.Report.stem ~names ~out_name:!out_name in
-  Btlib.Report.print_many
+  let output_stem = Report.stem ~names ~out_name:!out_name in
+  Report.print_many
     ~columns ~baseline:baseline_result ~fill:!fill ~stocks
     ~financing_rate;
-  Btlib.Report.write_outputs
+  Report.write_outputs
     ~out_dir:!out_dir ~stem:output_stem
     ~columns ~baseline:baseline_result;
   if not !no_plot then
-    Btlib.Report.write_png ~out_dir:!out_dir ~stem:output_stem
+    Report.write_png ~out_dir:!out_dir ~stem:output_stem
 
-let print_decision provisional_close (decision : Btlib.Live.decision) =
+let print_decision provisional_close (decision : Live.decision) =
   let () =
     match provisional_close with
     | None -> ()
@@ -522,7 +522,7 @@ let print_decision provisional_close (decision : Btlib.Live.decision) =
   Printf.printf "equity: %.10g\n" decision.equity;
   Printf.printf "held: %.10g\n" decision.held;
   match decision.action with
-  | Btlib.Live.Order { side; qty; id } ->
+  | Live.Order { side; qty; id } ->
       let side =
         match side with
         | `Buy -> "buy"
@@ -532,7 +532,7 @@ let print_decision provisional_close (decision : Btlib.Live.decision) =
       Printf.printf "side: %s\n" side;
       Printf.printf "quantity: %d\n" qty;
       Printf.printf "client-order-id: %s\n" id
-  | Btlib.Live.Skip reason ->
+  | Live.Skip reason ->
       Printf.printf "action: skip\n";
       Printf.printf "reason: %s\n" reason
 
@@ -571,9 +571,9 @@ let live_command_args command extra_options argv =
     | None ->
         usage_error (Printf.sprintf "%s: one STRAT file is required" command)
   in
-  let ast = Btlib.Dsl.parse_file strat_path in
+  let ast = Dsl.parse_file strat_path in
   let market =
-    match Btlib.Dsl.stocks_of ~filename:strat_path ast with
+    match Dsl.stocks_of ~filename:strat_path ast with
     | [_, market, _] -> market
     | _ ->
         usage_error
@@ -584,8 +584,8 @@ let live_command_args command extra_options argv =
   | "us" ->
       let mode =
         match !use_live with
-        | false -> Btlib.Live.Paper
-        | true -> Btlib.Live.Live
+        | false -> Live.Paper
+        | true -> Live.Live
       in
       strat_path, mode, !data_dir
   | "tw" | _ -> usage_error "live trading supports us only"
@@ -607,17 +607,17 @@ let target argv =
   let strat_path, mode, data_dir =
     live_command_args "target" extra_options argv
   in
-  let clock = Btlib.Alpaca.clock mode in
+  let clock = Alpaca.clock mode in
   let decision =
-    Btlib.Live.decide ?provisional_close:!provisional_close mode
-      ~session_date:(Btlib.Live.timestamp_date clock.timestamp)
+    Live.decide ?provisional_close:!provisional_close mode
+      ~session_date:(Live.timestamp_date clock.timestamp)
       ~strat_path ~data_dir
   in
   print_decision !provisional_close decision
 
 let live argv =
   let strat_path, mode, data_dir = live_command_args "live" [] argv in
-  Btlib.Live.run mode ~strat_path ~data_dir
+  Live.run mode ~strat_path ~data_dir
 
 let dispatch () =
   if Array.length Sys.argv < 2 then begin

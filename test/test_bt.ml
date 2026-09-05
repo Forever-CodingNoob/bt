@@ -1,4 +1,3 @@
-open Btlib
 
 let assert_close ?(tolerance = 1e-9) expected actual =
   if Float.is_nan expected then assert (Float.is_nan actual)

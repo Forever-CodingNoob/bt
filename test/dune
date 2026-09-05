@@ -1,6 +1,6 @@
 (test
  (name test_bt)
- (libraries btlib)
+ (libraries lang series data engine metrics report broker)
  (deps
   ../bin/bt.exe
   ../examples/sma_cross.strat

@@ -1,0 +1,8 @@
+(library
+ (name lang)
+ (wrapped false)
+ (libraries series engine))
+
+(ocamllex lexer)
+
+(ocamlyacc parser)
