@@ -21,8 +21,8 @@ broker/alpaca.ml   Alpaca REST client: trading + market data via curl and jq
 broker/alpaca.mli  Alpaca REST interface
 lang/ast.ml        Strategy AST types
 lang/ast.mli       AST interface
-data/data.ml       FinMind/Tiingo fetch, CSV cache, two-plane adjustment
-data/data.mli      Data interface
+market/data.ml     FinMind/Tiingo fetch, CSV cache, two-plane adjustment
+market/data.mli    Data interface
 lang/dsl.ml        Evaluator; compiles a script to Engine.strategy
 lang/dsl.mli       DSL interface
 engine/engine.ml   Portfolio engine (per-asset targets, two-inventory margin accounting)
