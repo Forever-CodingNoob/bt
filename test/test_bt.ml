@@ -5136,3 +5136,98 @@ let test_engine_fill_planner () =
   assert_close 1000000. exit.Engine.plan_repayment
 
 let () = test_engine_fill_planner ()
+
+(* Task 1: Shioaji client fixture parsing. *)
+let shioaji_fixture name =
+  read_file
+    (locate
+       [Filename.concat "test/fixtures/shioaji" name;
+        Filename.concat "fixtures/shioaji" name])
+
+let test_shioaji_info_parse () =
+  let actual = Shioaji.parse_info (shioaji_fixture "info.json") in
+  (* Expected values are copied from the documented server info response. *)
+  let expected : Shioaji.info =
+    { simulation = false; version = "1.7.2" }
+  in
+  assert (actual = expected)
+
+let test_shioaji_snapshot_parse () =
+  let actual = Shioaji.parse_snapshot (shioaji_fixture "snapshot.json") in
+  (* Expected values are copied from the documented 2330 snapshot row. *)
+  let expected : Shioaji.snapshot =
+    { datetime = "2026-05-18T14:30:00";
+      open_ = 2225.;
+      high = 2260.;
+      low = 2215.;
+      close = 2240.;
+      bid = 2240.;
+      ask = 2245.;
+      total_volume = 25820. }
+  in
+  assert (actual = expected)
+
+let test_shioaji_positions_parse () =
+  let actual = Shioaji.parse_positions (shioaji_fixture "positions.json") in
+  (* The first two rows are documented Common-lot cash positions. The third
+     applies the same shape to three margin lots with TWD 120,000 borrowed. *)
+  let expected : Shioaji.position list =
+    [{ code = "2890"; cond = "Cash"; lots = 1; yd_lots = 1;
+       avg_price = 30.; last_price = 31.; loan_amount = 0.; interest = 0. };
+     { code = "2330"; cond = "Cash"; lots = 1; yd_lots = 1;
+       avg_price = 2000.; last_price = 1980.; loan_amount = 0.; interest = 0. };
+     { code = "2330"; cond = "MarginTrading"; lots = 3; yd_lots = 2;
+       avg_price = 1950.; last_price = 1980.; loan_amount = 120000.;
+       interest = 35. }]
+  in
+  assert (actual = expected)
+
+let test_shioaji_balance_parse () =
+  let () =
+    assert (Shioaji.parse_balance (shioaji_fixture "balance.json") = 100000.)
+  in
+  match Shioaji.parse_balance (shioaji_fixture "balance_error.json") with
+  | _ -> assert false
+  | exception Failure message ->
+      assert (message = "account balance unavailable in simulation")
+
+let test_shioaji_placed_parse () =
+  let actual = Shioaji.parse_placed (shioaji_fixture "place_order.json") in
+  (* The documented initial response has not reached the exchange yet. *)
+  let expected : Shioaji.placed =
+    { order_id = "a647f23d"; status = "PendingSubmit" }
+  in
+  assert (actual = expected)
+
+let test_shioaji_orders_today_parse () =
+  let raw = shioaji_fixture "update_status.json" in
+  let actual =
+    Shioaji.parse_orders_today ~code:"2890" ~today:"2026-05-20" raw
+  in
+  (* The documented fill is two Common lots at TWD 27.1. *)
+  let expected : Shioaji.trade list =
+    [{ order_id = "a647f23d";
+       code = "2890";
+       action = "Buy";
+       cond = "Cash";
+       status = "Filled";
+       order_lots = 2;
+       deal_lots = 2;
+       deal_price = Some 27.1;
+       order_datetime = "2026-05-20T11:24:30+08:00" }]
+  in
+  let () = assert (actual = expected) in
+  let () =
+    assert
+      (Shioaji.parse_orders_today ~code:"2890" ~today:"2026-05-21" raw = [])
+  in
+  assert
+    (Shioaji.parse_orders_today ~code:"2330" ~today:"2026-05-20" raw = [])
+
+let () =
+  let () = test_shioaji_info_parse () in
+  let () = test_shioaji_snapshot_parse () in
+  let () = test_shioaji_positions_parse () in
+  let () = test_shioaji_balance_parse () in
+  let () = test_shioaji_placed_parse () in
+  test_shioaji_orders_today_parse ()

@@ -9,4 +9,5 @@
   ../scripts/plot.py
   fixtures/synthetic.csv
   (glob_files fixtures/minute/*.csv)
-  (glob_files fixtures/alpaca/*.json)))
+  (glob_files fixtures/alpaca/*.json)
+  (glob_files fixtures/shioaji/*.json)))

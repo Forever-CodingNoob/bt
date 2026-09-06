@@ -1,0 +1,47 @@
+[
+  {
+    "id": 0,
+    "code": "2890",
+    "direction": "Buy",
+    "quantity": 1,
+    "price": 30.0,
+    "last_price": 31.0,
+    "pnl": 1000.0,
+    "yd_quantity": 1,
+    "cond": "Cash",
+    "margin_purchase_amount": 0,
+    "collateral": 0,
+    "short_sale_margin": 0,
+    "interest": 0
+  },
+  {
+    "id": 1,
+    "code": "2330",
+    "direction": "Buy",
+    "quantity": 1,
+    "price": 2000.0,
+    "last_price": 1980.0,
+    "pnl": -20000.0,
+    "yd_quantity": 1,
+    "cond": "Cash",
+    "margin_purchase_amount": 0,
+    "collateral": 0,
+    "short_sale_margin": 0,
+    "interest": 0
+  },
+  {
+    "id": 2,
+    "code": "2330",
+    "direction": "Buy",
+    "quantity": 3,
+    "price": 1950.0,
+    "last_price": 1980.0,
+    "pnl": 90000.0,
+    "yd_quantity": 2,
+    "cond": "MarginTrading",
+    "margin_purchase_amount": 120000,
+    "collateral": 0,
+    "short_sale_margin": 0,
+    "interest": 35
+  }
+]
