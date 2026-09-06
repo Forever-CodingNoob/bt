@@ -277,6 +277,10 @@ let run argv =
     List.map2
       (fun path name ->
         let ast = Dsl.parse_file path in
+        let () =
+          if List.exists (function Ast.Bars _ -> true | _ -> false) ast then
+            failwith "day trading strategies run under bt daytrade"
+        in
         let stocks = Dsl.stocks_of ~filename:path ast in
         (name, ast, stocks, Dsl.declared_params_ast ast))
       strategy_files names

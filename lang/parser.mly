@@ -4,6 +4,8 @@ open Ast
 
 %token PARAM LET ENTRY EXIT SIZE WHEN AND OR NOT
 %token NEWLINE TARGET CAP STOCK
+%token BARS
+%token <int> MINUTES
 %token ASSIGN EQEQ NEQ LE GE LT GT PLUS MINUS STAR SLASH
 %token LPAREN RPAREN COMMA
 %token DOT AS
@@ -54,6 +56,7 @@ stmt:
 | IDENT DOT CAP NUMBER { Cap (Some $1, $4) }
 | STOCK STRING { Stock ($2, None) }
 | STOCK STRING AS IDENT { Stock ($2, Some $4) }
+| BARS MINUTES { Bars $2 }
 ;
 
 expr:

@@ -8,6 +8,7 @@ let keyword = function
   | "exit" -> EXIT
   | "size" -> SIZE
   | "stock" -> STOCK
+  | "bars" -> BARS
   | "as" -> AS
   | "target" -> TARGET
   | "cap" -> CAP
@@ -43,6 +44,11 @@ rule token = parse
   | '(' { LPAREN }
   | ')' { RPAREN }
   | ',' { COMMA }
+  | (digits as value) 'm' {
+      match int_of_string_opt value with
+      | Some minutes when minutes > 0 -> MINUTES minutes
+      | _ -> raise Parsing.Parse_error
+    }
   | number as value { NUMBER (float_of_string value) }
   | '.' { DOT }
   | ident_start ident_char* as name { keyword name }

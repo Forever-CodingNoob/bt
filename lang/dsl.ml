@@ -162,6 +162,8 @@ let rec eval context environment expression =
       begin
         match List.assoc_opt key environment with
         | Some value -> value
+        | None when name = "since_open" || name = "to_close" ->
+            failwith "since_open and to_close are available only under bt daytrade"
         | None ->
             fail_expr expression (Printf.sprintf "unknown identifier %s" key)
       end
@@ -454,7 +456,17 @@ let labels_of_stocks stocks =
       else base)
     stocks
 
-let compile_ast statements ~params ~assets =
+let timeframe statements =
+  List.fold_left
+    (fun found -> function
+      | Bars minutes ->
+          (match found with
+           | None -> Some minutes
+           | Some _ -> failwith "duplicate bars declaration")
+      | _ -> found)
+    None statements
+
+let compile_ast ?extra statements ~params ~assets =
   let declarations = declared_params_ast statements in
   let () = validate_overrides declarations params in
   let length =
@@ -476,6 +488,19 @@ let compile_ast statements ~params ~assets =
     List.concat_map
       (fun (alias, bars) -> series_environment ?alias bars)
       assets
+  in
+  let initial_environment =
+    match extra with
+    | None -> initial_environment
+    | Some series ->
+        List.fold_left
+          (fun environment (name, values) ->
+            let () =
+              if Array.length values <> length then
+                invalid_arg "Dsl.compile_ast: extra series length mismatch"
+            in
+            (name, Series values) :: environment)
+          initial_environment series
   in
   let module Group = struct
     type t = {
@@ -565,6 +590,9 @@ let compile_ast statements ~params ~assets =
              | None ->
                  let () = g.cap <- Some value in
                  environment)
+        | Bars _ ->
+            let () = ignore (timeframe statements) in
+            environment
         | Stock _ -> environment)
       initial_environment statements
   in
@@ -727,13 +755,13 @@ let compile_ast statements ~params ~assets =
   in
   strategy
 
-let compile source ~params bars =
+let compile ?extra source ~params bars =
   let ast = parse_file source in
   if not (List.exists (function Stock _ -> true | _ -> false) ast) then
-    compile_ast ast ~params ~assets:[ (None, bars) ]
+    compile_ast ?extra ast ~params ~assets:[ (None, bars) ]
   else
     match stocks_of ~filename:source ast with
     | [ (None, _, _) ] ->
-        compile_ast ast ~params ~assets:[ (None, bars) ]
+        compile_ast ?extra ast ~params ~assets:[ (None, bars) ]
     | _ ->
         failwith "Dsl.compile supports single unaliased stocks; use compile_ast"

@@ -4625,7 +4625,99 @@ let test_minute_data () =
       Array.sub all 2 2) in
     assert (Data.read_minute_bars ~data_dir ~symbol:"EMPTY" ~from_:None ~to_:None = [||]))
 
+let test_bars_declaration () =
+  let () =
+    with_temp_strategy "bars 5m\n" (fun path ->
+      let ast = Dsl.parse_file path in
+      (* A five-minute declaration carries the integer 5, not a price expression. *)
+      let () = assert (ast = [Ast.Bars 5]) in
+      assert (Dsl.timeframe ast = Some 5))
+  in
+  let () =
+    with_temp_strategy "target 1\n" (fun path ->
+      (* No declaration means the daily timeframe remains implicit. *)
+      assert (Dsl.timeframe (Dsl.parse_file path) = None))
+  in
+  let () =
+    List.iter
+      (fun source ->
+        with_temp_strategy source (fun path ->
+          match Dsl.parse_file path with
+          | _ -> assert false
+          | exception Failure message ->
+              assert (contains message ": parse error")))
+      ["bars 0m\n"; "bars 5\n"; "bars -5m\n"; "bars 1.5m\n";
+       "bars 5h\n"; "bars 999999999999999999999999999999m\n"]
+  in
+  with_temp_strategy "bars 5m\nbars 1m\ntarget 1\n" (fun path ->
+    let ast = Dsl.parse_file path in
+    let rejects function_ =
+      match function_ () with
+      | _ -> assert false
+      | exception Failure message ->
+          assert (message = "duplicate bars declaration")
+    in
+    let () = rejects (fun () -> ignore (Dsl.timeframe ast)) in
+    rejects (fun () ->
+      ignore (Dsl.compile_ast ast ~params:[] ~assets:[None, sample_bars])))
+
+let test_session_series () =
+  let extra =
+    ["since_open", [|0.; 5.; 10.; 15.; 20.|];
+     "to_close", [|25.; 20.; 15.; 10.; 5.|]]
+  in
+  let () =
+    with_temp_strategy
+      "stock \"us/SPY\"\nbars 5m\ntarget num(since_open >= 5 and to_close > 10)\n"
+      (fun path ->
+        let ast = Dsl.parse_file path in
+        let strategy =
+          Dsl.compile_ast ~extra ast ~params:[] ~assets:[None, sample_bars]
+        in
+        (* Both gates hold only at elapsed minutes 5 and 10. *)
+        let () = assert (strategy.Engine.targets = [|[|0.; 1.; 1.; 0.; 0.|]|]) in
+        let compiled = Dsl.compile ~extra path ~params:[] sample_bars in
+        assert (compiled.Engine.targets = strategy.Engine.targets))
+  in
+  let () =
+    List.iter
+      (fun name ->
+        with_temp_strategy ("target " ^ name ^ "\n") (fun path ->
+          match Dsl.compile path ~params:[] sample_bars with
+          | _ -> assert false
+          | exception Failure message ->
+              assert (message =
+                "since_open and to_close are available only under bt daytrade")))
+      ["since_open"; "to_close"]
+  in
+  with_temp_strategy "target since_open\n" (fun path ->
+    (* Five bars cannot consume a one-element injected series. *)
+    match Dsl.compile ~extra:["since_open", [|0.|]] path ~params:[] sample_bars with
+    | _ -> assert false
+    | exception Invalid_argument _ -> ())
+
+let test_bars_run_routing () =
+  with_temp_strategy "stock \"us/SPY\"\nbars 5m\ntarget 1\n" (fun path ->
+    let binary = locate ["_build/default/bin/bt.exe"; "../bin/bt.exe"] in
+    let command = String.concat " "
+      [Filename.quote binary; "run"; Filename.quote path; "--no-plot"; "2>&1"]
+    in
+    let channel = Unix.open_process_in command in
+    let rec lines acc =
+      match input_line channel with
+      | line -> lines (line :: acc)
+      | exception End_of_file -> List.rev acc
+    in
+    let output = lines [] in
+    let status = Unix.close_process_in channel in
+    (* Routing rejects before reading any price cache or starting the daily engine. *)
+    let () = assert (status <> Unix.WEXITED 0) in
+    assert (output = ["day trading strategies run under bt daytrade"]))
+
 let () =
+  let () = test_bars_declaration () in
+  let () = test_session_series () in
+  let () = test_bars_run_routing () in
   let () = test_minute_data () in
   test_alpaca_base_urls ();
   test_alpaca_clock_parse ();
