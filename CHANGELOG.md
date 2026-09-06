@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-06
+
 ### Added
 
 - `bt daytrade` runs single-stock US `bars Nm` strategies with session-aware next-open or same-close fills, forced flat at session end, and execution-only previous-close buying-power caps.
@@ -174,7 +176,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Return-based engine with daily close-to-close signal prices.
 - TW dividend back-adjustment via FinMind factors.
 
-[Unreleased]: https://github.com/Forever-CodingNoob/bt/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/Forever-CodingNoob/bt/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/Forever-CodingNoob/bt/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/Forever-CodingNoob/bt/compare/v0.7.5...v0.8.0
 [0.7.5]: https://github.com/Forever-CodingNoob/bt/compare/v0.7.0...v0.7.5
 [0.7.0]: https://github.com/Forever-CodingNoob/bt/compare/v0.6.0...v0.7.0
