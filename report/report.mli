@@ -20,3 +20,18 @@ val write_outputs :
 
 (** Render an equity CSV to PNG when the plotting script is available. *)
 val write_png : out_dir:string -> stem:string -> unit
+
+(** Print daily-annualized session metrics and intraday round-trip statistics. *)
+val print_intraday :
+  columns:(string * string * Intraday.result) list ->
+  baseline:Engine.result option ->
+  fill:Engine.fill ->
+  unit
+
+(** Write aligned session equity and timestamped intraday fills. *)
+val write_intraday_outputs :
+  out_dir:string ->
+  stem:string ->
+  columns:(string * string * Intraday.result) list ->
+  baseline:Engine.result option ->
+  unit

@@ -9,6 +9,10 @@ let usage =
    \         [--dividend-tax PCT] [--financing-rate PCT] [--maintenance-ratio PCT] [--financing-ratio PCT]\n\
    \         [--loan-term-months N]\n\
    \         [--capital TWD] [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]\n\
+   \  bt daytrade STRAT... [--baseline us/SYM] [--fill open|close] [--leverage N]\n\
+   \              [--from D] [--to D] [-p name=value] [--capital USD]\n\
+   \              [--fee-bps F] [--tax-bps F] [--slip-bps F] [--per-share-fee F] [--per-share-cap F]\n\
+   \              [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]\n\
    \  bt target STRAT [--live] [--data-dir DIR] [--provisional-close PRICE]\n\
    \  bt live STRAT [--live] [--data-dir DIR]"
 
@@ -17,6 +21,7 @@ let help =
   "\n\ncommands:\n\
    \  fetch  Download market data from FinMind into the local cache.\n\
    \  run    Run strategies with cached data and compare them with a baseline.\n\
+   \  daytrade Run US strategies on cached regular-session minute bars.\n\
    \  target Print one live decision without submitting an order.\n\
    \  live   Run the close-scheduled Alpaca trading daemon.\n\n\
    Fetch requires FINMIND_TOKEN.\n\
@@ -508,6 +513,151 @@ let run argv =
   if not !no_plot then
     Report.write_png ~out_dir:!out_dir ~stem:output_stem
 
+let daytrade argv =
+  let strategy_files = ref [] in
+  let from_ = ref None in
+  let to_ = ref None in
+  let baseline = ref None in
+  let parameters = ref [] in
+  let capital = ref None in
+  let leverage = ref 1. in
+  let fee_bps = ref None in
+  let tax_bps = ref None in
+  let slip_bps = ref None in
+  let per_share_fee = ref None in
+  let per_share_cap = ref None in
+  let data_dir = ref "data" in
+  let out_dir = ref "out" in
+  let out_name = ref None in
+  let no_plot = ref false in
+  let fill = ref Engine.Open_next in
+  let rec options =
+    [ "--from", Arg.String (fun value -> from_ := Some value), "start date";
+      "--to", Arg.String (fun value -> to_ := Some value), "end date";
+      "--baseline", Arg.String (fun value ->
+        baseline := Some (parse_market_symbol "baseline" value)), "baseline us/SYM";
+      "--fill", Arg.String (function
+        | "open" -> fill := Engine.Open_next
+        | "close" -> fill := Engine.Close_same
+        | _ -> raise (Arg.Bad "--fill must be open or close")), "fill mode (default open)";
+      "--leverage", Arg.Set_float leverage, "previous-close buying-power multiplier (default 1)";
+      "--capital", Arg.Float (fun value -> capital := Some value), "starting value in USD";
+      "-p", Arg.String (parse_parameter parameters), "parameter override name=value";
+      "--fee-bps", Arg.Float (fun value -> fee_bps := Some value), "fee basis points";
+      "--tax-bps", Arg.Float (fun value -> tax_bps := Some value), "tax basis points";
+      "--slip-bps", Arg.Float (fun value -> slip_bps := Some value), "slippage basis points";
+      "--per-share-fee", Arg.Float (fun value -> per_share_fee := Some value), "TAF per-share sell fee";
+      "--per-share-cap", Arg.Float (fun value -> per_share_cap := Some value), "TAF per-order cap";
+      "--data-dir", Arg.Set_string data_dir, "cache directory";
+      "--out-dir", Arg.Set_string out_dir, "output directory";
+      "--out-name", Arg.String (fun value -> out_name := Some value), "equity output stem";
+      "--no-plot", Arg.Set no_plot, "skip equity graph";
+      "-h", Arg.Unit (fun () -> raise (Arg.Help (Arg.usage_string options usage))), "show help" ] in
+  let () =
+    try Arg.parse_argv argv options (fun value -> strategy_files := value :: !strategy_files) usage with
+    | Arg.Bad message -> let () = prerr_string message in exit 2
+    | Arg.Help message -> let () = print_string message in exit 0 in
+  let files = List.rev !strategy_files in
+  let () = if files = [] then usage_error "daytrade: at least one STRAT file is required" in
+  let () = if not (Float.is_finite !leverage) || !leverage <= 0. then
+    usage_error "daytrade: --leverage must be a positive finite number" in
+  let () = match !capital with
+    | Some value when not (Float.is_finite value) || value <= 0. ->
+        usage_error "daytrade: --capital must be a positive finite number"
+    | _ -> () in
+  let names = List.map strategy_name files in
+  let seen = Hashtbl.create (List.length names) in
+  let () = List.iter (fun name ->
+    let () = if Hashtbl.mem seen name then
+      usage_error (Printf.sprintf "daytrade: duplicate strat basename %S" name) in
+    Hashtbl.replace seen name ()) names in
+  let () = if !baseline <> None && List.mem "baseline" names then
+    usage_error "daytrade: strat basename \"baseline\" conflicts with --baseline" in
+  let parsed = List.map2 (fun path name ->
+    let ast = Dsl.parse_file path in
+    let minutes = match Dsl.timeframe ast with
+      | None -> failwith "bt daytrade requires a bars declaration"
+      | Some minutes -> minutes in
+    let symbol = match Dsl.stocks_of ~filename:path ast with
+      | [None, market, symbol] ->
+          (match market with
+           | "us" -> symbol
+           | _ -> failwith "day trading supports us only")
+      | _ -> failwith "day trading strategies declare exactly one stock" in
+    name, ast, minutes, symbol, Dsl.declared_params_ast ast) files names in
+  let () = List.iter (fun (name, _) ->
+    if not (List.exists (fun (_, _, _, _, declarations) -> List.mem_assoc name declarations) parsed)
+    then failwith ("unknown parameter " ^ name)) !parameters in
+  let () = match !baseline with
+    | None | Some ("us", _) -> ()
+    | Some _ -> failwith "day trading supports us only" in
+  let sessions = Data.read_calendar ~data_dir:!data_dir in
+  let () = if Array.length sessions = 0 then
+    failwith "no cached sessions; run bt fetch us/SYM --bars 1m" in
+  let calendar = Hashtbl.create (Array.length sessions) in
+  let () = Array.iter (fun (session : Data.session) ->
+    Hashtbl.replace calendar session.date session) sessions in
+  let session_date time = String.sub time 0 10 in
+  let inputs = List.map (fun (name, ast, minutes, symbol, declarations) ->
+    let bars = Data.read_minute_bars ~data_dir:!data_dir ~symbol ~from_:!from_ ~to_:!to_ in
+    let bars = Data.filter_dates ~keep:(fun time ->
+      match Hashtbl.find_opt calendar (session_date time) with
+      | None -> false
+      | Some session ->
+          let clock = String.sub time 11 5 in
+          clock >= session.Data.open_ && clock < session.close) bars in
+    let bars = Data.resample ~minutes ~sessions bars in
+    name, ast, symbol, declarations, bars) parsed in
+  let baseline_asset = Option.map (fun (_, symbol) ->
+    symbol, load_asset ~market:"us" ~symbol ~from_:!from_ ~to_:!to_ ~data_dir:!data_dir) !baseline in
+  let arrays = List.map (fun (_, _, _, _, bars) ->
+    Array.map (fun (bar : Data.bar) -> { bar with date = session_date bar.date }) bars) inputs in
+  let arrays = match baseline_asset with
+    | None -> arrays
+    | Some (_, asset) -> arrays @ [asset.Data.money] in
+  let dates = common_dates arrays in
+  let () = if List.length dates < 2 then
+    failwith "strats have fewer than 2 common trading dates" in
+  let keep = Hashtbl.create (List.length dates) in
+  let () = List.iter (fun date -> Hashtbl.replace keep date ()) dates in
+  let keep_date date = Hashtbl.mem keep date in
+  let sessions = Array.of_list (List.filter (fun (session : Data.session) ->
+    keep_date session.date) (Array.to_list sessions)) in
+  let costs symbol = apply_cost_overrides (Engine.default_costs ~market:"us" ~symbol)
+    !fee_bps !tax_bps !slip_bps None !per_share_fee !per_share_cap in
+  let clock_minutes time =
+    int_of_string (String.sub time 0 2) * 60 + int_of_string (String.sub time 3 2) in
+  let columns = List.map (fun (name, ast, symbol, declarations, bars) ->
+    let bars = Data.filter_dates ~keep:(fun time -> keep_date (session_date time)) bars in
+    let since_open = Array.make (Array.length bars) 0. in
+    let to_close = Array.make (Array.length bars) 0. in
+    let () = Array.iteri (fun index (bar : Data.bar) ->
+      let session = Hashtbl.find calendar (session_date bar.date) in
+      let time = clock_minutes (String.sub bar.date 11 5) in
+      let () = since_open.(index) <- float_of_int (time - clock_minutes session.Data.open_) in
+      to_close.(index) <- float_of_int (clock_minutes session.close - time)) bars in
+    let params = List.filter (fun (name, _) -> List.mem_assoc name declarations) !parameters in
+    let strategy = Dsl.compile_ast ~extra:["since_open", since_open; "to_close", to_close]
+      ast ~params ~assets:[None, bars] in
+    let config : Intraday.config =
+      { fill = !fill; leverage = !leverage; costs = costs symbol; capital = !capital } in
+    name, "us/" ^ symbol,
+    Intraday.run config ~sessions ~bars ~targets:strategy.Engine.targets.(0) ~initial_equity:1.) inputs in
+  let baseline_result = Option.map (fun (symbol, asset) ->
+    let bars = Data.filter_dates ~keep:keep_date asset.Data.money in
+    let profile = Engine.profile_of_market "us" in
+    let margin : Engine.margin =
+      { financing_rate = profile.default_financing_rate /. 100.;
+        maintenance_override = None; ratios = [|profile.default_financing_ratio|];
+        loan_term_months = None } in
+    Engine.run ~dividends:[|asset.Data.dividends|]
+      [|"us/" ^ symbol, bars|] (baseline_strategy (Array.length bars)) [|costs symbol|]
+      ~profile ~margin ~capital:!capital ~fill:!fill) baseline_asset in
+  let stem = Report.stem ~names ~out_name:!out_name in
+  let () = Report.print_intraday ~columns ~baseline:baseline_result ~fill:!fill in
+  let () = Report.write_intraday_outputs ~out_dir:!out_dir ~stem ~columns ~baseline:baseline_result in
+  if not !no_plot then Report.write_png ~out_dir:!out_dir ~stem
+
 let print_decision provisional_close (decision : Live.decision) =
   let () =
     match provisional_close with
@@ -576,6 +726,10 @@ let live_command_args command extra_options argv =
         usage_error (Printf.sprintf "%s: one STRAT file is required" command)
   in
   let ast = Dsl.parse_file strat_path in
+  let () =
+    if List.exists (function Ast.Bars _ -> true | _ -> false) ast then
+      failwith "day trading strategies run under bt daytrade"
+  in
   let market =
     match Dsl.stocks_of ~filename:strat_path ast with
     | [_, market, _] -> market
@@ -702,6 +856,7 @@ let dispatch () =
       fetch_minute (Array.sub Sys.argv 1 (Array.length Sys.argv - 1))
   | "fetch" -> fetch (Array.sub Sys.argv 1 (Array.length Sys.argv - 1))
   | "run" -> run (Array.sub Sys.argv 1 (Array.length Sys.argv - 1))
+  | "daytrade" -> daytrade (Array.sub Sys.argv 1 (Array.length Sys.argv - 1))
   | "target" -> target (Array.sub Sys.argv 1 (Array.length Sys.argv - 1))
   | "live" -> live (Array.sub Sys.argv 1 (Array.length Sys.argv - 1))
   | command -> usage_error (Printf.sprintf "unknown subcommand %S" command)

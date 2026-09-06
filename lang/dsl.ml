@@ -162,7 +162,7 @@ let rec eval context environment expression =
       begin
         match List.assoc_opt key environment with
         | Some value -> value
-        | None when name = "since_open" || name = "to_close" ->
+        | None when key = "since_open" || key = "to_close" ->
             failwith "since_open and to_close are available only under bt daytrade"
         | None ->
             fail_expr expression (Printf.sprintf "unknown identifier %s" key)

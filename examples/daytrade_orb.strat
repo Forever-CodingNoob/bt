@@ -1,0 +1,5 @@
+# First 5-minute range; decide on the following bar, hold until session close.
+stock "us/SPY"
+bars 5m
+let breakout = since_open == 5 and close > lag(high, 1)
+target num(hold(breakout, since_open == 0))

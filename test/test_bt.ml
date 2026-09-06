@@ -4697,22 +4697,93 @@ let test_session_series () =
     | exception Invalid_argument _ -> ())
 
 let test_bars_run_routing () =
-  with_temp_strategy "stock \"us/SPY\"\nbars 5m\ntarget 1\n" (fun path ->
-    let binary = locate ["_build/default/bin/bt.exe"; "../bin/bt.exe"] in
-    let command = String.concat " "
-      [Filename.quote binary; "run"; Filename.quote path; "--no-plot"; "2>&1"]
+  let binary = locate ["_build/default/bin/bt.exe"; "../bin/bt.exe"] in
+  List.iter (fun command ->
+    let stderr_path = Filename.temp_file "bt-test-bars-routing-" ".txt" in
+    Fun.protect ~finally:(fun () -> Sys.remove stderr_path) (fun () ->
+      with_temp_strategy "stock \"us/SPY\"\nbars 5m\ntarget 1\n" (fun path ->
+        let invocation = String.concat " "
+          [Filename.quote binary; command; Filename.quote path;
+           ">/dev/null"; "2>" ^ Filename.quote stderr_path] in
+        (* All daily entry points reject before cache reads or network calls. *)
+        let () = assert (Sys.command invocation = 1) in
+        assert (read_file stderr_path =
+          "day trading strategies run under bt daytrade\n"))))
+    ["run"; "target"; "live"]
+
+let test_daytrade_cli () =
+  let binary = locate ["_build/default/bin/bt.exe"; "../bin/bt.exe"] in
+  with_temp_market "us" (fun root _ ->
+    let stdout_path = Filename.concat root "stdout.txt" in
+    let stderr_path = Filename.concat root "stderr.txt" in
+    let invoke args =
+      Sys.command (String.concat " "
+        (Filename.quote binary :: "daytrade" :: List.map Filename.quote args @
+         [">" ^ Filename.quote stdout_path; "2>" ^ Filename.quote stderr_path]))
     in
-    let channel = Unix.open_process_in command in
-    let rec lines acc =
-      match input_line channel with
-      | line -> lines (line :: acc)
-      | exception End_of_file -> List.rev acc
+    let () =
+      List.iter (fun (source, message) ->
+        with_temp_strategy source (fun path ->
+          (* These are run errors, not unknown-subcommand usage errors. *)
+          let () = assert (invoke [path; "--no-plot"] = 1) in
+          assert (read_file stderr_path = message ^ "\n")))
+        ["stock \"us/SPY\"\ntarget 1\n", "bt daytrade requires a bars declaration";
+         "stock \"tw/0050\"\nbars 5m\ntarget 1\n", "day trading supports us only";
+         "stock \"us/SPY\" as a\nstock \"us/QQQ\" as b\nbars 5m\na.target 1\nb.target 0\n",
+         "day trading strategies declare exactly one stock"]
     in
-    let output = lines [] in
-    let status = Unix.close_process_in channel in
-    (* Routing rejects before reading any price cache or starting the daily engine. *)
-    let () = assert (status <> Unix.WEXITED 0) in
-    assert (output = ["day trading strategies run under bt daytrade"]))
+    let () =
+      List.iter (fun flag ->
+        (* Daily financing and dividend settings have no intraday consumer. *)
+        let () = assert (invoke [flag; "1"] = 2) in
+        assert (contains (read_file stderr_path) ("unknown option '" ^ flag ^ "'")))
+        ["--financing-rate"; "--maintenance-ratio"; "--loan-term-months"; "--dividend-tax"]
+    in
+    let sessions : Data.session list =
+      [{ date = "2024-11-27"; open_ = "09:30"; close = "16:00" };
+       { date = "2024-11-29"; open_ = "09:30"; close = "13:00" };
+       { date = "2024-12-02"; open_ = "09:30"; close = "16:00" }] in
+    let () = Data.write_calendar ~data_dir:root sessions in
+    let () = Data.write_minute_bars ~data_dir:root ~symbol:"SPY"
+      [bar "2024-11-27T09:30" 100. 100.;
+       bar "2024-11-27T15:55" 110. 120.;
+       bar "2024-11-29T09:30" 200. 200.;
+       bar "2024-11-29T12:55" 200. 180.] in
+    with_temp_strategy
+      "stock \"us/SPY\"\nbars 5m\nparam allocation = 1\ntarget allocation * num(since_open == 0 and to_close >= 210)\n"
+      (fun path ->
+        let name = Filename.remove_extension (Filename.basename path) in
+        let args = [path; "--data-dir"; root; "--out-dir"; root;
+          "--out-name"; "equity"; "--no-plot"; "--fee-bps"; "0";
+          "--tax-bps"; "0"; "--slip-bps"; "0"; "-p"; "allocation=1"] in
+        let () = assert (invoke args = 0) in
+        let output = read_file stdout_path in
+        (* Two sessions with data, two round trips, one gain, both forced flat. *)
+        let () = List.iter (fun text -> assert (contains output text))
+          ["sessions 2"; "trades 2"; "win rate 50.00%"; "flat-forced 2"; "fill: open"] in
+        let fills = read_file (Filename.concat root (name ^ ".trades.csv"))
+          |> String.split_on_char '\n' in
+        let () = match fills with
+          | header :: entry :: exit :: _ ->
+              let () = assert (header = "time,stock,price,from_exposure,to_exposure") in
+              (* Decision at 09:30 enters at the next available open 110,
+                 then exits at that bar's close 120, never the decision close 100. *)
+              let () = assert (entry = "2024-11-27T15:55,us/SPY,110,0,1") in
+              assert (exit = "2024-11-27T15:55,us/SPY,120,1,0")
+          | _ -> assert false in
+        let rows = read_file (Filename.concat root "equity.csv")
+          |> String.split_on_char '\n' |> List.filter (( <> ) "") in
+        let () = match rows with
+          | [_; first; second] ->
+              (* 120/110, then a 10% loss: 12/11 and 54/55. No empty Dec 2 row. *)
+              let value row = float_of_string (List.nth (String.split_on_char ',' row) 1) in
+              let () = assert_close (12. /. 11.) (value first) in
+              assert_close (54. /. 55.) (value second)
+          | _ -> assert false in
+        let () = assert (invoke (args @ ["--fill"; "close"]) = 0) in
+        (* Same-close entry is 100, not the default's next-open 110. *)
+        assert (contains (read_file (Filename.concat root (name ^ ".trades.csv")))
+          "2024-11-27T09:30,us/SPY,100,0,1")))
 
 let intraday_sessions : Data.session array =
   [| { date = "2024-11-27"; open_ = "09:30"; close = "16:00" };
@@ -4729,7 +4800,7 @@ let intraday_bars =
      bar "2024-11-29T12:55" 180. 180. |]
 
 let run_intraday ?(fill = Engine.Close_same) ?(leverage = 1.)
-    ?(costs = zero_costs) ?(capital = None) ?(initial_equity = 1.)
+    ?(costs = zero_costs) ?capital ?(initial_equity = 1.)
     ?(sessions = intraday_sessions) ?(bars = intraday_bars) targets =
   Intraday.run { fill; leverage; costs; capital }
     ~sessions ~bars ~targets ~initial_equity
@@ -4829,7 +4900,7 @@ let test_intraday_capital_costs () =
   let bars = Array.map (fun (b : Data.bar) -> { b with o = 100.; c = 100. }) intraday_bars in
   let costs = { zero_costs with Engine.min_fee = 2.;
     per_share_sell_fee = 0.03; per_share_sell_cap = 0.10 } in
-  let result = run_intraday ~bars ~capital:(Some 1050.) ~costs
+  let result = run_intraday ~bars ~capital:1050. ~costs
     [|1.; 1.; 1.; 1.; 0.; 0.; 0.; 0.|] in
   (* Cash 1050 pays $2 entry, buys 10.48 fractional shares. Sell pays
      $2 minimum plus capped $0.10 TAF, leaving $1045.90. *)
@@ -4838,7 +4909,7 @@ let test_intraday_capital_costs () =
   (* Without capital the dollar minimum and TAF are inactive. *)
   let () = assert_float_array [|1.; 1.|] without.equity in
   let uncapped = { costs with Engine.min_fee = 0.; per_share_sell_cap = 0. } in
-  let small = run_intraday ~bars ~capital:(Some 1050.) ~costs:uncapped
+  let small = run_intraday ~bars ~capital:1050. ~costs:uncapped
     [|0.1; 0.1; 0.1; 0.1; 0.; 0.; 0.; 0.|] in
   (* 1.05 shares * .03 = .0315 rounds UP to .04; zero cap is uncapped. *)
   assert_close (1049.96 /. 1050.) small.equity.(0)
@@ -4870,6 +4941,7 @@ let test_intraday_session_boundaries () =
     [Engine.Close_same; Engine.Open_next]
 
 let () =
+  let () = test_daytrade_cli () in
   let () = test_intraday_latency () in
   let () = test_intraday_last_decision () in
   let () = test_intraday_forced_flat () in

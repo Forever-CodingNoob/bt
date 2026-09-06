@@ -267,3 +267,71 @@ let write_png ~out_dir ~stem =
         | Unix.WEXITED _ | Unix.WSIGNALED _ | Unix.WSTOPPED _ ->
             warn_plot stem
       with _ -> warn_plot stem
+
+let intraday_equity (result : Intraday.result) : Engine.result =
+  { equity_curve = Array.to_list (Array.mapi
+      (fun index date -> date, result.equity.(index)) result.session_dates);
+    fills = []; trips = [];
+    margin_stats = { min_maintenance = None; margin_call_dates = [];
+      clamps = 0; refinances = 0 } }
+
+let print_intraday ~columns ~baseline ~fill =
+  let metrics = List.map (fun (name, _, result) ->
+    name, Metrics.of_result (intraday_equity result)) columns in
+  let baseline_metrics = Option.map Metrics.of_result baseline in
+  let names = List.map (fun (name, _, _) -> name) columns @
+    (match baseline with None -> [] | Some _ -> ["baseline"]) in
+  let () = Printf.printf "%-16s" "Metric" in
+  let () = List.iter (fun name -> print_cell (display_name name)) names in
+  let () = print_newline () in
+  let () = print_endline (String.make (16 + (15 * List.length names)) '-') in
+  let rows =
+    [ ("Total return", false,
+       (fun (metrics : Metrics.t) -> Some metrics.total_return), format_percent);
+      ("CAGR", false, (fun (metrics : Metrics.t) -> Some metrics.cagr), format_percent);
+      ("Sharpe", false, (fun (metrics : Metrics.t) -> Some metrics.sharpe), format_number);
+      ("MaxDD", true, (fun (metrics : Metrics.t) -> Some metrics.max_dd), format_percent);
+      ("Calmar", false, (fun (metrics : Metrics.t) -> metrics.calmar), format_number) ] in
+  let () = List.iter (fun (label, lower, get, formatter) ->
+    let format = function None -> "n/a" | Some value -> formatter value in
+    let baseline_value = Option.bind baseline_metrics get in
+    let () = Printf.printf "%-16s" label in
+    let () = List.iter (fun (_, metrics) ->
+      let value = get metrics in
+      let formatted = format value in
+      print_cell (match value, baseline_value with
+        | Some value, Some reference
+          when formatted <> "n/a" && format (Some reference) <> "n/a" ->
+            formatted ^ marker ~lower value reference
+        | _ -> formatted)) metrics in
+    let () = match baseline_metrics with
+      | None -> ()
+      | Some metrics -> print_cell (format (get metrics)) in
+    print_newline ()) rows in
+  let () = List.iter (fun (name, stock, (result : Intraday.result)) ->
+    let win_rate = if result.trades = 0 then "n/a"
+      else format_percent (float_of_int result.wins /. float_of_int result.trades) in
+    Printf.printf "%s: %s - sessions %d, trades %d (win rate %s), flat-forced %d;\n"
+      name stock (Array.length result.session_dates) result.trades win_rate result.flat_forced)
+    columns in
+  let range = match columns with
+    | [] -> "n/a"
+    | (_, _, result) :: _ ->
+        match date_range (intraday_equity result).Engine.equity_curve with
+        | None -> "n/a"
+        | Some (first, last) -> first ^ " to " ^ last in
+  Printf.printf "Date range: %s; fill: %s\n" range
+    (match fill with Engine.Close_same -> "close" | Engine.Open_next -> "open")
+
+let write_intraday_outputs ~out_dir ~stem ~columns ~baseline =
+  let () = Data.mkdir_p out_dir in
+  let () = write_equity ~out_dir ~stem ~baseline
+    ~columns:(List.map (fun (name, _, result) -> name, intraday_equity result) columns) in
+  List.iter (fun (name, stock, (result : Intraday.result)) ->
+    let output = open_out_bin (Filename.concat out_dir (name ^ ".trades.csv")) in
+    Fun.protect ~finally:(fun () -> close_out output) (fun () ->
+      let () = output_string output "time,stock,price,from_exposure,to_exposure\n" in
+      List.iter (fun (fill : Intraday.fill) ->
+        Printf.fprintf output "%s,%s,%.17g,%.17g,%.17g\n"
+          fill.time stock fill.price fill.from_exposure fill.to_exposure)
+        result.fills)) columns

@@ -26,7 +26,7 @@ type result = {
 }
 
 (** Run chronological resampled bars against a chronological calendar.
-    Targets correspond one-to-one to bars. NaN is flat; negatives fail.
+    Targets correspond one-to-one to bars. NaN is flat; negative decisions fail.
     Changed targets use post-cost equity, capped by previous-close buying
     power. Unchanged targets drift without rebalancing or liquidation.
     Last-bar decisions are ignored and positions close at that bar's close.
