@@ -8,4 +8,5 @@
   ../examples/00685L_bh.strat
   ../scripts/plot.py
   fixtures/synthetic.csv
+  (glob_files fixtures/minute/*.csv)
   (glob_files fixtures/alpaca/*.json)))

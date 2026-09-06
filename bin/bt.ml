@@ -619,6 +619,58 @@ let live argv =
   let strat_path, mode, data_dir = live_command_args "live" [] argv in
   Live.run mode ~strat_path ~data_dir
 
+let fetch_minute argv =
+  let symbol = ref None in
+  let resolution = ref "" in
+  let data_dir = ref "data" in
+  let options =
+    ["--bars", Arg.Set_string resolution, "stored resolution (1m)";
+     "--data-dir", Arg.Set_string data_dir, "cache directory"]
+  in
+  let anonymous value =
+    match !symbol with
+    | Some _ -> raise (Arg.Bad "fetch --bars expects one MARKET/SYMBOL")
+    | None ->
+        let market, value = parse_market_symbol "fetch argument" value in
+        match market with
+        | "us" -> symbol := Some value
+        | _ -> raise (Arg.Bad "minute bars support us only")
+  in
+  let () =
+    try Arg.parse_argv argv options anonymous "bt fetch us/SYM --bars 1m [--data-dir DIR]" with
+    | Arg.Bad message -> let () = prerr_string message in exit 2
+    | Arg.Help message -> let () = print_string message in exit 0
+  in
+  let () = if !resolution <> "1m" then usage_error "fetch --bars supports 1m only" in
+  let symbol = match !symbol with
+    | Some value -> value
+    | None -> usage_error "fetch --bars expects one MARKET/SYMBOL"
+  in
+  let cached = Data.read_minute_bars ~data_dir:!data_dir ~symbol ~from_:None ~to_:None in
+  let start =
+    if Array.length cached = 0 then "2016-01-01"
+    else
+      let time = cached.(Array.length cached - 1).Data.date in
+      let offset = Data.et_offset_minutes (String.sub time 0 10) in
+      Printf.sprintf "%s:00-%02d:00" time (-offset / 60)
+  in
+  let now = Unix.time () in
+  let format tm = Printf.sprintf "%04d-%02d-%02d"
+    (tm.Unix.tm_year + 1900) (tm.Unix.tm_mon + 1) tm.Unix.tm_mday in
+  let tm = Unix.gmtime (now -. 960.) in
+  let end_ = Printf.sprintf "%sT%02d:%02d:%02dZ" (format tm)
+    tm.Unix.tm_hour tm.Unix.tm_min tm.Unix.tm_sec in
+  try
+    let calendar = Alpaca.calendar Alpaca.Paper ~start:"2016-01-01"
+      ~end_:(format (Unix.gmtime now)) in
+    let () = Data.write_calendar ~data_dir:!data_dir calendar in
+    let sessions = Data.read_calendar ~data_dir:!data_dir in
+    let bars = Alpaca.bars ~sessions ~symbol ~start ~end_ in
+    Data.write_minute_bars ~data_dir:!data_dir ~symbol bars
+  with Failure message | Sys_error message ->
+    if Array.length cached = 0 then failwith message
+    else Printf.eprintf "warning: %s; keeping cached minute bars for %s\n" message symbol
+
 let dispatch () =
   if Array.length Sys.argv < 2 then begin
     prerr_endline help;
@@ -626,6 +678,8 @@ let dispatch () =
   end;
   match Sys.argv.(1) with
   | "--help" | "-h" | "help" -> print_endline help
+  | "fetch" when Array.exists (( = ) "--bars") Sys.argv ->
+      fetch_minute (Array.sub Sys.argv 1 (Array.length Sys.argv - 1))
   | "fetch" -> fetch (Array.sub Sys.argv 1 (Array.length Sys.argv - 1))
   | "run" -> run (Array.sub Sys.argv 1 (Array.length Sys.argv - 1))
   | "target" -> target (Array.sub Sys.argv 1 (Array.length Sys.argv - 1))

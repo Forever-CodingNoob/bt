@@ -4544,7 +4544,78 @@ let test_target_rejects_invalid_provisional_close () =
         assert (Sys.command command = 2);
         assert (contains (read_file stderr_path) "unknown option")))
 
+let test_minute_data () =
+  (* US DST begins on March's second Sunday and ends on November's first. *)
+  let () =
+    List.iter (fun (date, offset) -> assert (Data.et_offset_minutes date = offset))
+      ["2024-03-09", -300; "2024-03-10", -240;
+       "2024-11-02", -240; "2024-11-03", -300]
+  in
+  let sessions : Data.session array =
+    [| { date = "2024-01-02"; open_ = "09:30"; close = "16:00" };
+       { date = "2024-11-29"; open_ = "09:30"; close = "13:00" } |]
+  in
+  let () = assert (Alpaca.parse_calendar (alpaca_fixture "calendar.json") = Array.to_list sessions) in
+  let parsed, token = Alpaca.parse_bars ~sessions (alpaca_fixture "bars.json") in
+  (* 14:30 UTC - 5h = 09:30 ET. Close is exclusive, holidays absent.
+     The early close retains 12:59, not 13:00. *)
+  let () =
+    assert (parsed =
+      [{ Data.date = "2024-01-02T09:30"; o = 100.; h = 102.; l = 99.; c = 101.; v = 10. };
+       { Data.date = "2024-11-29T12:59"; o = 200.; h = 204.; l = 199.; c = 203.; v = 30. }])
+  in
+  let () = assert (token = None) in
+  let () = assert (Alpaca.parse_bars ~sessions {|{"bars":[],"next_page_token":"next"}|} = ([], Some "next")) in
+  let () = assert_failure (fun () -> ignore (Alpaca.parse_bars ~sessions {|{"bars":[{"t":"bad"}]}|})) in
+  with_temp_market "us" (fun data_dir _ ->
+    let () = Data.write_calendar ~data_dir [sessions.(1); sessions.(0); sessions.(1)] in
+    let () = assert (Data.read_calendar ~data_dir = sessions) in
+    let corrected = { sessions.(1) with Data.close = "12:00" } in
+    let () = Data.write_calendar ~data_dir [corrected] in
+    (* Refresh replaces the matching date but retains the other session. *)
+    let () = assert (Data.read_calendar ~data_dir = [|sessions.(0); corrected|]) in
+    let () = Data.write_calendar ~data_dir [sessions.(1)] in
+    let minute_dir = Filename.concat data_dir "us/SPY/1m" in
+    let () = Data.mkdir_p minute_dir in
+    let fixture =
+      locate ["test/fixtures/minute/spy-2024-01-02.csv";
+              "fixtures/minute/spy-2024-01-02.csv"]
+    in
+    let path = Filename.concat minute_dir "2024.csv" in
+    let output = open_out path in
+    let () = Fun.protect ~finally:(fun () -> close_out output)
+      (fun () -> output_string output (read_file fixture)) in
+    let bars = Data.read_minute_bars ~data_dir ~symbol:"SPY" ~from_:None ~to_:None in
+    let () = assert (Array.length bars = 15) in
+    let () = assert (Data.resample ~minutes:1 ~sessions bars == bars) in
+    let resampled = Data.resample ~minutes:5 ~sessions bars in
+    (* 09:30 bucket: O=100 H=106 L=99 C=105 V=1+2+3+4+5=15.
+       09:35 bucket: O=105 H=111 L=104 C=110 V=6+7+8+9+10=40.
+       09:40 partial: O=110 H=113 L=109 C=112 V=11+12=23.
+       12:55 early-close bucket: O=200 H=204 L=198 C=203 V=10+20+30=60.
+       Even with missing 12:55-56, its left edge stays anchored at 09:30. *)
+    let () = assert (resampled =
+      [| { Data.date = "2024-01-02T09:30"; o = 100.; h = 106.; l = 99.; c = 105.; v = 15. };
+         { Data.date = "2024-01-02T09:35"; o = 105.; h = 111.; l = 104.; c = 110.; v = 40. };
+         { Data.date = "2024-01-02T09:40"; o = 110.; h = 113.; l = 109.; c = 112.; v = 23. };
+         { Data.date = "2024-11-29T12:55"; o = 200.; h = 204.; l = 198.; c = 203.; v = 60. } |]) in
+    let () = assert_failure (fun () -> ignore (Data.resample ~minutes:0 ~sessions bars)) in
+    let older = { bars.(0) with Data.date = "2023-12-29T15:59" } in
+    let corrected = { bars.(0) with Data.c = 101.5 } in
+    let () = Data.write_minute_bars ~data_dir ~symbol:"SPY" [corrected; older; corrected] in
+    let all = Data.read_minute_bars ~data_dir ~symbol:"SPY" ~from_:None ~to_:None in
+    (* One new year and one replacement: 15+1 rows, oldest first. *)
+    let () = assert (Array.length all = 16 && all.(0) = older && all.(1) = corrected) in
+    let () = assert (Data.read_minute_bars ~data_dir ~symbol:"SPY"
+      ~from_:(Some "2024-01-02") ~to_:(Some "2024-01-02") =
+      Array.sub all 1 12) in
+    let () = assert (Data.read_minute_bars ~data_dir ~symbol:"SPY"
+      ~from_:(Some "2024-01-02T09:31") ~to_:(Some "2024-01-02T09:32") =
+      Array.sub all 2 2) in
+    assert (Data.read_minute_bars ~data_dir ~symbol:"EMPTY" ~from_:None ~to_:None = [||]))
+
 let () =
+  let () = test_minute_data () in
   test_alpaca_base_urls ();
   test_alpaca_clock_parse ();
   test_alpaca_account_parse ();

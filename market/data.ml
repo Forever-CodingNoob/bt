@@ -1531,3 +1531,193 @@ let load_asset ~market ~symbol ~from_ ~to_ ~data_dir =
         cache_path market symbol
   in
   { money; signal; dividends }
+
+type session = { date : string; open_ : string; close : string }
+
+let et_offset_minutes date =
+  let year, month, day = parse_date "session" date in
+  (* Gregorian weekday of March 1; January 1 of year 1 was Monday. *)
+  let prior = year - 1 in
+  let march_weekday =
+    (prior * 365 + prior / 4 - prior / 100 + prior / 400 +
+     31 + days_in_month year 2 + 1) mod 7
+  in
+  let march_sunday = 8 + (7 - march_weekday) mod 7 in
+  let november_weekday = (march_weekday + 245) mod 7 in
+  let november_sunday = 1 + (7 - november_weekday) mod 7 in
+  if (month > 3 || (month = 3 && day >= march_sunday)) &&
+     (month < 11 || (month = 11 && day < november_sunday))
+  then -240 else -300
+
+let minute_of_time value =
+  try
+    let hour = int_of_string (String.sub value 0 2) in
+    let minute = int_of_string (String.sub value 3 2) in
+    let () =
+      if String.length value <> 5 || value.[2] <> ':' ||
+         hour < 0 || hour > 23 || minute < 0 || minute > 59 then raise Exit
+    in
+    hour * 60 + minute
+  with Invalid_argument _ | Failure _ | Exit ->
+    failf "invalid session time %S (expected HH:MM)" value
+
+let minute_timestamp value =
+  if String.length value <> 16 || value.[10] <> 'T' then
+    failf "invalid minute timestamp %S" value
+  else
+    let date = String.sub value 0 10 in
+    let () = ignore (parse_date "minute" date) in
+    date, minute_of_time (String.sub value 11 5)
+
+module Time_map = Map.Make (String)
+
+let read_intraday_csv ~header ~parse path =
+  if not (Sys.file_exists path) then []
+  else
+    let input = open_in path in
+    Fun.protect ~finally:(fun () -> close_in input) (fun () ->
+      let actual = try input_line input with End_of_file -> "" in
+      let () = if actual <> header then failf "%s: expected header %s" path header in
+      let rec loop line_number acc =
+        match input_line input with
+        | "" -> loop (line_number + 1) acc
+        | line ->
+            let row = parse path line_number (String.split_on_char ',' line) in
+            loop (line_number + 1) (row :: acc)
+        | exception End_of_file -> List.rev acc
+      in
+      loop 2 [])
+
+let write_intraday_csv ~header ~row path rows =
+  let directory = Filename.dirname path in
+  let () = mkdir_p directory in
+  let temp = Filename.temp_file ~temp_dir:directory ".bt-minute-" ".csv" in
+  Fun.protect ~finally:(fun () -> remove_if_exists temp) (fun () ->
+    let output = open_out temp in
+    let () =
+      Fun.protect ~finally:(fun () -> close_out output) (fun () ->
+        let () = output_string output (header ^ "\n") in
+        Time_map.iter (fun _ value -> output_string output (row value ^ "\n")) rows)
+    in
+    Sys.rename temp path)
+
+let merge_intraday_rows ~key existing incoming =
+  let add rows value = Time_map.add (key value) value rows in
+  List.fold_left add (List.fold_left add Time_map.empty existing) incoming
+
+let calendar_path ~data_dir = Filename.concat data_dir "us/calendar.csv"
+
+let read_calendar ~data_dir =
+  let parse path line_number = function
+    | [date; open_; close] ->
+        let () = ignore (parse_date "session" date) in
+        let opening = minute_of_time open_ in
+        let closing = minute_of_time close in
+        let () = if opening >= closing then failf "%s:%d: invalid session" path line_number in
+        { date; open_; close }
+    | _ -> failf "%s:%d: malformed calendar row" path line_number
+  in
+  read_intraday_csv ~header:"date,open,close" ~parse (calendar_path ~data_dir)
+  |> merge_intraday_rows ~key:(fun (session : session) -> session.date) []
+  |> Time_map.bindings |> List.map snd |> Array.of_list
+
+let write_calendar ~data_dir sessions =
+  let () =
+    List.iter (fun (session : session) ->
+      let () = ignore (parse_date "session" session.date) in
+      if minute_of_time session.open_ >= minute_of_time session.close then
+        failf "invalid session %s" session.date) sessions
+  in
+  let rows = merge_intraday_rows ~key:(fun (session : session) -> session.date)
+    (Array.to_list (read_calendar ~data_dir)) sessions in
+  write_intraday_csv ~header:"date,open,close"
+    ~row:(fun (session : session) -> String.concat "," [session.date; session.open_; session.close])
+    (calendar_path ~data_dir) rows
+
+let minute_directory ~data_dir ~symbol =
+  let () = check_symbol symbol in
+  Filename.concat (symbol_directory ~data_dir ~market:"us" ~symbol) "1m"
+
+let read_minute_file path =
+  let parse path line_number = function
+    | [date; o; h; l; c; v] ->
+        let () = ignore (minute_timestamp date) in
+        { date;
+          o = float_field path line_number "open" o;
+          h = float_field path line_number "high" h;
+          l = float_field path line_number "low" l;
+          c = float_field path line_number "close" c;
+          v = float_field path line_number "volume" v }
+    | _ -> failf "%s:%d: malformed minute row" path line_number
+  in
+  read_intraday_csv ~header:"time,open,high,low,close,volume" ~parse path
+
+let read_minute_bars ~data_dir ~symbol ~from_ ~to_ =
+  let directory = minute_directory ~data_dir ~symbol in
+  let bound end_of_day = Option.map (fun value ->
+    match String.length value with
+    | 10 ->
+        let () = ignore (parse_date "minute range" value) in
+        value ^ if end_of_day then "T23:59" else "T00:00"
+    | _ -> let () = ignore (minute_timestamp value) in value)
+  in
+  let from_ = bound false from_ in
+  let to_ = bound true to_ in
+  let files = if Sys.file_exists directory then Sys.readdir directory else [||] in
+  let rows =
+    Array.fold_left (fun rows name ->
+      if String.length name = 8 && Filename.check_suffix name ".csv" &&
+         String.for_all (function '0' .. '9' -> true | _ -> false) (String.sub name 0 4)
+      then
+        List.fold_left (fun rows (bar : bar) ->
+          if in_range ~from_ ~to_ bar.date then Time_map.add bar.date bar rows else rows)
+          rows (read_minute_file (Filename.concat directory name))
+      else rows) Time_map.empty files
+  in
+  Time_map.bindings rows |> List.map snd |> Array.of_list
+
+let write_minute_bars ~data_dir ~symbol bars =
+  let directory = minute_directory ~data_dir ~symbol in
+  let years =
+    List.fold_left (fun years (bar : bar) ->
+      let () = ignore (minute_timestamp bar.date) in
+      let year = String.sub bar.date 0 4 in
+      let rows = Option.value ~default:[] (Time_map.find_opt year years) in
+      Time_map.add year (bar :: rows) years) Time_map.empty bars
+  in
+  Time_map.iter (fun year reversed ->
+    let path = Filename.concat directory (year ^ ".csv") in
+    let rows = merge_intraday_rows ~key:(fun (bar : bar) -> bar.date)
+      (read_minute_file path) (List.rev reversed) in
+    write_intraday_csv ~header:"time,open,high,low,close,volume"
+      ~row:(fun (bar : bar) -> Printf.sprintf "%s,%.17g,%.17g,%.17g,%.17g,%.17g"
+        bar.date bar.o bar.h bar.l bar.c bar.v) path rows) years
+
+let resample ~minutes ~(sessions : session array) (bars : bar array) =
+  if minutes <= 0 then failwith "bar minutes must be positive"
+  else if minutes = 1 then bars
+  else
+    let calendar = Array.fold_left (fun map (session : session) ->
+      Time_map.add session.date
+        (minute_of_time session.open_, minute_of_time session.close) map)
+      Time_map.empty sessions in
+    let finish current acc = match current with None -> acc | Some bar -> bar :: acc in
+    let rec loop index current acc =
+      if index = Array.length bars then Array.of_list (List.rev (finish current acc))
+      else
+        let bar = bars.(index) in
+        let date, minute = minute_timestamp bar.date in
+        match Time_map.find_opt date calendar with
+        | Some (opening, closing) when minute >= opening && minute < closing ->
+            let start = opening + (minute - opening) / minutes * minutes in
+            let time = Printf.sprintf "%sT%02d:%02d" date (start / 60) (start mod 60) in
+            begin match current with
+            | Some (bucket : bar) when bucket.date = time ->
+                let next = { bucket with h = max bucket.h bar.h; l = min bucket.l bar.l;
+                  c = bar.c; v = bucket.v +. bar.v } in
+                loop (index + 1) (Some next) acc
+            | _ -> loop (index + 1) (Some { bar with date = time }) (finish current acc)
+            end
+        | _ -> loop (index + 1) current acc
+    in
+    loop 0 None []

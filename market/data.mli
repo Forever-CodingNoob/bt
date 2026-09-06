@@ -122,3 +122,26 @@ val transform_json :
   json_path:string ->
   rows_path:string ->
   unit
+
+(** Regular trading session, with ET open and close times (HH:MM). *)
+type session = { date : string; open_ : string; close : string }
+
+(** ET offset from UTC in minutes for a YYYY-MM-DD date, using US DST rules. *)
+val et_offset_minutes : string -> int
+
+(** Read the sorted, date-deduplicated US session calendar; missing is empty. *)
+val read_calendar : data_dir:string -> session array
+
+(** Merge sessions into us/calendar.csv, replacing matching dates atomically. *)
+val write_calendar : data_dir:string -> session list -> unit
+
+(** Read sorted minute bars with inclusive date or minute-timestamp bounds. *)
+val read_minute_bars :
+  data_dir:string -> symbol:string -> from_:string option -> to_:string option -> bar array
+
+(** Merge minute bars into year files, replacing matching timestamps atomically. *)
+val write_minute_bars : data_dir:string -> symbol:string -> bar list -> unit
+
+(** Aggregate regular-session OHLCV at session-open-anchored bucket timestamps.
+    Input bars must be chronological; partial buckets are kept. One minute is identity. *)
+val resample : minutes:int -> sessions:session array -> bar array -> bar array

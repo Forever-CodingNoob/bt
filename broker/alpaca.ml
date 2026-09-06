@@ -282,3 +282,93 @@ let order_by_client_id mode client_order_id =
   | 200 -> Some (parse_order raw)
   | 404 | 422 -> None
   | code -> failf "Alpaca order lookup failed with HTTP %d" code
+
+let parse_calendar raw =
+  let fields = jq_fields "calendar"
+    {|[.[] | if (.date | type) == "string" and
+       (.open | test("^[0-2][0-9]:[0-5][0-9]$")) and
+       (.close | test("^[0-2][0-9]:[0-5][0-9]$")) and
+       .open < .close and .close < "24:00"
+       then .date, .open, .close else error("invalid session") end] | @tsv|} raw in
+  let rec collect fields acc =
+    match fields with
+    | [] | [""] -> List.rev acc
+    | date :: open_ :: close :: rest ->
+        let () = ignore (Data.et_offset_minutes date) in
+        collect rest ({ Data.date; open_; close } :: acc)
+    | _ -> failwith "invalid Alpaca calendar response"
+  in
+  collect fields []
+
+module Session_map = Map.Make (String)
+
+let parse_bars ~sessions raw =
+  let fields = jq_fields "bars"
+    {|[(.next_page_token | if . == null then "" elif type == "string" then . else error("invalid token") end),
+       (.bars[] |
+        (.t | sub("\\.[0-9]+Z$"; "Z") | strptime("%Y-%m-%dT%H:%M:%SZ") | mktime),
+        ([.o,.h,.l,.c,.v][] | if type == "number" then . else error("invalid OHLCV") end))]
+      | .[0] = (.[0] | @json) | map(tostring) | join("\t")|} raw in
+  let calendar = Array.fold_left (fun map (session : Data.session) ->
+    Session_map.add session.date session map) Session_map.empty sessions in
+  let date_of_tm tm = Printf.sprintf "%04d-%02d-%02d"
+    (tm.Unix.tm_year + 1900) (tm.Unix.tm_mon + 1) tm.Unix.tm_mday in
+  let rec collect fields acc =
+    match fields with
+    | [] -> List.rev acc
+    | epoch :: o :: h :: l :: c :: v :: rest ->
+        let epoch = float_field "bar timestamp" epoch in
+        (* Five hours back identifies the ET date even around UTC midnight.
+           DST switches before regular hours, so the date's offset suffices. *)
+        let date = date_of_tm (Unix.gmtime (epoch -. 18000.)) in
+        let tm = Unix.gmtime (epoch +. float_of_int (Data.et_offset_minutes date * 60)) in
+        let date = date_of_tm tm in
+        let time = Printf.sprintf "%02d:%02d" tm.Unix.tm_hour tm.Unix.tm_min in
+        let bar : Data.bar =
+          { date = date ^ "T" ^ time; o = float_field "bar open" o;
+            h = float_field "bar high" h; l = float_field "bar low" l;
+            c = float_field "bar close" c; v = float_field "bar volume" v }
+        in
+        let acc = match Session_map.find_opt date calendar with
+          | Some session when time >= session.open_ && time < session.close -> bar :: acc
+          | _ -> acc
+        in
+        collect rest acc
+    | _ -> failwith "invalid Alpaca bars response"
+  in
+  match fields with
+  | token :: rest ->
+      let token = match jq_fields "page token" "." token with
+        | [""] -> None
+        | [value] -> Some value
+        | _ -> failwith "invalid Alpaca page token"
+      in
+      collect rest [], token
+  | [] -> failwith "invalid Alpaca bars response"
+
+let calendar mode ~start ~end_ =
+  request mode ~path:(Printf.sprintf "/v2/calendar?start=%s&end=%s"
+    (url_encode start) (url_encode end_))
+  |> expect_ok "calendar" parse_calendar
+
+let bars ~sessions ~symbol ~start ~end_ =
+  let path = Printf.sprintf
+    "/v2/stocks/%s/bars?timeframe=1Min&feed=sip&limit=10000&start=%s&end=%s"
+    (url_encode symbol) (url_encode start) (url_encode end_) in
+  let rec pages token acc =
+    let page_path = match token with
+      | None -> path
+      | Some value -> path ^ "&page_token=" ^ url_encode value
+    in
+    let page, next =
+      request ~root:data_url Paper ~path:page_path
+      |> expect_ok "bars" (parse_bars ~sessions)
+    in
+    let acc = List.rev_append page acc in
+    match next with
+    | None -> List.rev acc
+    | Some _ ->
+        let () = Unix.sleepf 0.31 in
+        pages next acc
+  in
+  pages None []

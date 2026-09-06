@@ -77,3 +77,19 @@ val submit_moc :
 
 (** Find an order by its client-supplied identifier. *)
 val order_by_client_id : mode -> string -> order_t option
+
+(** Parse regular-session calendar rows from an Alpaca response. *)
+val parse_calendar : string -> Data.session list
+
+(** Parse one bars page and its next token, converting UTC timestamps to ET and
+    keeping only calendar sessions' inclusive opens and exclusive closes. *)
+val parse_bars :
+  sessions:Data.session array -> string -> Data.bar list * string option
+
+(** Fetch the exchange calendar from the selected trading host. *)
+val calendar : mode -> start:string -> end_:string -> Data.session list
+
+(** Fetch all SIP minute-bar pages, filtering against the supplied calendar. *)
+val bars :
+  sessions:Data.session array ->
+  symbol:string -> start:string -> end_:string -> Data.bar list
