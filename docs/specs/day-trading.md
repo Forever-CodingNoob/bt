@@ -3,6 +3,21 @@
 Date: 2026-09-05
 Status: approved
 
+## Contents
+
+- [Goal](#goal)
+- [Decisions (settled during design)](#decisions-settled-during-design)
+- [Verified Alpaca facts (docs.alpaca.markets, 2026-09-05)](#verified-alpaca-facts-docsalpacamarkets-2026-09-05)
+- [Libraries and modules](#libraries-and-modules)
+- [Data](#data)
+- [Command surface](#command-surface)
+- [Engine semantics](#engine-semantics)
+- [Outputs](#outputs)
+- [Verification](#verification)
+- [Docs](#docs)
+- [Non-goals](#non-goals)
+- [Amendments (execution, 2026-09-05)](#amendments-execution-2026-09-05)
+
 ## Goal
 
 Add US intraday (day trading) backtesting to bt as a new, additive capability: a `bt daytrade` command driven by minute bars from Alpaca, a strategy-file timeframe declaration, and a small session-aware intraday engine. Every existing capability stays intact: `bt run`, `bt fetch` without the new flag, the daily engine, and all daily outputs are byte-identical before and after this work.
@@ -12,10 +27,10 @@ Add US intraday (day trading) backtesting to bt as a new, additive capability: a
 - Strict intraday: every position is forced flat at the session close. No overnight exposure ever, so the daily engine's financing, settlement, dividend, and maintenance machinery has no intraday counterpart.
 - Long-only now, shorts designed-for: the strategy language accepts signed targets; the intraday engine rejects negative targets with `short targets are reserved`. Adding shorts later is an engine task, not a language migration.
 - 1-minute bars are the stored resolution; a strategy declares its timeframe and the runner resamples locally with exact OHLCV arithmetic (first open, max high, min low, last close, summed volume).
-- Leverage is a cap, not a broker model: position value may not exceed `leverage x previous-close equity` (default 1.0). No interest (same-day flat pays none), no day-trade calls, no intraday liquidation. For a strictly flat account Alpaca's day-trading buying power formula `(previous close equity - previous maintenance) x 4` collapses to `4 x previous close equity`, so this cap reproduces the normal case exactly; the $25k eligibility switch, call penalties, and mid-day liquidation are documented gaps.
+- Leverage is a buying-power check at execution, not a broker model: desired position value is capped at `leverage x previous-close equity` (default 1.0), but drifted positions are never trimmed. No interest (same-day flat pays none), no day-trade calls, no intraday liquidation. For a strictly flat account Alpaca's day-trading buying power formula `(previous close equity - previous maintenance) x 4` collapses to `4 x previous close equity`, so this buying-power check reproduces the normal case exactly; the $25k eligibility switch, call penalties, and mid-day liquidation are documented gaps.
 - Fill discipline reuses `--fill`: `open` (default for this command) fills a bar's decision at the next bar's open; `close` fills at the same bar's close. The forced flat at session end always fills at the last bar's close, the backtest twin of the market-on-close order the live daemon places.
 - US only. The data source is Alpaca's historical bars API (SIP feed, since 2016, free on the Basic plan for data older than 15 minutes, 200 requests per minute, 10,000 bars per page with `next_page_token`). Regular hours only, bounded per day by Alpaca's calendar endpoint.
-- Additive architecture (Approach A): a separate intraday engine library. `Engine.run` is never called by the intraday path and never edited.
+- Additive architecture (Approach A): a separate intraday engine library. `Engine.run` is never called by the intraday path; only its cost-helper closures are lifted to exported top-level functions with byte-identical bodies, as amended below.
 
 ## Verified Alpaca facts (docs.alpaca.markets, 2026-09-05)
 
@@ -65,7 +80,7 @@ bt fetch us/SYM --bars 1m [--data-dir DIR]
 
 - Sessions: bars are grouped by session date from the calendar. State is cash, long shares, and the previous session's closing equity.
 - Targets: the DSL evaluates over the whole resampled series exactly as `bt run` receives them. Intraday normalization: NaN becomes 0; a negative target is a run error `short targets are reserved`; values above `leverage` are capped.
-- Sizing mirrors `bt run`: exposure units by default; whole shares with per-share fees when `--capital` is given. The position value may never exceed `leverage x previous-close equity` (first session: initial equity).
+- Sizing mirrors `bt run`: exposure units in both modes, with no whole-share rounding; `--capital` only enables dollar costs and per-share fees computed as daily. The leverage cap is a buying-power check at execution only: desired value = `min(target x post-cost current equity, leverage x previous-close equity)` (first session: initial equity); fills occur only on target change, apart from forced session-close flattening, and drifted positions are never trimmed (no intraday liquidation modeled).
 - Fills: `open` fills bar i's decision at bar i+1's open; `close` fills at bar i's close. A decision on the session's last bar is ignored. At the last bar the position is forced to zero at that bar's close regardless of fill mode.
 - Overnight: cash carries; nothing else does. No interest, dividends, settlement lags, or maintenance code exists in the intraday engine.
 - Costs: `Engine.default_costs "us"` and the existing fee, tax, slippage, and per-share flags apply to every fill including the forced flat.
@@ -101,3 +116,16 @@ bt fetch us/SYM --bars 1m [--data-dir DIR]
 - Day-trade calls, broker liquidation, the $25k eligibility rule.
 - Live intraday trading; the live daemon stays daily.
 - Any change to the daily engine, the daily fetch path, or daily outputs.
+
+## Amendments (execution, 2026-09-05)
+
+Coordinator-approved amendments:
+
+- `Alpaca.bars` takes sessions and makes no calendar call.
+- `Dsl.timeframe : Ast.file -> int option`.
+- `Intraday.config.fill : Engine.fill`.
+- `Engine.charge`/`absolute_sell_cost`/`taf_dollars` lifted from `Engine.run` closures to exported top-level functions (byte-identical bodies).
+- No whole-share rounding - sizing in exposure units in both modes, `--capital` only enables dollar costs and per-share fees computed as daily.
+- Leverage cap is a buying-power check at execution only: desired value = `min(target x post-cost current equity, leverage x previous-close equity)`, fills only on target change, drifted positions never trimmed (no intraday liquidation modeled).
+- Calendar sessions with no bars omitted from output.
+- Additive `Report.print_intraday`/`write_intraday_outputs` with session-date intersection before running.

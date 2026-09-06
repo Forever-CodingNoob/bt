@@ -183,6 +183,7 @@ Operator precedence, from low to high: `or`, `and`, `not`, comparisons,
 - `stock "market/symbol" [as alias]` selects data for the strategy. Use
   market `tw` or `us`. An unaliased file must contain exactly one `stock`
   statement. An aliased file may contain one or more, all with aliases.
+- `bars <n>m` declares a positive integer timeframe in minutes, once per file, for one unaliased US stock under `bt daytrade`.
 - `param name = number` declares a parameter. The CLI flag
   `-p name=value` can override it.
 - `let name = expr` binds an expression result to a name.
@@ -204,8 +205,7 @@ Trips are per stock. Entry and exit prices are the exposure-weighted fill VWAPs,
 ## Values and types
 
 - A value is a scalar, a numeric series, or a boolean series.
-- The predefined series are `open`, `high`, `low`, `close`, and
-  `volume`.
+- The predefined series are `open`, `high`, `low`, `close`, and `volume`; `since_open` and `to_close` are available only under `bt daytrade`.
 - Arithmetic and comparisons accept scalar and series operands in any
   mix. A scalar broadcasts across a series.
 - A comparison gives a boolean series. If an operand is NaN at an

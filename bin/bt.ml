@@ -2,6 +2,7 @@ let usage =
   "usage:\n\
    \  bt fetch [MARKET/SYMBOL] [--market tw|us] [--symbol SYM] [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--data-dir DIR]\n\
    \           positional MARKET/SYMBOL is equivalent to --market and --symbol\n\
+   \  bt fetch us/SYM --bars 1m [--data-dir DIR]\n\
    \  bt run STRAT... [--baseline M/SYM] [--from D] [--to D]\n\
    \         [-p name=value ...] [--fill open|close]\n\
    \         [--fee-bps F] [--tax-bps F] [--slip-bps F] [--min-fee F]\n\
@@ -19,11 +20,11 @@ let usage =
 let help =
   usage ^
   "\n\ncommands:\n\
-   \  fetch  Download market data from FinMind into the local cache.\n\
-   \  run    Run strategies with cached data and compare them with a baseline.\n\
-   \  daytrade Run US strategies on cached regular-session minute bars.\n\
-   \  target Print one live decision without submitting an order.\n\
-   \  live   Run the close-scheduled Alpaca trading daemon.\n\n\
+   \  fetch     Download market data from FinMind into the local cache.\n\
+   \  run       Run strategies with cached data and compare them with a baseline.\n\
+   \  daytrade  Run US strategies on cached regular-session minute bars.\n\
+   \  target    Print one live decision without submitting an order.\n\
+   \  live      Run the close-scheduled Alpaca trading daemon.\n\n\
    Fetch requires FINMIND_TOKEN.\n\
    Full reference: docs/cli.md"
 
