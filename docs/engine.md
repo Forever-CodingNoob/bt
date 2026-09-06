@@ -21,6 +21,10 @@ This document describes how the bt engine simulates trades, computes equity, and
   - [Margin financing](#margin-financing-1)
   - [Dividends](#dividends-1)
   - [Gap between simulation and the real market](#gap-between-simulation-and-the-real-market-1)
+- [Intraday engine](#intraday-engine)
+  - [Sessions and fills](#sessions-and-fills)
+  - [Leverage cap](#leverage-cap)
+  - [Gap between simulation and the real market](#gap-between-simulation-and-the-real-market-2)
 
 ## Core engine
 
@@ -181,3 +185,42 @@ US dividends become cash on their ex-date with no receivable period. When divide
 - CAT fee pass-throughs are not modeled.
 - No short selling or borrow costs are modeled.
 - Pattern-day-trader rules are not modeled.
+
+## Intraday engine
+
+`bt daytrade` uses a separate session engine, not the daily margin engine; the optional baseline remains daily buy-and-hold.
+
+### Sessions and fills
+
+| Rule | Behavior |
+|---|---|
+| Sessions | Calendar regular hours only, including early closes; sessions with no bars are omitted. |
+| Open fills | A decision executes at the next available bar's open within the same session. |
+| Close fills | A decision executes at the same bar's close. |
+| Last bar | Its decision is ignored; any position closes at that bar's close under either fill mode. |
+| Overnight | Cash carries forward, with no positions, financing, dividends, settlement, or maintenance. |
+| Costs | Shared US commission, tax, slippage, and per-share sell costs apply to every fill, including forced liquidation. |
+| Sizing | Fractional exposure units in both modes; capital enables dollar-based costs, not whole-share rounding. |
+| Statistics | One closing equity point per session; trades are flat-to-flat round trips, wins require positive net cash profit after costs, and flat-forced counts liquidated sessions. |
+
+### Leverage cap
+
+NaN decisions become zero and targets above leverage are capped. On execution, desired position value is `min(target * post-cost equity, leverage * previous-close equity)`; the first session uses initial equity as previous close.
+
+> [!IMPORTANT]
+> Buying power is checked only at executions. Unchanged targets drift without rebalancing, cap trimming, or liquidation; a price gain can carry position value above the previous-close cap. This is not a continuous collateral guarantee.
+
+### Gap between simulation and the real market
+
+> [!WARNING]
+> This model omits broker eligibility and enforcement, and minute OHLCV cannot establish executable prices or queue priority.
+
+| Gap | Consequence |
+|---|---|
+| Shorts | Negative decisions fail with `short targets are reserved`; an ignored last-bar decision is not executed. |
+| Broker enforcement | No day-trade calls, penalties, or broker liquidation. |
+| Eligibility | The $25,000 pattern-day-trader switch is not modeled. |
+| Hours | No extended-hours or overnight positions. |
+| Fill realism | No bid/ask spread, depth, queue, or sub-minute path; missing intervals are not fabricated. |
+| Timing sensitivity | Same-close decisions can be optimistic; compare `--fill open` with `--fill close`. Forced flat uses the last available bar's close, which can precede the scheduled close when data is missing. |
+

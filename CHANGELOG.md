@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `bt daytrade` runs single-stock US `bars Nm` strategies with session-aware next-open or same-close fills, forced flat at session end, and execution-only previous-close buying-power caps.
+- Alpaca SIP 1-minute cache and exchange calendar via `bt fetch --bars 1m`, local resampling, and `since_open`/`to_close` strategy series.
+- Session-equity metrics, timestamped intraday fill logs, daily baseline comparison, and the opening-range-breakout example. Capital enables dollar costs without whole-share rounding; empty calendar sessions are omitted.
+
 ### Changed
 
 - Source tree restructured into per-concern dune libraries (`lang/`, `series/`, `market/`, `engine/`, `metrics/`, `report/`, `broker/`) replacing the flat `lib/` and its wrapped `btlib`; module names, the CLI, and all behavior are unchanged.

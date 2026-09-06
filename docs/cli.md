@@ -10,6 +10,11 @@
   - [API tokens](#api-tokens)
   - [Cache files](#cache-files)
   - [Price adjustments](#price-adjustments)
+- [`bt daytrade`](#bt-daytrade)
+  - [Daytrade options](#daytrade-options)
+  - [Data requirements](#data-requirements)
+  - [Intraday output fields](#intraday-output-fields)
+  - [Rejected flags](#rejected-flags)
 - [`bt target`](#bt-target)
   - [Target options](#target-options)
   - [Environment](#environment)
@@ -56,6 +61,7 @@ Downloads price data and stores it in a local CSV cache. Taiwan data comes from 
 | `--from YYYY-MM-DD` | `1994-10-01` | Set the first date to request. |
 | `--to YYYY-MM-DD` | today | Set the last date to request. |
 | `--data-dir DIR` | `data/` | Set the cache directory. |
+| `--bars 1m` | daily | Fetch US regular-session SIP minute bars from Alpaca; other resolutions are rejected. |
 | `-h`, `-help`, `--help` | - | Print the fetch options to standard output and exit with code 0. |
 
 ### API tokens
@@ -82,6 +88,8 @@ The command stops with code 1 if the required token is missing or empty.
 | US | `data/us/SYM/SYM.div.csv` | `date,factor` |
 | US | `data/us/SYM/SYM.cashdiv.csv` | `ex_date,cash_per_share,pay_date` |
 | US | `data/us/SYM/SYM.events.csv` | `date,factor` |
+| US minute | `data/us/SYM/1m/YYYY.csv` | `time,open,high,low,close,volume` |
+| US calendar | `data/us/calendar.csv` | `date,open,close` |
 
 Replace `data/` with the value of `--data-dir` when you set that option.
 
@@ -111,6 +119,66 @@ The engine loads two price series for every asset. The signal series includes ca
 For Taiwan, `<symbol>.div.csv` supplies the full dividend adjustment to the signal series and `<symbol>.cashdiv.csv` separates the cash component for the money series and ledger. `<symbol>.events.csv` supplies exact split, capital-reduction, and par-value-change factors to both price series. Share-count event factors also restate earlier volume to the post-event share basis. Cash-dividend factors do not change volume.
 
 For US assets, `<symbol>.div.csv` supplies the dividend adjustment to the signal series and `<symbol>.cashdiv.csv` separates the cash component for the money series and ledger. `<symbol>.events.csv` supplies exact split factors to both price series and restates earlier volume to the post-split share basis.
+
+## `bt daytrade`
+
+Runs one or more single-stock US strategies on cached regular-session minute bars.
+
+### Daytrade options
+
+| Argument or option | Default | Description |
+|---|---|---|
+| `STRAT...` | required | Each file declares one unaliased US stock and `bars Nm`; basenames must be unique. |
+| `--baseline us/SYM` | none | Daily Tiingo buy-and-hold on the common session dates. |
+| `--fill open\|close` | `open` | Next-bar open or same-bar close decisions; session liquidation always uses the last close. |
+| `--leverage N` | `1.0` | Positive finite previous-close buying-power multiplier. |
+| `--from D`, `--to D` | all cached dates | Inclusive date bounds. |
+| `-p name=value` | strategy defaults | Override a declared parameter. |
+| `--capital USD` | none | Positive starting dollar value for dollar-based costs; sizing remains fractional exposure units. |
+| `--fee-bps F` | `0` | Commission on each side. |
+| `--tax-bps F` | `0.206` | Sell-side SEC fee in basis points. |
+| `--slip-bps F` | `0` | Slippage on each side. |
+| `--per-share-fee F` | `0.000195` | Dollar sell fee per share when capital is supplied. |
+| `--per-share-cap F` | `9.79` | Dollar cap per sell order. |
+| `--data-dir DIR` | `data/` | Minute, calendar, and optional daily baseline cache root. |
+| `--out-dir DIR` | `out/` | Output directory. |
+| `--out-name NAME` | joined strategy names | Equity and plot filename stem; trade logs retain each strategy basename. |
+| `--no-plot` | off | Skip `scripts/plot.py`. |
+| `-h`, `-help`, `--help` | - | Print usage and exit successfully. |
+
+### Data requirements
+
+```sh
+bt fetch us/SPY --bars 1m --data-dir data
+bt fetch us/SPY --data-dir data
+bt daytrade examples/daytrade_orb.strat --baseline us/SPY --data-dir data --from 2026-01-01
+```
+
+Minute fetches require `APCA_API_KEY_ID` and `APCA_API_SECRET_KEY`; daily US fetches require `TIINGO_TOKEN`. Minute fetch refreshes the calendar from 2016 through today, requests SIP history through now minus 16 minutes, paginates in year ranges, and resumes from the last cached minute (2016 for an empty cache). Failed requests retain cached data. Timestamps are ET left edges with DST conversion; only calendar regular hours are retained.
+
+> [!IMPORTANT]
+> Strategies and the optional daily baseline are intersected by session date before evaluation. At least two common dates are required. Calendar sessions with no bars are omitted. Minute bars are not replaced by daily bars.
+
+### Intraday output fields
+
+| Output | Fields |
+|---|---|
+| `<stem>.csv` | Same per-date equity columns as `bt run`, one observation per session close, including optional baseline. |
+| `<strategy>.trades.csv` | `time,stock,price,from_exposure,to_exposure`; execution timestamps identify the bar's left edge, including forced-close fills. |
+| `<stem>.png` | Session-equity plot unless disabled. |
+| Metric table | Total return, CAGR, Sharpe, MaxDD, Calmar, with daily annualization. |
+| Strategy line | `sessions`, flat-to-flat `trades`, net-cost `win rate`, and `flat-forced` session count. |
+
+### Rejected flags
+
+| Flag | Reason |
+|---|---|
+| `--financing-rate` | No overnight financing. |
+| `--maintenance-ratio` | No intraday maintenance model. |
+| `--loan-term-months` | No term loans. |
+| `--dividend-tax` | No overnight dividend holdings. |
+
+These flags are usage errors (exit 2). `bt run`, `bt target`, and `bt live` reject `bars` strategies with `day trading strategies run under bt daytrade`; this command does not place live trades.
 
 ## `bt target`
 

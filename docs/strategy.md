@@ -11,6 +11,9 @@ docs/cli.md for the CLI flags.
   - [Partial orders](#partial-orders)
   - [Legacy entry and exit](#legacy-entry-and-exit)
 - [Multi-stock strategies](#multi-stock-strategies)
+- [Intraday strategies](#intraday-strategies)
+  - [Bars declaration](#bars-declaration)
+  - [Session series](#session-series)
 - [Grammar (BNF)](#grammar-bnf)
 - [Statements](#statements)
 - [Values and types](#values-and-types)
@@ -108,11 +111,41 @@ labels each leg `market/symbol#alias` so that trades.csv rows and the `name:`
 line are attributable per leg. A symbol declared only once keeps the bare
 `market/symbol` label.
 
+## Intraday strategies
+
+Use `bars 5m` beside one unaliased `stock "us/SPY"` declaration and run the file with `bt daytrade`, not a daily or live command.
+
+### Bars declaration
+
+`bars <n>m` accepts any positive integer number of minutes, once per file. Zero, missing `m`, and duplicate declarations fail. The runner resamples cached 1-minute OHLCV into session-open-anchored buckets: first open, highest high, lowest low, last close, and summed volume. Buckets never cross sessions; partial final buckets remain. `bars 1m` uses the cached resolution unchanged.
+
+### Session series
+
+| Series | Meaning |
+|---|---|
+| `since_open` | Minutes from the calendar session open to this bar's left edge. |
+| `to_close` | Minutes from this bar's left edge to the calendar session close, including early closes. |
+
+These series are available only under `bt daytrade`. Indicators otherwise remain continuous across sessions; gate rules with `since_open` to avoid treating previous-session bars as today's opening range.
+
+```text
+stock "us/SPY"
+bars 5m
+let breakout = since_open == 5 and close > lag(high, 1)
+target num(hold(breakout, since_open == 0))
+```
+
+This is `examples/daytrade_orb.strat`: compare the second 5-minute close with the first bar's high, enter at the following open by default, and hold until forced flat at the last session close. Reset the signal at the next session open. Missing bars are not synthesized; this simple example assumes the opening bars exist.
+
+> [!IMPORTANT]
+> Intraday sizing and trade statistics differ from daily margin accounting: see [Intraday engine](./engine.md#intraday-engine). Negative decisions fail, the last-bar decision is ignored, and no position carries overnight.
+
 ## Grammar (BNF)
 
 ```
 file       ::= { statement }
 statement  ::= "stock" string [ "as" ident ]
+             | "bars" positive-integer "m"
              | "param" ident "=" number
              | "let" ident "=" expr
              | [ident "."] "entry" "when" expr [ "size" expr ]
