@@ -5095,3 +5095,44 @@ let () =
   test_cure_shortfall_preserves_liability ();
   test_us_cure_tail_aware ();
   print_endline "ok"
+
+(* Task 2: engine fill-planner extraction. *)
+let test_engine_fill_planner () =
+  let plan ~cash ~cash_value ~margin_value ~loan ~previous target =
+    Engine.plan_fills ~costs:[| zero_costs |] ~capital:(Some 1000000.)
+      ~financing_ratios:[| 0.6 |]
+      ~state:
+        { Engine.equity = 1000000.; cash;
+          cash_values = [| cash_value |];
+          margin_values = [| margin_value |];
+          loans = [| loan |]; interests = [| 0. |];
+          tail_interests = [| 0. |]; debt = 0.; receivables = 0.;
+          previous_targets = [| previous |] }
+      ~prices:[| 10. |] ~targets:[| target |] ~force:false
+  in
+  (* At 1x, TWD 1,000,000 / TWD 10 buys 100,000 cash shares. *)
+  let entry = (plan ~cash:1000000. ~cash_value:0. ~margin_value:0.
+      ~loan:0. ~previous:0. 1.).Engine.planned_assets.(0)
+  in
+  assert_close 100000. (entry.Engine.plan_buy_cash /. 10.);
+  assert_close 0. entry.Engine.plan_buy_margin;
+  (* Scaling 1x cash inventory to 2x refinances TWD 2/3m of that
+     inventory, then buys TWD 1m on margin. The new purchase borrows
+     0.6 * 1m and settles the remaining 0.4 * 1m in cash. *)
+  let scale_in = (plan ~cash:0. ~cash_value:1000000. ~margin_value:0.
+      ~loan:0. ~previous:1. 2.).Engine.planned_assets.(0)
+  in
+  assert_close 100000. (scale_in.Engine.plan_buy_margin /. 10.);
+  assert_close 600000. (0.6 *. scale_in.Engine.plan_buy_margin);
+  assert_close 400000. scale_in.Engine.plan_down_payment;
+  (* The resulting 2x split is TWD 1/3m cash inventory plus TWD 5/3m
+     margin inventory with a TWD 1m loan. Target zero sells both. *)
+  let exit = (plan ~cash:0. ~cash_value:(1000000. /. 3.)
+      ~margin_value:(5000000. /. 3.) ~loan:1000000.
+      ~previous:2. 0.).Engine.planned_assets.(0)
+  in
+  assert_close (500000. /. 3.) (exit.Engine.plan_sell_margin /. 10.);
+  assert_close (100000. /. 3.) (exit.Engine.plan_sell_cash /. 10.);
+  assert_close 1000000. exit.Engine.plan_repayment
+
+let () = test_engine_fill_planner ()

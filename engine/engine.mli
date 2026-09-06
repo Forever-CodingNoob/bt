@@ -55,6 +55,54 @@ type result = {
   margin_stats : margin_stats;
 }
 
+(** One asset's frozen sell, refinancing, and buy legs, in account-value units. *)
+type planned_asset = {
+  plan_changed : bool;
+  plan_final_value : float;
+  plan_trade : float;
+  plan_from_e : float;
+  plan_to_e : float;
+  plan_trade_cost : float;
+  plan_sell_margin : float;
+  plan_sell_cash : float;
+  plan_repayment : float;
+  plan_interest_settled : float;
+  plan_buy_cash : float;
+  plan_buy_margin : float;
+  plan_down_payment : float;
+  plan_refinance_cash : float;
+  plan_refinance_margin : float;
+  plan_refinance_margin_repayment : float;
+  plan_refinance_margin_interest : float;
+  plan_refinance_e : float;
+  plan_refinance_cash_sell_cost : float;
+  plan_refinance_cash_buy_cost : float;
+  plan_refinance_margin_sell_cost : float;
+  plan_refinance_margin_buy_cost : float;
+}
+
+(** Frozen portfolio fill plan before atomic execution. *)
+type fill_plan = {
+  planned_assets : planned_asset array;
+  planned_total_cost : float;
+  planned_refinances : bool;
+  planned_funding_clamp : bool;
+}
+
+(** Explicit account and inventory inputs to the pure fill planner. *)
+type plan_state = {
+  equity : float;
+  cash : float;
+  cash_values : float array;
+  margin_values : float array;
+  loans : float array;
+  interests : float array;
+  tail_interests : float array;
+  debt : float;
+  receivables : float;
+  previous_targets : float array;
+}
+
 (** TW collateral-over-loan or US equity-over-required maintenance. *)
 type maintenance_model =
   | Collateral_over_loan
@@ -90,6 +138,17 @@ val absolute_sell_cost :
 (** Clamp invalid targets and rescale a bar's portfolio to its funding cap. *)
 val effective_targets :
   financing_ratios:float array -> float array -> float array * bool
+
+(** Return the exact pure per-bar fill plan used by [run]. *)
+val plan_fills :
+  costs:costs array ->
+  capital:float option ->
+  financing_ratios:float array ->
+  state:plan_state ->
+  prices:float array ->
+  targets:float array ->
+  force:bool ->
+  fill_plan
 
 (** Run a synchronized multi-asset backtest. [dividends] defaults to
     no events. [dividend_tax] is the fraction withheld at creation. *)

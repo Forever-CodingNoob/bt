@@ -84,6 +84,19 @@ type fill_plan = {
   planned_funding_clamp : bool;
 }
 
+type plan_state = {
+  equity : float;
+  cash : float;
+  cash_values : float array;
+  margin_values : float array;
+  loans : float array;
+  interests : float array;
+  tail_interests : float array;
+  debt : float;
+  receivables : float;
+  previous_targets : float array;
+}
+
 type receivable = {
   receivable_pay_date : string;
   receivable_cash : float;
@@ -222,6 +235,590 @@ let effective_targets ~financing_ratios targets =
       effective
   in
   effective, scale < 1.
+
+let plan_fills ~costs ~capital ~financing_ratios
+    ~(state : plan_state) ~prices ~targets ~force =
+  let asset_count = Array.length state.cash_values in
+  let rec iter_assets_from index f =
+    if index < asset_count then
+      let () = f index in
+      iter_assets_from (index + 1) f
+  in
+  let iter_assets f = iter_assets_from 0 f in
+  let rec fold_assets_from index f accumulator =
+    if index = asset_count then accumulator
+    else fold_assets_from (index + 1) f (f accumulator index)
+  in
+  let fold_assets f initial = fold_assets_from 0 f initial in
+  let sum values = Array.fold_left ( +. ) 0. values in
+  let cash_values = state.cash_values in
+  let margin_values = state.margin_values in
+  let current_loans = state.loans in
+  let current_interests = state.interests in
+  let current_tails = state.tail_interests in
+  let prev_eff = state.previous_targets in
+  let eff = targets in
+  let cash = state.cash in
+  let debt = state.debt in
+  let e0 = state.equity in
+  let unlevered = sum eff <= 1. in
+  let total_value index =
+    cash_values.(index) +. margin_values.(index)
+  in
+  let total_receivables () = state.receivables in
+  let price_at index = prices.(index) in
+  let charge = charge costs capital in
+      let tolerance = 1e-15 *. abs_float e0 in
+      let compute_plan buy_scale e1 =
+        let equity_basis = abs_float e1 in
+        let changed =
+          Array.init asset_count
+            (fun index -> force || eff.(index) <> prev_eff.(index))
+        in
+        let scaled_buys = Array.make asset_count false in
+        let final_values = Array.make asset_count 0. in
+        let trades = Array.make asset_count 0. in
+        let from_es = Array.make asset_count 0. in
+        let to_es = Array.make asset_count 0. in
+        let trade_costs = Array.make asset_count 0. in
+        let sell_margins = Array.make asset_count 0. in
+        let sell_cashes = Array.make asset_count 0. in
+        let repayments = Array.make asset_count 0. in
+        let interest_settled = Array.make asset_count 0. in
+        let interest_tails = Array.make asset_count 0. in
+        let post_cash_values = Array.copy cash_values in
+        let post_margin_values = Array.copy margin_values in
+        let post_loans = Array.copy current_loans in
+        let post_interests = Array.copy current_interests in
+        let post_tails = Array.copy current_tails in
+        let () =
+          iter_assets (fun index ->
+            let current = total_value index in
+            let final_value =
+              if changed.(index) then eff.(index) *. e1 else current
+            in
+            let trade = final_value -. current in
+            let from_e = current /. e0 in
+            let () = final_values.(index) <- final_value in
+            let () = trades.(index) <- trade in
+            let () = from_es.(index) <- from_e in
+            let () =
+              to_es.(index) <-
+                if changed.(index) then eff.(index) else from_e
+            in
+            if changed.(index) && trade < 0. then
+              let amount = -. trade in
+              let sell_margin =
+                Float.min amount margin_values.(index)
+              in
+              let sell_cash = amount -. sell_margin in
+              let fraction =
+                if margin_values.(index) > 0. then
+                  sell_margin /. margin_values.(index)
+                else 0.
+              in
+              let repayment = current_loans.(index) *. fraction in
+              let accrued =
+                current_interests.(index) *. fraction
+              in
+              let tail = current_tails.(index) *. fraction in
+              let settled = accrued +. tail in
+              let () = sell_margins.(index) <- sell_margin in
+              let () = sell_cashes.(index) <- sell_cash in
+              let () = repayments.(index) <- repayment in
+              let () = interest_settled.(index) <- settled in
+              let () = interest_tails.(index) <- tail in
+              let () =
+                post_cash_values.(index) <-
+                  cash_values.(index) -. sell_cash
+              in
+              let () =
+                post_margin_values.(index) <-
+                  margin_values.(index) -. sell_margin
+              in
+              let () =
+                post_loans.(index) <-
+                  current_loans.(index) -. repayment
+              in
+              let () =
+                post_interests.(index) <-
+                  current_interests.(index) -. accrued
+              in
+              post_tails.(index) <- current_tails.(index) -. tail)
+        in
+        let has_requested_buy =
+          Array.exists (fun trade -> trade > 0.) trades
+        in
+        let () =
+          if buy_scale < 1. then
+            iter_assets (fun index ->
+              if changed.(index) && trades.(index) > 0. then
+                let current = total_value index in
+                let () = trades.(index) <- trades.(index) *. buy_scale in
+                let () =
+                  final_values.(index) <- current +. trades.(index)
+                in
+                let () =
+                  to_es.(index) <- final_values.(index) /. equity_basis
+                in
+                scaled_buys.(index) <- true)
+        in
+        let post_assets = sum post_cash_values +. sum post_margin_values in
+        let post_liabilities = sum post_loans +. sum post_interests in
+        let available =
+          e1 -. post_assets +. post_liabilities +. debt
+          -. total_receivables ()
+        in
+        let requested_buy_total =
+          fold_assets
+            (fun total index ->
+              if changed.(index) && trades.(index) > 0. then
+                total +. trades.(index)
+              else total)
+            0.
+        in
+        let () =
+          if unlevered && requested_buy_total > available then
+            let fundable = Float.max 0. available in
+            let scale =
+              if requested_buy_total > 0. then
+                Float.min 1. (fundable /. requested_buy_total)
+              else 1.
+            in
+            let remaining = ref fundable in
+            iter_assets (fun index ->
+              if changed.(index) && trades.(index) > 0. then
+                let current = total_value index in
+                let trade =
+                  Float.min !remaining (trades.(index) *. scale)
+                in
+                let () = trades.(index) <- trade in
+                let () = final_values.(index) <- current +. trade in
+                let () =
+                  to_es.(index) <- final_values.(index) /. equity_basis
+                in
+                let () = remaining := Float.max 0. (!remaining -. trade) in
+                scaled_buys.(index) <- true)
+        in
+        let cash_refinance_capacities = Array.make asset_count 0. in
+        let margin_refinance_rates = Array.make asset_count 0. in
+        let margin_refinance_capacities = Array.make asset_count 0. in
+        let refinance_capacity =
+          fold_assets
+            (fun total index ->
+              let ratio = financing_ratios.(index) in
+              let cash_capacity =
+                Float.max 0. (post_cash_values.(index) *. ratio)
+              in
+              let margin_rate =
+                if post_margin_values.(index) > 0. then
+                  Float.max 0.
+                    (ratio
+                     -. (post_loans.(index) +. post_interests.(index)
+                         +. post_tails.(index))
+                        /. post_margin_values.(index))
+                else 0.
+              in
+              let margin_capacity =
+                post_margin_values.(index) *. margin_rate
+              in
+              let () =
+                cash_refinance_capacities.(index) <- cash_capacity
+              in
+              let () = margin_refinance_rates.(index) <- margin_rate in
+              let () =
+                margin_refinance_capacities.(index) <- margin_capacity
+              in
+              total +. cash_capacity +. margin_capacity)
+            0.
+        in
+        let minimum_for index buy =
+          let ratio = financing_ratios.(index) in
+          if ratio <= 0. then buy else (1. -. ratio) *. buy
+        in
+        let minimum_total () =
+          fold_assets
+            (fun total index ->
+              if changed.(index) && trades.(index) > 0. then
+                total +. minimum_for index trades.(index)
+              else total)
+            0.
+        in
+        let requested_minimum = minimum_total () in
+        let capacity_clamp =
+          requested_minimum > 0.
+          && requested_minimum -. available
+             > refinance_capacity +. tolerance
+        in
+        let funding_clamp =
+          not unlevered
+          && (capacity_clamp || (buy_scale < 1. && has_requested_buy))
+        in
+        let () =
+          if capacity_clamp && requested_minimum > 0. then
+            let fundable =
+              Float.max 0. (available +. refinance_capacity)
+            in
+            let scale = Float.min 1. (fundable /. requested_minimum) in
+            iter_assets (fun index ->
+              if changed.(index) && trades.(index) > 0. then
+                let current = total_value index in
+                let () = trades.(index) <- trades.(index) *. scale in
+                let () =
+                  final_values.(index) <- current +. trades.(index)
+                in
+                let () =
+                  to_es.(index) <- final_values.(index) /. equity_basis
+                in
+                scaled_buys.(index) <- true)
+        in
+        let total_cost =
+          fold_assets
+            (fun total_cost index ->
+              if changed.(index) && trades.(index) <> 0. then
+                let current = total_value index in
+                let delta_e =
+                  if scaled_buys.(index) then
+                    to_es.(index) -. current /. equity_basis
+                  else eff.(index) -. current /. equity_basis
+                in
+                let cost =
+                  charge index ~equity_before:equity_basis ~delta:delta_e
+                    ~price:(price_at index)
+                  *. equity_basis
+                in
+                let () = trade_costs.(index) <- cost in
+                total_cost +. cost
+              else total_cost)
+            (sum interest_tails)
+        in
+        let minimums = Array.make asset_count 0. in
+        let buy_total, minimum_total =
+          fold_assets
+            (fun (buy_total, minimum_total) index ->
+              if changed.(index) && trades.(index) > 0. then
+                let buy = trades.(index) in
+                let minimum = minimum_for index buy in
+                let buy_total = buy_total +. buy in
+                let () = minimums.(index) <- minimum in
+                let minimum_total = minimum_total +. minimum in
+                buy_total, minimum_total
+              else buy_total, minimum_total)
+            (0., 0.)
+        in
+        let shortage =
+          let value = minimum_total -. available in
+          if buy_total > 0. && value > tolerance then value else 0.
+        in
+        let shortage = Float.min shortage refinance_capacity in
+        let allocations = Array.make asset_count 0. in
+        let () =
+          if buy_total > 0. && shortage = 0.
+             && available >= buy_total
+          then
+            iter_assets (fun index ->
+              if changed.(index) && trades.(index) > 0. then
+                allocations.(index) <-
+                  financing_ratios.(index) *. trades.(index))
+        in
+        let () =
+          if buy_total > 0. && shortage = 0.
+             && available < buy_total
+          then
+            let active = Array.make asset_count false in
+            let total_capacity =
+              fold_assets
+                (fun total_capacity index ->
+                  if changed.(index) && trades.(index) > 0. then
+                    let capacity =
+                      Float.max 0.
+                        (financing_ratios.(index) *. trades.(index))
+                    in
+                    let total_capacity = total_capacity +. capacity in
+                    let () = active.(index) <- capacity > tolerance in
+                    total_capacity
+                  else total_capacity)
+                0.
+            in
+            let surplus =
+              Float.min total_capacity
+                (Float.max 0. (available -. minimum_total))
+            in
+            let rec distribute remaining remaining_rounds =
+              if remaining_rounds > 0 && remaining > tolerance then
+                let weight =
+                  fold_assets
+                    (fun weight index ->
+                      if active.(index) then weight +. trades.(index)
+                      else weight)
+                    0.
+                in
+                if weight > 0. then
+                  let capped = Array.make asset_count false in
+                  let any_capped =
+                    fold_assets
+                      (fun any_capped index ->
+                        if active.(index) then
+                          let capacity =
+                            financing_ratios.(index) *. trades.(index)
+                            -. allocations.(index)
+                          in
+                          let proposed =
+                            remaining *. trades.(index) /. weight
+                          in
+                          if proposed >= capacity then
+                            let () = capped.(index) <- true in
+                            true
+                          else any_capped
+                        else any_capped)
+                      false
+                  in
+                  if any_capped then
+                    let remaining =
+                      fold_assets
+                        (fun remaining index ->
+                          if capped.(index) then
+                            let capacity =
+                              financing_ratios.(index) *. trades.(index)
+                              -. allocations.(index)
+                            in
+                            let () =
+                              allocations.(index) <-
+                                allocations.(index) +. capacity
+                            in
+                            let remaining = remaining -. capacity in
+                            let () = active.(index) <- false in
+                            remaining
+                          else remaining)
+                        remaining
+                    in
+                    distribute remaining (remaining_rounds - 1)
+                  else
+                    let () =
+                      iter_assets (fun index ->
+                        if active.(index) then
+                          allocations.(index) <-
+                            allocations.(index)
+                            +. remaining *. trades.(index) /. weight)
+                    in
+                    distribute 0. (remaining_rounds - 1)
+                else distribute remaining (remaining_rounds - 1)
+            in
+            distribute surplus asset_count
+        in
+        let buy_cashes = Array.make asset_count 0. in
+        let buy_margins = Array.make asset_count 0. in
+        let down_payments = Array.make asset_count 0. in
+        let () =
+          iter_assets (fun index ->
+            if changed.(index) && trades.(index) > 0. then
+              let buy = trades.(index) in
+              let ratio = financing_ratios.(index) in
+              let cash_buy =
+                if unlevered then buy
+                else if ratio <= 0. then buy
+                else Float.min buy (allocations.(index) /. ratio)
+              in
+              let () = buy_cashes.(index) <- cash_buy in
+              let () =
+                buy_margins.(index) <-
+                  if unlevered then 0. else buy -. cash_buy
+              in
+              down_payments.(index) <-
+                if unlevered then buy
+                else minimums.(index) +. allocations.(index))
+        in
+        let cash_refinance_values = Array.make asset_count 0. in
+        let margin_refinance_values = Array.make asset_count 0. in
+        let margin_refinance_repayments = Array.make asset_count 0. in
+        let margin_refinance_interests = Array.make asset_count 0. in
+        let refinance_es = Array.make asset_count 0. in
+        let cash_refinance_sell_costs = Array.make asset_count 0. in
+        let cash_refinance_buy_costs = Array.make asset_count 0. in
+        let margin_refinance_sell_costs = Array.make asset_count 0. in
+        let margin_refinance_buy_costs = Array.make asset_count 0. in
+        let total_cost =
+          if shortage > 0. && refinance_capacity > 0. then
+            fold_assets
+              (fun total_cost index ->
+                let ratio = financing_ratios.(index) in
+                let refinance_e =
+                  (post_cash_values.(index) +. post_margin_values.(index))
+                  /. equity_basis
+                in
+                let cash_capacity = cash_refinance_capacities.(index) in
+                let total_cost =
+                  if cash_capacity > 0. then
+                    let allocated =
+                      shortage *. cash_capacity /. refinance_capacity
+                    in
+                    let value =
+                      Float.min post_cash_values.(index) (allocated /. ratio)
+                    in
+                    let sell_cost =
+                      charge index ~equity_before:equity_basis
+                        ~delta:(-. value /. equity_basis)
+                        ~price:(price_at index)
+                      *. equity_basis
+                    in
+                    let buy_cost =
+                      charge index ~equity_before:equity_basis
+                        ~delta:(value /. equity_basis)
+                        ~price:(price_at index)
+                      *. equity_basis
+                    in
+                    let () = cash_refinance_values.(index) <- value in
+                    let () =
+                      cash_refinance_sell_costs.(index) <- sell_cost
+                    in
+                    let () =
+                      cash_refinance_buy_costs.(index) <- buy_cost
+                    in
+                    let () = refinance_es.(index) <- refinance_e in
+                    total_cost +. sell_cost +. buy_cost
+                  else total_cost
+                in
+                let margin_capacity =
+                  margin_refinance_capacities.(index)
+                in
+                if margin_capacity > 0. then
+                  let allocated =
+                    shortage *. margin_capacity /. refinance_capacity
+                  in
+                  let value =
+                    Float.min post_margin_values.(index)
+                      (allocated /. margin_refinance_rates.(index))
+                  in
+                  let fraction = value /. post_margin_values.(index) in
+                  let repayment = post_loans.(index) *. fraction in
+                  let accrued = post_interests.(index) *. fraction in
+                  let tail = post_tails.(index) *. fraction in
+                  let settled = accrued +. tail in
+                  let sell_cost =
+                    charge index ~equity_before:equity_basis
+                      ~delta:(-. value /. equity_basis)
+                      ~price:(price_at index)
+                    *. equity_basis
+                  in
+                  let buy_cost =
+                    charge index ~equity_before:equity_basis
+                      ~delta:(value /. equity_basis)
+                      ~price:(price_at index)
+                    *. equity_basis
+                  in
+                  let () = margin_refinance_values.(index) <- value in
+                  let () =
+                    margin_refinance_repayments.(index) <- repayment
+                  in
+                  let () = margin_refinance_interests.(index) <- settled in
+                  let () =
+                    margin_refinance_sell_costs.(index) <- sell_cost
+                  in
+                  let () =
+                    margin_refinance_buy_costs.(index) <- buy_cost
+                  in
+                  let () = refinance_es.(index) <- refinance_e in
+                  total_cost +. sell_cost +. buy_cost +. tail
+                else total_cost)
+              total_cost
+          else total_cost
+        in
+        { planned_assets =
+            Array.init asset_count
+              (fun index ->
+                { plan_changed = changed.(index);
+                  plan_final_value = final_values.(index);
+                  plan_trade = trades.(index);
+                  plan_from_e = from_es.(index);
+                  plan_to_e = to_es.(index);
+                  plan_trade_cost = trade_costs.(index);
+                  plan_sell_margin = sell_margins.(index);
+                  plan_sell_cash = sell_cashes.(index);
+                  plan_repayment = repayments.(index);
+                  plan_interest_settled = interest_settled.(index);
+                  plan_buy_cash = buy_cashes.(index);
+                  plan_buy_margin = buy_margins.(index);
+                  plan_down_payment = down_payments.(index);
+                  plan_refinance_cash =
+                    cash_refinance_values.(index);
+                  plan_refinance_margin =
+                    margin_refinance_values.(index);
+                  plan_refinance_margin_repayment =
+                    margin_refinance_repayments.(index);
+                  plan_refinance_margin_interest =
+                    margin_refinance_interests.(index);
+                  plan_refinance_e = refinance_es.(index);
+                  plan_refinance_cash_sell_cost =
+                    cash_refinance_sell_costs.(index);
+                  plan_refinance_cash_buy_cost =
+                    cash_refinance_buy_costs.(index);
+                  plan_refinance_margin_sell_cost =
+                    margin_refinance_sell_costs.(index);
+                  plan_refinance_margin_buy_cost =
+                    margin_refinance_buy_costs.(index) });
+          planned_total_cost = total_cost;
+          planned_refinances = shortage > 0.;
+          planned_funding_clamp = funding_clamp }
+      in
+      let projected_cash plan =
+        let projected =
+          Array.fold_left
+            (fun projected item ->
+              if item.plan_changed && item.plan_trade < 0. then
+                projected -. item.plan_trade -. item.plan_repayment
+                -. item.plan_interest_settled -. item.plan_trade_cost
+              else projected)
+            cash plan.planned_assets
+        in
+        let projected = Float.max 0. projected in
+        fold_assets
+          (fun projected index ->
+            let item = plan.planned_assets.(index) in
+            let projected =
+              projected
+              +. financing_ratios.(index) *. item.plan_refinance_cash
+              -. item.plan_refinance_cash_sell_cost
+              -. item.plan_refinance_cash_buy_cost
+              +. financing_ratios.(index) *. item.plan_refinance_margin
+              -. item.plan_refinance_margin_repayment
+              -. item.plan_refinance_margin_interest
+              -. item.plan_refinance_margin_sell_cost
+              -. item.plan_refinance_margin_buy_cost
+            in
+            if item.plan_changed && item.plan_trade > 0. then
+              projected -. item.plan_down_payment -. item.plan_trade_cost
+            else projected)
+          projected
+      in
+      let solve buy_scale =
+        let rec iterate remaining e1 =
+          if remaining = 0 then e1
+          else
+            let previous = e1 in
+            let plan = compute_plan buy_scale previous in
+            let next = e0 -. plan.planned_total_cost in
+            if next <= 0. then e1
+            else if abs_float (next -. previous) <= tolerance then next
+            else iterate (remaining - 1) next
+        in
+        compute_plan buy_scale (iterate 20 e0)
+      in
+      let requested_plan = solve 1. in
+      let plan =
+        if projected_cash requested_plan >= -. tolerance then requested_plan
+        else
+          let rec search remaining low high best =
+            if remaining = 0 then best
+            else
+              let scale = (low +. high) /. 2. in
+              let candidate = solve scale in
+              if projected_cash candidate >= -. tolerance then
+                search (remaining - 1) scale high candidate
+              else search (remaining - 1) low scale best
+          in
+          search 60 0. 1. (solve 0.)
+      in
+  plan
 
 let day_number date =
   let year = int_of_string (String.sub date 0 4) in
@@ -546,6 +1143,9 @@ let run ?dividends ?(dividend_tax = 0.)
     !landed
   in
   let charge = charge costs capital in
+  let plan_fills =
+    plan_fills ~costs ~capital ~financing_ratios:margin.ratios
+  in
   let absolute_sell_cost = absolute_sell_cost costs capital in
   let record_fill index ~date ~price ~from_e ~to_e =
     fills :=
@@ -927,564 +1527,21 @@ let run ?dividends ?(dividend_tax = 0.)
   let apply_fills ~bar_index ~date ~eff ~clamped ~force price_at =
     let e0 = equity () in
     let current_loans = Array.init asset_count loan_at in
-    let unlevered = sum eff <= 1. in
     let current_interests = Array.init asset_count interest_at in
     let current_tails =
       Array.init asset_count
         (fun index -> tail_interest_at index bar_index)
     in
+    let state : plan_state =
+      { equity = e0; cash = !cash; cash_values; margin_values;
+        loans = current_loans; interests = current_interests;
+        tail_interests = current_tails; debt = !debt;
+        receivables = total_receivables (); previous_targets = prev_eff }
+    in
+    let prices = Array.init asset_count price_at in
     let () =
       if e0 > 0. then
-      let tolerance = 1e-15 *. abs_float e0 in
-      let compute_plan buy_scale e1 =
-        let equity_basis = abs_float e1 in
-        let changed =
-          Array.init asset_count
-            (fun index -> force || eff.(index) <> prev_eff.(index))
-        in
-        let scaled_buys = Array.make asset_count false in
-        let final_values = Array.make asset_count 0. in
-        let trades = Array.make asset_count 0. in
-        let from_es = Array.make asset_count 0. in
-        let to_es = Array.make asset_count 0. in
-        let trade_costs = Array.make asset_count 0. in
-        let sell_margins = Array.make asset_count 0. in
-        let sell_cashes = Array.make asset_count 0. in
-        let repayments = Array.make asset_count 0. in
-        let interest_settled = Array.make asset_count 0. in
-        let interest_tails = Array.make asset_count 0. in
-        let post_cash_values = Array.copy cash_values in
-        let post_margin_values = Array.copy margin_values in
-        let post_loans = Array.copy current_loans in
-        let post_interests = Array.copy current_interests in
-        let post_tails = Array.copy current_tails in
-        let () =
-          iter_assets (fun index ->
-            let current = total_value index in
-            let final_value =
-              if changed.(index) then eff.(index) *. e1 else current
-            in
-            let trade = final_value -. current in
-            let from_e = current /. e0 in
-            let () = final_values.(index) <- final_value in
-            let () = trades.(index) <- trade in
-            let () = from_es.(index) <- from_e in
-            let () =
-              to_es.(index) <-
-                if changed.(index) then eff.(index) else from_e
-            in
-            if changed.(index) && trade < 0. then
-              let amount = -. trade in
-              let sell_margin =
-                Float.min amount margin_values.(index)
-              in
-              let sell_cash = amount -. sell_margin in
-              let fraction =
-                if margin_values.(index) > 0. then
-                  sell_margin /. margin_values.(index)
-                else 0.
-              in
-              let repayment = current_loans.(index) *. fraction in
-              let accrued =
-                current_interests.(index) *. fraction
-              in
-              let tail = current_tails.(index) *. fraction in
-              let settled = accrued +. tail in
-              let () = sell_margins.(index) <- sell_margin in
-              let () = sell_cashes.(index) <- sell_cash in
-              let () = repayments.(index) <- repayment in
-              let () = interest_settled.(index) <- settled in
-              let () = interest_tails.(index) <- tail in
-              let () =
-                post_cash_values.(index) <-
-                  cash_values.(index) -. sell_cash
-              in
-              let () =
-                post_margin_values.(index) <-
-                  margin_values.(index) -. sell_margin
-              in
-              let () =
-                post_loans.(index) <-
-                  current_loans.(index) -. repayment
-              in
-              let () =
-                post_interests.(index) <-
-                  current_interests.(index) -. accrued
-              in
-              post_tails.(index) <- current_tails.(index) -. tail)
-        in
-        let has_requested_buy =
-          Array.exists (fun trade -> trade > 0.) trades
-        in
-        let () =
-          if buy_scale < 1. then
-            iter_assets (fun index ->
-              if changed.(index) && trades.(index) > 0. then
-                let current = total_value index in
-                let () = trades.(index) <- trades.(index) *. buy_scale in
-                let () =
-                  final_values.(index) <- current +. trades.(index)
-                in
-                let () =
-                  to_es.(index) <- final_values.(index) /. equity_basis
-                in
-                scaled_buys.(index) <- true)
-        in
-        let post_assets = sum post_cash_values +. sum post_margin_values in
-        let post_liabilities = sum post_loans +. sum post_interests in
-        let available =
-          e1 -. post_assets +. post_liabilities +. !debt
-          -. total_receivables ()
-        in
-        let requested_buy_total =
-          fold_assets
-            (fun total index ->
-              if changed.(index) && trades.(index) > 0. then
-                total +. trades.(index)
-              else total)
-            0.
-        in
-        let () =
-          if unlevered && requested_buy_total > available then
-            let fundable = Float.max 0. available in
-            let scale =
-              if requested_buy_total > 0. then
-                Float.min 1. (fundable /. requested_buy_total)
-              else 1.
-            in
-            let remaining = ref fundable in
-            iter_assets (fun index ->
-              if changed.(index) && trades.(index) > 0. then
-                let current = total_value index in
-                let trade =
-                  Float.min !remaining (trades.(index) *. scale)
-                in
-                let () = trades.(index) <- trade in
-                let () = final_values.(index) <- current +. trade in
-                let () =
-                  to_es.(index) <- final_values.(index) /. equity_basis
-                in
-                let () = remaining := Float.max 0. (!remaining -. trade) in
-                scaled_buys.(index) <- true)
-        in
-        let cash_refinance_capacities = Array.make asset_count 0. in
-        let margin_refinance_rates = Array.make asset_count 0. in
-        let margin_refinance_capacities = Array.make asset_count 0. in
-        let refinance_capacity =
-          fold_assets
-            (fun total index ->
-              let ratio = margin.ratios.(index) in
-              let cash_capacity =
-                Float.max 0. (post_cash_values.(index) *. ratio)
-              in
-              let margin_rate =
-                if post_margin_values.(index) > 0. then
-                  Float.max 0.
-                    (ratio
-                     -. (post_loans.(index) +. post_interests.(index)
-                         +. post_tails.(index))
-                        /. post_margin_values.(index))
-                else 0.
-              in
-              let margin_capacity =
-                post_margin_values.(index) *. margin_rate
-              in
-              let () =
-                cash_refinance_capacities.(index) <- cash_capacity
-              in
-              let () = margin_refinance_rates.(index) <- margin_rate in
-              let () =
-                margin_refinance_capacities.(index) <- margin_capacity
-              in
-              total +. cash_capacity +. margin_capacity)
-            0.
-        in
-        let minimum_for index buy =
-          let ratio = margin.ratios.(index) in
-          if ratio <= 0. then buy else (1. -. ratio) *. buy
-        in
-        let minimum_total () =
-          fold_assets
-            (fun total index ->
-              if changed.(index) && trades.(index) > 0. then
-                total +. minimum_for index trades.(index)
-              else total)
-            0.
-        in
-        let requested_minimum = minimum_total () in
-        let capacity_clamp =
-          requested_minimum > 0.
-          && requested_minimum -. available
-             > refinance_capacity +. tolerance
-        in
-        let funding_clamp =
-          not unlevered
-          && (capacity_clamp || (buy_scale < 1. && has_requested_buy))
-        in
-        let () =
-          if capacity_clamp && requested_minimum > 0. then
-            let fundable =
-              Float.max 0. (available +. refinance_capacity)
-            in
-            let scale = Float.min 1. (fundable /. requested_minimum) in
-            iter_assets (fun index ->
-              if changed.(index) && trades.(index) > 0. then
-                let current = total_value index in
-                let () = trades.(index) <- trades.(index) *. scale in
-                let () =
-                  final_values.(index) <- current +. trades.(index)
-                in
-                let () =
-                  to_es.(index) <- final_values.(index) /. equity_basis
-                in
-                scaled_buys.(index) <- true)
-        in
-        let total_cost =
-          fold_assets
-            (fun total_cost index ->
-              if changed.(index) && trades.(index) <> 0. then
-                let current = total_value index in
-                let delta_e =
-                  if scaled_buys.(index) then
-                    to_es.(index) -. current /. equity_basis
-                  else eff.(index) -. current /. equity_basis
-                in
-                let cost =
-                  charge index ~equity_before:equity_basis ~delta:delta_e
-                    ~price:(price_at index)
-                  *. equity_basis
-                in
-                let () = trade_costs.(index) <- cost in
-                total_cost +. cost
-              else total_cost)
-            (sum interest_tails)
-        in
-        let minimums = Array.make asset_count 0. in
-        let buy_total, minimum_total =
-          fold_assets
-            (fun (buy_total, minimum_total) index ->
-              if changed.(index) && trades.(index) > 0. then
-                let buy = trades.(index) in
-                let minimum = minimum_for index buy in
-                let buy_total = buy_total +. buy in
-                let () = minimums.(index) <- minimum in
-                let minimum_total = minimum_total +. minimum in
-                buy_total, minimum_total
-              else buy_total, minimum_total)
-            (0., 0.)
-        in
-        let shortage =
-          let value = minimum_total -. available in
-          if buy_total > 0. && value > tolerance then value else 0.
-        in
-        let shortage = Float.min shortage refinance_capacity in
-        let allocations = Array.make asset_count 0. in
-        let () =
-          if buy_total > 0. && shortage = 0.
-             && available >= buy_total
-          then
-            iter_assets (fun index ->
-              if changed.(index) && trades.(index) > 0. then
-                allocations.(index) <-
-                  margin.ratios.(index) *. trades.(index))
-        in
-        let () =
-          if buy_total > 0. && shortage = 0.
-             && available < buy_total
-          then
-            let active = Array.make asset_count false in
-            let total_capacity =
-              fold_assets
-                (fun total_capacity index ->
-                  if changed.(index) && trades.(index) > 0. then
-                    let capacity =
-                      Float.max 0.
-                        (margin.ratios.(index) *. trades.(index))
-                    in
-                    let total_capacity = total_capacity +. capacity in
-                    let () = active.(index) <- capacity > tolerance in
-                    total_capacity
-                  else total_capacity)
-                0.
-            in
-            let surplus =
-              Float.min total_capacity
-                (Float.max 0. (available -. minimum_total))
-            in
-            let rec distribute remaining remaining_rounds =
-              if remaining_rounds > 0 && remaining > tolerance then
-                let weight =
-                  fold_assets
-                    (fun weight index ->
-                      if active.(index) then weight +. trades.(index)
-                      else weight)
-                    0.
-                in
-                if weight > 0. then
-                  let capped = Array.make asset_count false in
-                  let any_capped =
-                    fold_assets
-                      (fun any_capped index ->
-                        if active.(index) then
-                          let capacity =
-                            margin.ratios.(index) *. trades.(index)
-                            -. allocations.(index)
-                          in
-                          let proposed =
-                            remaining *. trades.(index) /. weight
-                          in
-                          if proposed >= capacity then
-                            let () = capped.(index) <- true in
-                            true
-                          else any_capped
-                        else any_capped)
-                      false
-                  in
-                  if any_capped then
-                    let remaining =
-                      fold_assets
-                        (fun remaining index ->
-                          if capped.(index) then
-                            let capacity =
-                              margin.ratios.(index) *. trades.(index)
-                              -. allocations.(index)
-                            in
-                            let () =
-                              allocations.(index) <-
-                                allocations.(index) +. capacity
-                            in
-                            let remaining = remaining -. capacity in
-                            let () = active.(index) <- false in
-                            remaining
-                          else remaining)
-                        remaining
-                    in
-                    distribute remaining (remaining_rounds - 1)
-                  else
-                    let () =
-                      iter_assets (fun index ->
-                        if active.(index) then
-                          allocations.(index) <-
-                            allocations.(index)
-                            +. remaining *. trades.(index) /. weight)
-                    in
-                    distribute 0. (remaining_rounds - 1)
-                else distribute remaining (remaining_rounds - 1)
-            in
-            distribute surplus asset_count
-        in
-        let buy_cashes = Array.make asset_count 0. in
-        let buy_margins = Array.make asset_count 0. in
-        let down_payments = Array.make asset_count 0. in
-        let () =
-          iter_assets (fun index ->
-            if changed.(index) && trades.(index) > 0. then
-              let buy = trades.(index) in
-              let ratio = margin.ratios.(index) in
-              let cash_buy =
-                if unlevered then buy
-                else if ratio <= 0. then buy
-                else Float.min buy (allocations.(index) /. ratio)
-              in
-              let () = buy_cashes.(index) <- cash_buy in
-              let () =
-                buy_margins.(index) <-
-                  if unlevered then 0. else buy -. cash_buy
-              in
-              down_payments.(index) <-
-                if unlevered then buy
-                else minimums.(index) +. allocations.(index))
-        in
-        let cash_refinance_values = Array.make asset_count 0. in
-        let margin_refinance_values = Array.make asset_count 0. in
-        let margin_refinance_repayments = Array.make asset_count 0. in
-        let margin_refinance_interests = Array.make asset_count 0. in
-        let refinance_es = Array.make asset_count 0. in
-        let cash_refinance_sell_costs = Array.make asset_count 0. in
-        let cash_refinance_buy_costs = Array.make asset_count 0. in
-        let margin_refinance_sell_costs = Array.make asset_count 0. in
-        let margin_refinance_buy_costs = Array.make asset_count 0. in
-        let total_cost =
-          if shortage > 0. && refinance_capacity > 0. then
-            fold_assets
-              (fun total_cost index ->
-                let ratio = margin.ratios.(index) in
-                let refinance_e =
-                  (post_cash_values.(index) +. post_margin_values.(index))
-                  /. equity_basis
-                in
-                let cash_capacity = cash_refinance_capacities.(index) in
-                let total_cost =
-                  if cash_capacity > 0. then
-                    let allocated =
-                      shortage *. cash_capacity /. refinance_capacity
-                    in
-                    let value =
-                      Float.min post_cash_values.(index) (allocated /. ratio)
-                    in
-                    let sell_cost =
-                      charge index ~equity_before:equity_basis
-                        ~delta:(-. value /. equity_basis)
-                        ~price:(price_at index)
-                      *. equity_basis
-                    in
-                    let buy_cost =
-                      charge index ~equity_before:equity_basis
-                        ~delta:(value /. equity_basis)
-                        ~price:(price_at index)
-                      *. equity_basis
-                    in
-                    let () = cash_refinance_values.(index) <- value in
-                    let () =
-                      cash_refinance_sell_costs.(index) <- sell_cost
-                    in
-                    let () =
-                      cash_refinance_buy_costs.(index) <- buy_cost
-                    in
-                    let () = refinance_es.(index) <- refinance_e in
-                    total_cost +. sell_cost +. buy_cost
-                  else total_cost
-                in
-                let margin_capacity =
-                  margin_refinance_capacities.(index)
-                in
-                if margin_capacity > 0. then
-                  let allocated =
-                    shortage *. margin_capacity /. refinance_capacity
-                  in
-                  let value =
-                    Float.min post_margin_values.(index)
-                      (allocated /. margin_refinance_rates.(index))
-                  in
-                  let fraction = value /. post_margin_values.(index) in
-                  let repayment = post_loans.(index) *. fraction in
-                  let accrued = post_interests.(index) *. fraction in
-                  let tail = post_tails.(index) *. fraction in
-                  let settled = accrued +. tail in
-                  let sell_cost =
-                    charge index ~equity_before:equity_basis
-                      ~delta:(-. value /. equity_basis)
-                      ~price:(price_at index)
-                    *. equity_basis
-                  in
-                  let buy_cost =
-                    charge index ~equity_before:equity_basis
-                      ~delta:(value /. equity_basis)
-                      ~price:(price_at index)
-                    *. equity_basis
-                  in
-                  let () = margin_refinance_values.(index) <- value in
-                  let () =
-                    margin_refinance_repayments.(index) <- repayment
-                  in
-                  let () = margin_refinance_interests.(index) <- settled in
-                  let () =
-                    margin_refinance_sell_costs.(index) <- sell_cost
-                  in
-                  let () =
-                    margin_refinance_buy_costs.(index) <- buy_cost
-                  in
-                  let () = refinance_es.(index) <- refinance_e in
-                  total_cost +. sell_cost +. buy_cost +. tail
-                else total_cost)
-              total_cost
-          else total_cost
-        in
-        { planned_assets =
-            Array.init asset_count
-              (fun index ->
-                { plan_changed = changed.(index);
-                  plan_final_value = final_values.(index);
-                  plan_trade = trades.(index);
-                  plan_from_e = from_es.(index);
-                  plan_to_e = to_es.(index);
-                  plan_trade_cost = trade_costs.(index);
-                  plan_sell_margin = sell_margins.(index);
-                  plan_sell_cash = sell_cashes.(index);
-                  plan_repayment = repayments.(index);
-                  plan_interest_settled = interest_settled.(index);
-                  plan_buy_cash = buy_cashes.(index);
-                  plan_buy_margin = buy_margins.(index);
-                  plan_down_payment = down_payments.(index);
-                  plan_refinance_cash =
-                    cash_refinance_values.(index);
-                  plan_refinance_margin =
-                    margin_refinance_values.(index);
-                  plan_refinance_margin_repayment =
-                    margin_refinance_repayments.(index);
-                  plan_refinance_margin_interest =
-                    margin_refinance_interests.(index);
-                  plan_refinance_e = refinance_es.(index);
-                  plan_refinance_cash_sell_cost =
-                    cash_refinance_sell_costs.(index);
-                  plan_refinance_cash_buy_cost =
-                    cash_refinance_buy_costs.(index);
-                  plan_refinance_margin_sell_cost =
-                    margin_refinance_sell_costs.(index);
-                  plan_refinance_margin_buy_cost =
-                    margin_refinance_buy_costs.(index) });
-          planned_total_cost = total_cost;
-          planned_refinances = shortage > 0.;
-          planned_funding_clamp = funding_clamp }
-      in
-      let projected_cash plan =
-        let projected =
-          Array.fold_left
-            (fun projected item ->
-              if item.plan_changed && item.plan_trade < 0. then
-                projected -. item.plan_trade -. item.plan_repayment
-                -. item.plan_interest_settled -. item.plan_trade_cost
-              else projected)
-            !cash plan.planned_assets
-        in
-        let projected = Float.max 0. projected in
-        fold_assets
-          (fun projected index ->
-            let item = plan.planned_assets.(index) in
-            let projected =
-              projected
-              +. margin.ratios.(index) *. item.plan_refinance_cash
-              -. item.plan_refinance_cash_sell_cost
-              -. item.plan_refinance_cash_buy_cost
-              +. margin.ratios.(index) *. item.plan_refinance_margin
-              -. item.plan_refinance_margin_repayment
-              -. item.plan_refinance_margin_interest
-              -. item.plan_refinance_margin_sell_cost
-              -. item.plan_refinance_margin_buy_cost
-            in
-            if item.plan_changed && item.plan_trade > 0. then
-              projected -. item.plan_down_payment -. item.plan_trade_cost
-            else projected)
-          projected
-      in
-      let solve buy_scale =
-        let rec iterate remaining e1 =
-          if remaining = 0 then e1
-          else
-            let previous = e1 in
-            let plan = compute_plan buy_scale previous in
-            let next = e0 -. plan.planned_total_cost in
-            if next <= 0. then e1
-            else if abs_float (next -. previous) <= tolerance then next
-            else iterate (remaining - 1) next
-        in
-        compute_plan buy_scale (iterate 20 e0)
-      in
-      let requested_plan = solve 1. in
-      let plan =
-        if projected_cash requested_plan >= -. tolerance then requested_plan
-        else
-          let rec search remaining low high best =
-            if remaining = 0 then best
-            else
-              let scale = (low +. high) /. 2. in
-              let candidate = solve scale in
-              if projected_cash candidate >= -. tolerance then
-                search (remaining - 1) scale high candidate
-              else search (remaining - 1) low scale best
-          in
-          search 60 0. 1. (solve 0.)
-      in
+      let plan = plan_fills ~state ~prices ~targets:eff ~force in
       let () =
         if clamped || plan.planned_funding_clamp then incr clamps
       in
