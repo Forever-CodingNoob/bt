@@ -1,0 +1,4 @@
+(library
+ (name intraday)
+ (wrapped false)
+ (libraries data engine))

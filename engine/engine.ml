@@ -155,6 +155,50 @@ let taf_dollars (costs : costs) ~shares =
   in
   Float.max 0.01 capped
 
+let charge costs capital index ~equity_before ~delta ~price =
+    let costs = costs.(index) in
+    let amount = abs_float delta in
+    let commission = amount *. costs.fee_bps /. 10000. in
+    let commission =
+      match capital with
+      | Some value when costs.min_fee > 0. ->
+          Float.max commission (costs.min_fee /. (equity_before *. value))
+      | _ -> commission
+    in
+    let non_commission_bps =
+      if delta > 0. then costs.slip_bps else costs.tax_bps +. costs.slip_bps
+    in
+    let bps_cost = commission +. amount *. non_commission_bps /. 10000. in
+    let taf =
+      match capital with
+      | Some cap when delta < 0. && costs.per_share_sell_fee > 0. ->
+          let dollars = equity_before *. cap in
+          let shares = amount *. dollars /. price in
+          taf_dollars costs ~shares /. dollars
+      | _ -> 0.
+    in
+    bps_cost +. taf
+
+let absolute_sell_cost costs capital index ~price value =
+    let costs = costs.(index) in
+    let commission = value *. costs.fee_bps /. 10000. in
+    let commission =
+      match capital with
+      | Some cap when costs.min_fee > 0. ->
+          Float.max commission (costs.min_fee /. cap)
+      | _ -> commission
+    in
+    let taf =
+      match capital with
+      | Some cap when costs.per_share_sell_fee > 0. ->
+          let shares = value *. cap /. price in
+          taf_dollars costs ~shares /. cap
+      | _ -> 0.
+    in
+    commission
+    +. value *. (costs.tax_bps +. costs.slip_bps) /. 10000.
+    +. taf
+
 let clamp_target value =
   if Float.is_nan value || value < 0. then 0. else value
 
@@ -501,50 +545,8 @@ let run ?dividends ?(dividend_tax = 0.)
     in
     !landed
   in
-  let charge index ~equity_before ~delta ~price =
-    let costs = costs.(index) in
-    let amount = abs_float delta in
-    let commission = amount *. costs.fee_bps /. 10000. in
-    let commission =
-      match capital with
-      | Some value when costs.min_fee > 0. ->
-          Float.max commission (costs.min_fee /. (equity_before *. value))
-      | _ -> commission
-    in
-    let non_commission_bps =
-      if delta > 0. then costs.slip_bps else costs.tax_bps +. costs.slip_bps
-    in
-    let bps_cost = commission +. amount *. non_commission_bps /. 10000. in
-    let taf =
-      match capital with
-      | Some cap when delta < 0. && costs.per_share_sell_fee > 0. ->
-          let dollars = equity_before *. cap in
-          let shares = amount *. dollars /. price in
-          taf_dollars costs ~shares /. dollars
-      | _ -> 0.
-    in
-    bps_cost +. taf
-  in
-  let absolute_sell_cost index ~price value =
-    let costs = costs.(index) in
-    let commission = value *. costs.fee_bps /. 10000. in
-    let commission =
-      match capital with
-      | Some cap when costs.min_fee > 0. ->
-          Float.max commission (costs.min_fee /. cap)
-      | _ -> commission
-    in
-    let taf =
-      match capital with
-      | Some cap when costs.per_share_sell_fee > 0. ->
-          let shares = value *. cap /. price in
-          taf_dollars costs ~shares /. cap
-      | _ -> 0.
-    in
-    commission
-    +. value *. (costs.tax_bps +. costs.slip_bps) /. 10000.
-    +. taf
-  in
+  let charge = charge costs capital in
+  let absolute_sell_cost = absolute_sell_cost costs capital in
   let record_fill index ~date ~price ~from_e ~to_e =
     fills :=
       { date; stock = fst assets.(index); price;

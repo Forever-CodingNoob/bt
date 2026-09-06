@@ -4714,7 +4714,172 @@ let test_bars_run_routing () =
     let () = assert (status <> Unix.WEXITED 0) in
     assert (output = ["day trading strategies run under bt daytrade"]))
 
+let intraday_sessions : Data.session array =
+  [| { date = "2024-11-27"; open_ = "09:30"; close = "16:00" };
+     { date = "2024-11-29"; open_ = "09:30"; close = "13:00" } |]
+
+let intraday_bars =
+  [| bar "2024-11-27T09:30" 100. 100.;
+     bar "2024-11-27T09:35" 110. 120.;
+     bar "2024-11-27T09:40" 120. 120.;
+     bar "2024-11-27T09:45" 120. 120.;
+     bar "2024-11-27T15:55" 120. 120.;
+     bar "2024-11-29T09:30" 200. 200.;
+     bar "2024-11-29T09:35" 200. 180.;
+     bar "2024-11-29T12:55" 180. 180. |]
+
+let run_intraday ?(fill = Engine.Close_same) ?(leverage = 1.)
+    ?(costs = zero_costs) ?(capital = None) ?(initial_equity = 1.)
+    ?(sessions = intraday_sessions) ?(bars = intraday_bars) targets =
+  Intraday.run { fill; leverage; costs; capital }
+    ~sessions ~bars ~targets ~initial_equity
+
+let test_intraday_latency () =
+  let targets = [|1.; 0.; 0.; 0.; 0.; 0.; 0.; 0.|] in
+  let same = run_intraday targets in
+  let next = run_intraday ~fill:Engine.Open_next targets in
+  (* Close buys at 100, sells at 120: 1.2. Next open buys at 110,
+     sells at 120: 12/11. Difference is 6/55. No overnight gain. *)
+  let () = assert_float_array [|1.2; 1.2|] same.equity in
+  let () = assert_float_array [|12. /. 11.; 12. /. 11.|] next.equity in
+  let () = assert_close (6. /. 55.) (same.equity.(0) -. next.equity.(0)) in
+  let () = assert (same.session_dates = [|"2024-11-27"; "2024-11-29"|]) in
+  match same.fills, next.fills with
+  | [a; b], [c; d] ->
+      let () = assert (a.time = "2024-11-27T09:30" && a.price = 100.) in
+      let () = assert (b.time = "2024-11-27T09:35" && b.price = 120.) in
+      let () = assert (c.time = "2024-11-27T09:35" && c.price = 110.) in
+      assert (d.time = "2024-11-27T09:40" && d.price = 120.)
+  | _ -> assert false
+
+let test_intraday_last_decision () =
+  List.iter (fun fill ->
+    let result = run_intraday ~fill [|0.; 0.; 0.; 0.; 1.; 0.; 0.; 1.|] in
+    (* Last decisions cannot enter either session or leak into the next. *)
+    let () = assert (result.fills = [] && result.flat_forced = 0) in
+    assert_float_array [|1.; 1.|] result.equity)
+    [Engine.Close_same; Engine.Open_next]
+
+let test_intraday_forced_flat () =
+  List.iter (fun (fill, expected) ->
+    let result = run_intraday ~fill [|1.; 1.; 1.; 1.; 0.; 1.; 1.; 0.|] in
+    (* Entry 100 (close) or 110 (next open), exit 120; next session
+       enters 200 and exits 180. Cash compounds, never the overnight gap. *)
+    let () = assert_float_array expected result.equity in
+    let () = assert (result.trades = 2 && result.wins = 1 && result.flat_forced = 2) in
+    match result.fills with
+    | [_; a; _; b] ->
+        let () = assert (a.time = "2024-11-27T15:55" && a.price = 120.) in
+        let () = assert (b.time = "2024-11-29T12:55" && b.price = 180.) in
+        assert (a.to_exposure = 0. && b.to_exposure = 0.)
+    | _ -> assert false)
+    [Engine.Close_same, [|1.2; 1.08|];
+     Engine.Open_next, [|12. /. 11.; 54. /. 55.|]]
+
+let test_intraday_cap () =
+  let result = run_intraday ~leverage:2. ~initial_equity:10.
+    [|1.; 2.; 2.; 2.; 0.; 3.; 3.; 0.|] in
+  (* First buy 10 at 100 grows to 12. Target 2 would buy value 24,
+     but prior-close cap is 20: buy only 8 at 120, equity remains 12.
+     Next session cap resets to 24. The 3 target caps at 2 and loses
+     10% of 24, leaving 9.6. *)
+  let () = assert_float_array [|12.; 9.6|] result.equity in
+  match result.fills with
+  | [_; capped; _; next; _] ->
+      let () = assert_close (5. /. 3.) capped.to_exposure in
+      assert_close 2. next.to_exposure
+  | _ -> assert false
+
+let test_intraday_drift () =
+  let result = run_intraday ~leverage:2. [|2.; 2.; 2.; 2.; 0.; 0.; 0.; 0.|] in
+  (* Borrow 1, buy value 2; a 20% gain makes value 2.4 and equity 1.4.
+     Unchanged targets do not trim drift above yesterday's cap of 2. *)
+  let () = assert_float_array [|1.4; 1.4|] result.equity in
+  assert (List.length result.fills = 2)
+
+let test_intraday_normalization () =
+  let rejected =
+    try
+      let () = ignore (run_intraday [|0.; -0.5; 0.; 0.; 0.; 0.; 0.; 0.|]) in
+      false
+    with Failure message -> message = "short targets are reserved"
+  in
+  let () = assert rejected in
+  let result = run_intraday [|1.; Float.nan; 0.; 0.; 0.; 0.; 0.; 0.|] in
+  (* NaN becomes a zero target: exit at 120 instead of waiting for close. *)
+  let () = assert_float_array [|1.2; 1.2|] result.equity in
+  match result.fills with
+  | [_; exit] -> assert (exit.time = "2024-11-27T09:35" && result.flat_forced = 0)
+  | _ -> assert false
+
+let test_intraday_costs () =
+  let costs = { zero_costs with Engine.fee_bps = 100.; tax_bps = 200.; slip_bps = 100. } in
+  let result = run_intraday ~costs [|1.; 1.; 1.; 1.; 0.; 0.; 0.; 0.|] in
+  (* Entry costs 2%, so position = 1/1.02. It grows 20%, then forced
+     sell pays 1% fee + 2% tax + 1% slip: 1.2 * .96 / 1.02 = 96/85. *)
+  let () = assert_float_array [|96. /. 85.; 96. /. 85.|] result.equity in
+  let () = assert (result.flat_forced = 1 && result.wins = 1) in
+  let expensive = { zero_costs with Engine.fee_bps = 1000. } in
+  let loss = run_intraday ~costs:expensive [|1.; 1.; 1.; 1.; 0.; 0.; 0.; 0.|] in
+  (* Gross +20% is a net loss: 1.2 * .9 / 1.1 = 54/55. *)
+  let () = assert_close (54. /. 55.) loss.equity.(0) in
+  assert (loss.trades = 1 && loss.wins = 0)
+
+let test_intraday_capital_costs () =
+  let bars = Array.map (fun (b : Data.bar) -> { b with o = 100.; c = 100. }) intraday_bars in
+  let costs = { zero_costs with Engine.min_fee = 2.;
+    per_share_sell_fee = 0.03; per_share_sell_cap = 0.10 } in
+  let result = run_intraday ~bars ~capital:(Some 1050.) ~costs
+    [|1.; 1.; 1.; 1.; 0.; 0.; 0.; 0.|] in
+  (* Cash 1050 pays $2 entry, buys 10.48 fractional shares. Sell pays
+     $2 minimum plus capped $0.10 TAF, leaving $1045.90. *)
+  let () = assert_close (1045.9 /. 1050.) result.equity.(0) in
+  let without = run_intraday ~bars ~costs [|1.; 1.; 1.; 1.; 0.; 0.; 0.; 0.|] in
+  (* Without capital the dollar minimum and TAF are inactive. *)
+  let () = assert_float_array [|1.; 1.|] without.equity in
+  let uncapped = { costs with Engine.min_fee = 0.; per_share_sell_cap = 0. } in
+  let small = run_intraday ~bars ~capital:(Some 1050.) ~costs:uncapped
+    [|0.1; 0.1; 0.1; 0.1; 0.; 0.; 0.; 0.|] in
+  (* 1.05 shares * .03 = .0315 rounds UP to .04; zero cap is uncapped. *)
+  assert_close (1049.96 /. 1050.) small.equity.(0)
+
+let test_intraday_round_trips () =
+  let result = run_intraday [|0.5; 1.; 0.5; 0.; 0.; 1.; 1.; 0.|] in
+  (* Buy .005 shares at 100, scale in at 120, then reduce before exit.
+     First round trip earns .1 (equity 1.1); second loses .11 -> .99.
+     Scale-in/out fills do not create extra round trips. *)
+  let () = assert_float_array [|1.1; 0.99|] result.equity in
+  let () = assert (result.trades = 2 && result.wins = 1 && result.flat_forced = 1) in
+  let flat_bars = Array.map (fun (b : Data.bar) -> { b with o = 100.; c = 100. }) intraday_bars in
+  let repeated = run_intraday ~bars:flat_bars [|1.; 0.; 1.; 0.; 0.; 0.; 0.; 0.|] in
+  (* Two distinct flat-to-flat trades, both exactly break-even, not wins. *)
+  assert (repeated.trades = 2 && repeated.wins = 0 && repeated.flat_forced = 0)
+
+let test_intraday_session_boundaries () =
+  let sessions = Array.append intraday_sessions
+    [|{ Data.date = "2024-12-02"; open_ = "09:30"; close = "16:00" }|] in
+  let bars = [|bar "2024-11-27T15:55" 100. 120.;
+               bar "2024-11-29T12:55" 200. 180.|] in
+  List.iter (fun fill ->
+    let result = run_intraday ~sessions ~bars ~fill [|1.; 1.|] in
+    (* Single-bar sessions have only ignored decisions. Calendar-only
+       Dec 2 has no data and therefore no fabricated equity observation. *)
+    let () = assert_float_array [|1.; 1.|] result.equity in
+    let () = assert (result.session_dates = [|"2024-11-27"; "2024-11-29"|]) in
+    assert (result.fills = []))
+    [Engine.Close_same; Engine.Open_next]
+
 let () =
+  let () = test_intraday_latency () in
+  let () = test_intraday_last_decision () in
+  let () = test_intraday_forced_flat () in
+  let () = test_intraday_cap () in
+  let () = test_intraday_drift () in
+  let () = test_intraday_normalization () in
+  let () = test_intraday_costs () in
+  let () = test_intraday_capital_costs () in
+  let () = test_intraday_round_trips () in
+  let () = test_intraday_session_boundaries () in
   let () = test_bars_declaration () in
   let () = test_session_series () in
   let () = test_bars_run_routing () in

@@ -75,6 +75,18 @@ val profile_of_market : string -> market_profile
 (** Return the default transaction costs for a market and symbol. *)
 val default_costs : market:string -> symbol:string -> costs
 
+(** Rounded, floored and optionally capped dollar FINRA sell fee. *)
+val taf_dollars : costs -> shares:float -> float
+
+(** Fill cost as a fraction of pre-fill equity; capital enables dollar fees. *)
+val charge :
+  costs array -> float option -> int ->
+  equity_before:float -> delta:float -> price:float -> float
+
+(** Sell cost in equity units, including capital-dependent dollar fees. *)
+val absolute_sell_cost :
+  costs array -> float option -> int -> price:float -> float -> float
+
 (** Clamp invalid targets and rescale a bar's portfolio to its funding cap. *)
 val effective_targets :
   financing_ratios:float array -> float array -> float array * bool
