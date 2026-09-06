@@ -305,7 +305,7 @@ module Session_map = Map.Make (String)
 let parse_bars ~sessions raw =
   let fields = jq_fields "bars"
     {|[(.next_page_token | if . == null then "" elif type == "string" then . else error("invalid token") end),
-       (.bars[] |
+       ((.bars // [])[] |
         (.t | sub("\\.[0-9]+Z$"; "Z") | strptime("%Y-%m-%dT%H:%M:%SZ") | mktime),
         ([.o,.h,.l,.c,.v][] | if type == "number" then . else error("invalid OHLCV") end))]
       | .[0] = (.[0] | @json) | map(tostring) | join("\t")|} raw in

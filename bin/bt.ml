@@ -646,13 +646,26 @@ let fetch_minute argv =
     | Some value -> value
     | None -> usage_error "fetch --bars expects one MARKET/SYMBOL"
   in
-  let cached = Data.read_minute_bars ~data_dir:!data_dir ~symbol ~from_:None ~to_:None in
+  let last_cached () =
+    let directory = Filename.concat !data_dir ("us/" ^ symbol ^ "/1m") in
+    let files = if Sys.file_exists directory then Sys.readdir directory else [||] in
+    let newest = Array.fold_left (fun newest name ->
+      if String.length name = 8 && Filename.check_suffix name ".csv" &&
+         String.for_all (function '0' .. '9' -> true | _ -> false) (String.sub name 0 4)
+      then max newest name else newest) "" files in
+    match newest with
+    | "" -> None
+    | name ->
+        match Data.last_cached_date (Filename.concat directory name) with
+        | None | Some "time" -> None
+        | Some time -> Some time
+  in
   let start =
-    if Array.length cached = 0 then "2016-01-01"
-    else
-      let time = cached.(Array.length cached - 1).Data.date in
-      let offset = Data.et_offset_minutes (String.sub time 0 10) in
-      Printf.sprintf "%s:00-%02d:00" time (-offset / 60)
+    match last_cached () with
+    | None -> "2016-01-01"
+    | Some time ->
+        let offset = Data.et_offset_minutes (String.sub time 0 10) in
+        Printf.sprintf "%s:00-%02d:00" time (-offset / 60)
   in
   let now = Unix.time () in
   let format tm = Printf.sprintf "%04d-%02d-%02d"
@@ -665,11 +678,14 @@ let fetch_minute argv =
       ~end_:(format (Unix.gmtime now)) in
     let () = Data.write_calendar ~data_dir:!data_dir calendar in
     let sessions = Data.read_calendar ~data_dir:!data_dir in
-    let bars = Alpaca.bars ~sessions ~symbol ~start ~end_ in
-    Data.write_minute_bars ~data_dir:!data_dir ~symbol bars
+    List.iter (fun (start, end_) ->
+      let bars = Alpaca.bars ~sessions ~symbol ~start ~end_ in
+      Data.write_minute_bars ~data_dir:!data_dir ~symbol bars)
+      (Data.year_ranges ~start ~end_)
   with Failure message | Sys_error message ->
-    if Array.length cached = 0 then failwith message
-    else Printf.eprintf "warning: %s; keeping cached minute bars for %s\n" message symbol
+    match last_cached () with
+    | None -> failwith message
+    | Some _ -> Printf.eprintf "warning: %s; keeping cached minute bars for %s\n" message symbol
 
 let dispatch () =
   if Array.length Sys.argv < 2 then begin

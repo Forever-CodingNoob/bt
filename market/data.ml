@@ -1549,6 +1549,19 @@ let et_offset_minutes date =
      (month < 11 || (month = 11 && day < november_sunday))
   then -240 else -300
 
+let year_ranges ~start ~end_ =
+  let year = int_of_string (String.sub start 0 4) in
+  let final_year = int_of_string (String.sub end_ 0 4) in
+  let rec split year start acc =
+    if year > final_year then List.rev acc
+    else if year = final_year then List.rev ((start, end_) :: acc)
+    else
+      let end_ = Printf.sprintf "%04d-12-31T23:59:59Z" year in
+      let next = Printf.sprintf "%04d-01-01T00:00:00Z" (year + 1) in
+      split (year + 1) next ((start, end_) :: acc)
+  in
+  split year start []
+
 let minute_of_time value =
   try
     let hour = int_of_string (String.sub value 0 2) in

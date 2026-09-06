@@ -129,6 +129,10 @@ type session = { date : string; open_ : string; close : string }
 (** ET offset from UTC in minutes for a YYYY-MM-DD date, using US DST rules. *)
 val et_offset_minutes : string -> int
 
+(** Split inclusive minute-fetch bounds at UTC calendar year boundaries.
+    Preserve the first and last bounds; regular ET sessions stay in one year. *)
+val year_ranges : start:string -> end_:string -> (string * string) list
+
 (** Read the sorted, date-deduplicated US session calendar; missing is empty. *)
 val read_calendar : data_dir:string -> session array
 

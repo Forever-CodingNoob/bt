@@ -4545,6 +4545,12 @@ let test_target_rejects_invalid_provisional_close () =
         assert (contains (read_file stderr_path) "unknown option")))
 
 let test_minute_data () =
+  (* UTC year boundaries end Dec 31 at 23:59:59 and resume Jan 1 at 00:00:00.
+     Regular ET sessions cannot cross them; the first and final bounds stay exact. *)
+  let () = assert (Data.year_ranges
+    ~start:"2023-12-29T15:59:00-05:00" ~end_:"2024-07-01T13:30:00Z" =
+    ["2023-12-29T15:59:00-05:00", "2023-12-31T23:59:59Z";
+     "2024-01-01T00:00:00Z", "2024-07-01T13:30:00Z"]) in
   (* US DST begins on March's second Sunday and ends on November's first. *)
   let () =
     List.iter (fun (date, offset) -> assert (Data.et_offset_minutes date = offset))
@@ -4556,14 +4562,19 @@ let test_minute_data () =
        { date = "2024-11-29"; open_ = "09:30"; close = "13:00" } |]
   in
   let () = assert (Alpaca.parse_calendar (alpaca_fixture "calendar.json") = Array.to_list sessions) in
-  let parsed, token = Alpaca.parse_bars ~sessions (alpaca_fixture "bars.json") in
-  (* 14:30 UTC - 5h = 09:30 ET. Close is exclusive, holidays absent.
-     The early close retains 12:59, not 13:00. *)
+  let parse_sessions = Array.append sessions
+    [| { Data.date = "2024-07-01"; open_ = "09:30"; close = "16:00" } |] in
+  let parsed, token = Alpaca.parse_bars ~sessions:parse_sessions (alpaca_fixture "bars.json") in
+  (* Winter: 14:30 UTC - 5h = 09:30 ET; summer: 13:30 UTC - 4h = 09:30 ET.
+     Close is exclusive, holidays absent; early close retains 12:59, not 13:00. *)
   let () =
     assert (parsed =
       [{ Data.date = "2024-01-02T09:30"; o = 100.; h = 102.; l = 99.; c = 101.; v = 10. };
+       { Data.date = "2024-07-01T09:30"; o = 150.; h = 152.; l = 149.; c = 151.; v = 20. };
        { Data.date = "2024-11-29T12:59"; o = 200.; h = 204.; l = 199.; c = 203.; v = 30. }])
   in
+  (* Alpaca's null collection contains zero bars and has no next page. *)
+  let () = assert (Alpaca.parse_bars ~sessions (alpaca_fixture "bars-empty.json") = ([], None)) in
   let () = assert (token = None) in
   let () = assert (Alpaca.parse_bars ~sessions {|{"bars":[],"next_page_token":"next"}|} = ([], Some "next")) in
   let () = assert_failure (fun () -> ignore (Alpaca.parse_bars ~sessions {|{"bars":[{"t":"bad"}]}|})) in
