@@ -14,6 +14,7 @@ This document describes how the bt engine simulates trades, computes equity, and
   - [Costs and taxes](#costs-and-taxes)
   - [Margin financing](#margin-financing)
   - [Dividends](#dividends)
+  - [TW daemon simulation fidelity](#tw-daemon-simulation-fidelity)
   - [Gap between simulation and the real market](#gap-between-simulation-and-the-real-market)
 - [United States market (us)](#united-states-market-us)
   - [Data source](#data-source-1)
@@ -111,6 +112,24 @@ On a TW ex-date, the engine books net cash dividends as receivables for the shar
 If TW data omits a pay date, the loader uses one calendar month after the ex-date. Cash-side dividends and only the margin-side excess after loan paydown trigger one normal cost-bearing fill pass toward current targets. A margin dividend fully consumed by loan paydown preserves drift and does not trigger a fill. `--dividend-tax` defaults to 0%.
 
 Stock-dividend and share-count factors restate per-share cash amounts and volume.
+
+### TW daemon simulation fidelity
+
+The implemented TW daemon is a Shioaji simulation execution path around the unchanged daily engine planner. It is not TW production support.
+
+- At 13:05 Taipei it validates a same-session Shioaji snapshot, queries FinMind's independent `TaiwanStockTradingDate` calendar for the previous session, refreshes prices only through that date, refreshes dividend and corporate-action data through the current session, and rejects any price cache that does not end exactly at the previous session.
+- At 13:20 it validates a fresh per-decision snapshot, builds today's provisional OHLCV bar, and runs the same strategy compiler, target normalization, costs, financing ratio, and fill planner used by the daily backtest.
+- Simulation requires `--equity TWD` as total account equity. With the supported one-stock account shape, cash is inferred as equity minus cash and margin inventory value plus loan principal and interest. A nonzero holding in another symbol is rejected.
+- The client reads each margin position's dated Shioaji `position_detail`. A lot due under the engine's 18-calendar-month, month-end-clamped TW rule adds a margin sell/rebuy pair before ordinary planner legs. The executor floors every leg to `Common` lots of 1000 shares and retains the remainder.
+- Orders use `MKT` + `IOC` during continuous trading. The executor rechecks the Taipei session and the fresh per-order cutoff before every submission and every status poll; nothing is submitted at or after 13:25.
+- Every successor waits for a unique, matching, completely filled predecessor with a finite positive weighted fill price. A partial, ambiguous, missing, mismatched, rejected, failed, inactive, cancelled, timed-out, cutoff, or uncertain submission stops the remaining legs and logs the observed exposure.
+- Refinance sells and rebuys are sequential. A rebuy requires a full sell fill and enough cash for the original lot count. An unfunded rebuy or capped ordinary buy stops later legs.
+- Querying today's orders before planning reduces duplicate submissions, but does not guarantee exactly-once execution across concurrent daemons or every crash timing.
+
+> [!WARNING]
+> Daily backtests fill fractional shares at recorded closes and make proceeds immediately available. TW daemon simulation floors to 1000-share Common lots, uses a 13:20 snapshot and actual IOC fill reports, may stop after a partial plan, and applies a confirmed-cash budget between orders. Results can therefore diverge even though both paths use the same planner.
+
+TW production accounting remains blocked; see [Safety and failure in the TW live-trading design](./specs/tw-live-trading.md#safety-and-failure).
 
 ### Gap between simulation and the real market
 

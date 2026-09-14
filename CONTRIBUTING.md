@@ -19,6 +19,8 @@
 bin/bt.ml          CLI dispatch: fetch | run | target | live
 broker/alpaca.ml   Alpaca REST client: trading + market data via curl and jq
 broker/alpaca.mli  Alpaca REST interface
+broker/shioaji.ml  Shioaji REST client: TW account, market data, and orders via curl and jq
+broker/shioaji.mli Shioaji REST interface
 lang/ast.ml        Strategy AST types
 lang/ast.mli       AST interface
 market/data.ml     FinMind/Tiingo fetch, CSV cache, two-plane adjustment
@@ -38,7 +40,7 @@ report/report.mli  Report interface
 series/series.ml   Indicators on float arrays
 series/series.mli  Series interface
 test/test_bt.ml    Assert-based tests (dune test)
-test/fixtures/     Synthetic CSV data and recorded Alpaca JSON responses (test/fixtures/alpaca/)
+test/fixtures/     Synthetic CSV data and recorded Alpaca/Shioaji JSON responses.
 examples/          Strategy examples
 scripts/plot.py    Equity graph renderer (run directly by bt)
 ```

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `bt target` supports TW strategies through Shioaji simulation with required `--equity TWD`, independent FinMind calendar freshness, and Common-lot cash, margin, and refinance plans.
+- `bt live` adds a TW simulation daemon with 18-month margin-lot rollovers and sequential `MKT` + `IOC` fill confirmation.
+- TW `--live` verifies production server mode, then stops before sizing until real-account cash and settlement accounting is verified.
+
 ## [0.9.0] - 2026-09-06
 
 ### Added

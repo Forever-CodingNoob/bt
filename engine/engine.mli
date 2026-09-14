@@ -126,6 +126,10 @@ val default_costs : market:string -> symbol:string -> costs
 (** Rounded, floored and optionally capped dollar FINRA sell fee. *)
 val taf_dollars : costs -> shares:float -> float
 
+(** Add calendar months to a [YYYY-MM-DD] date, clamping the day to the
+    target month's final day. *)
+val add_months_clamped : string -> int -> string
+
 (** Fill cost as a fraction of pre-fill equity; capital enables dollar fees. *)
 val charge :
   costs array -> float option -> int ->

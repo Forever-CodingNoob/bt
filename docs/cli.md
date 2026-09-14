@@ -19,10 +19,12 @@
   - [Target options](#target-options)
   - [Environment](#environment)
   - [Decision cycle](#decision-cycle)
+  - [Taiwan market](#taiwan-market)
   - [Output fields](#output-fields)
 - [`bt live`](#bt-live)
   - [Live options](#live-options)
   - [Environment and startup](#environment-and-startup)
+  - [Taiwan market](#taiwan-market-1)
   - [Daily schedule](#daily-schedule)
   - [Failure handling and logs](#failure-handling-and-logs)
 - [`bt run`](#bt-run)
@@ -45,8 +47,8 @@ bt run STRAT... [--baseline M/SYM] [--from D] [--to D]
        [--financing-ratio PERCENT] [--loan-term-months N] [--dividend-tax PERCENT]
        [--capital TWD] [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]
 bt daytrade STRAT... [--baseline us/SYM] [--fill open|close] [--leverage N] [--from YYYY-MM-DD] [--to YYYY-MM-DD] [-p name=value] [--capital USD] [--fee-bps F] [--tax-bps F] [--slip-bps F] [--per-share-fee F] [--per-share-cap F] [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]
-bt target STRAT [--live] [--data-dir DIR] [--provisional-close PRICE]
-bt live STRAT [--live] [--data-dir DIR]
+bt target STRAT [--live] [--equity TWD] [--data-dir DIR] [--provisional-close PRICE]
+bt live STRAT [--live] [--equity TWD] [--data-dir DIR]
 ```
 
 ## `bt fetch`
@@ -184,40 +186,74 @@ These flags are usage errors (exit 2). `bt run`, `bt target`, and `bt live` reje
 
 ## `bt target`
 
-Runs one decision cycle and prints what the live daemon would do without submitting an order.
+Runs one US Alpaca or TW Shioaji simulation decision and prints the daemon's proposed action without submitting an order.
 
 ### Target options
 
-> [!IMPORTANT]
-> `bt target` accepts US strategies only and uses the paper account by default. A Taiwan strategy stops with `live trading supports us only`.
+TW production accounting remains blocked; see [Safety and failure in the TW live-trading design](./specs/tw-live-trading.md#safety-and-failure).
 
 | Argument or option | Default | Description |
 |---|---|---|
-| `STRAT` | - | Read one strategy containing exactly one US stock declaration. |
-| `--live` | paper | Use the live Alpaca account and API endpoint instead of paper; this command still does not submit an order. |
-| `--data-dir DIR` | `data/` | Set the Tiingo cache directory. |
-| `--provisional-close PRICE` | - | Use a positive PRICE for a local provisional bar instead of requesting Alpaca's snapshot; the output is marked `provisional: override PRICE`. |
+| `STRAT` | - | Read one strategy containing exactly one US or TW stock declaration. |
+| `--live` | paper or simulation | Select the production account mode. US uses the live Alpaca endpoint. TW currently stops at the production accounting blocker. |
+| `--equity TWD` | - | Set total account equity for TW simulation. It is required for TW simulation and rejected for US and production modes. |
+| `--data-dir DIR` | `data/` | Set the Tiingo or FinMind cache directory selected by the strategy market. |
+| `--provisional-close PRICE` | - | Use a positive PRICE for a local provisional bar instead of the broker snapshot. The output is marked `provisional: override PRICE`. |
 | `-h`, `-help`, `--help` | - | Print the target options and exit with code 0. |
 
 > [!TIP]
-> Use `--provisional-close PRICE` for dry runs outside market hours, when a current Alpaca snapshot is unavailable or unsuitable.
+> Use `--provisional-close PRICE` for a dry run when a current broker snapshot is unavailable or unsuitable. On TW, the override replaces only the snapshot price: the command still checks Shioaji server mode, queries the independent FinMind trading calendar, fetches history, and requires the cache to end on the verified previous session.
 
 ### Environment
 
-| Variable | Purpose |
-|---|---|
-| `TIINGO_TOKEN` | Authenticate the Tiingo history request. |
-| `APCA_API_KEY_ID` | Identify the selected paper or live Alpaca account. |
-| `APCA_API_SECRET_KEY` | Authenticate the selected paper or live Alpaca account. |
+| Variable | Default | Purpose |
+|---|---|---|
+| `TIINGO_TOKEN` | - | Authenticate the US Tiingo history request. |
+| `APCA_API_KEY_ID` | - | Identify the selected US paper or live Alpaca account. |
+| `APCA_API_SECRET_KEY` | - | Authenticate the selected US paper or live Alpaca account. |
+| `FINMIND_TOKEN` | - | Authenticate TW history and the independent `TaiwanStockTradingDate` calendar request. |
+| `SHIOAJI_URL` | `http://localhost:8080` | Select the official Shioaji HTTP server used for TW account, snapshot, and order APIs. |
+| `SJ_API_KEY` | - | Supply the Shioaji API key used in the client bearer credential. |
+| `SJ_SEC_KEY` | - | Supply the Shioaji secret key used in the client bearer credential. |
 
-The Alpaca key variables must contain credentials for the account selected by the mode.
+The Alpaca key variables must contain credentials for the selected US account. For TW, `SJ_API_KEY` and `SJ_SEC_KEY` must be available to both `bt` and the Shioaji server.
 
 ### Decision cycle
 
-The command fetches Tiingo history through Alpaca's previous daily bar, appends Alpaca's current snapshot as a provisional bar, and evaluates the strategy through the same DSL compiler used by `bt run`.
+For US, the command fetches Tiingo history through Alpaca's previous daily bar, appends Alpaca's current snapshot as a provisional bar, and evaluates the strategy through the same DSL compiler used by `bt run`.
 
 > [!WARNING]
 > The free Alpaca IEX feed can produce a provisional price that differs from the consolidated tape. Alpaca paper accounts also do not simulate dividends, so paper cash and equity can diverge from a live account.
+
+### Taiwan market
+
+The TW target reads account and snapshot data from Shioaji and historical data from FinMind. It queries `TaiwanStockTradingDate` for the previous session and never treats cached prices as a calendar. It refreshes adjustments through today and rejects stale snapshots or a cache that does not end on the previous session.
+
+The official server reads this `.env` from the directory where `shioaji server start` runs:
+
+```dotenv
+SJ_API_KEY=YOUR_API_KEY
+SJ_SEC_KEY=YOUR_SECRET_KEY
+SJ_CA_PATH=your/ca/path/Sinopac.pfx
+SJ_CA_PASSWD=YOUR_CA_PASSWORD
+SJ_PRODUCTION=false
+```
+
+`SJ_API_KEY` and `SJ_SEC_KEY` log the server in and let `bt` authenticate to its trading endpoints. `SJ_CA_PATH` and `SJ_CA_PASSWD` activate the certificate required for production order placement, and `SJ_PRODUCTION=false` or an unset value selects simulation while `true` selects production. The CA path, CA password, and production setting remain server-only.
+
+| Command mode | Required server mode | Equity source | Current availability |
+|---|---|---|---|
+| `bt target --equity TWD` | `simulation: true` | User-supplied total equity | Implemented |
+| `bt target --live` | `simulation: false` | Real account accounting | Blocked before sizing |
+
+The mode mismatch guard refuses simulation commands against a production server and refuses `--live` against a simulation server.
+
+The resulting plan preserves cash and margin inventories. It can contain cash sells, margin sells, cash buys, margin buys, and paired sell/rebuy refinancing legs. Dated `MarginTrading` position details that reach the engine's 18-calendar-month, month-end-clamped maturity produce sell/rebuy pairs before ordinary target legs. Every share quantity is floored to a `Common` lot of 1000 shares; the remainder is retained rather than rounded up or sent as an odd-lot order.
+
+> [!WARNING]
+> `--equity` is user-supplied simulation total equity, not broker cash or an `account_balance` result. With the supported one-stock account shape, `bt` infers simulation cash from equity, the selected symbol's cash and margin inventory values, loan principal, and interest. It rejects a nonzero holding in another symbol.
+
+TW production accounting remains blocked; see [Safety and failure in the TW live-trading design](./specs/tw-live-trading.md#safety-and-failure).
 
 ### Output fields
 
@@ -226,7 +262,7 @@ The command writes one field per line.
 | Field | Meaning |
 |---|---|
 | `provisional` | Report `override PRICE` when `--provisional-close` supplies the provisional bar. |
-| `fetched-through` | Show the last date fetched from Tiingo. |
+| `fetched-through` | Show the last historical date fetched from Tiingo or FinMind. |
 | `provisional-date` | Show the provisional bar's date. |
 | `provisional-open` | Show the provisional bar's open. |
 | `provisional-high` | Show the provisional bar's high. |
@@ -236,47 +272,74 @@ The command writes one field per line.
 | `target` | Show the exposure selected by the strategy. |
 | `equity` | Show the account equity used to size the decision. |
 | `held` | Show the current share position. |
-| `action` | Report `order` or `skip`. |
-| `side` | Report `buy` or `sell` for an order. |
-| `quantity` | Report the whole-share quantity for an order. |
-| `client-order-id` | Report the deterministic identifier for an order. |
-| `reason` | Explain a skipped action. |
+| `action` | Report US `order` or `skip`, or TW `orders`. |
+| `side` | Report `buy` or `sell` for a US order. |
+| `quantity` | Report the whole-share quantity for a US order. |
+| `client-order-id` | Report the deterministic identifier for a US order. |
+| `leg` | Report each TW leg as `ACTION CONDITION COMMON_LOTS`. |
+| `reason` | Explain a skipped US action. |
 
 > [!IMPORTANT]
 > `bt target` prints the proposed action but never submits an order, even with `--live`.
 
 ## `bt live`
 
-Runs the close-scheduled trading daemon for one US strategy.
+Runs the close-scheduled trading daemon for one US strategy or the TW simulation daemon for one TW strategy.
 
 ### Live options
 
-> [!IMPORTANT]
-> `bt live` accepts US strategies only and uses the paper account by default. A Taiwan strategy stops with `live trading supports us only`.
+TW production accounting remains blocked; see [Safety and failure in the TW live-trading design](./specs/tw-live-trading.md#safety-and-failure).
 
 | Argument or option | Default | Description |
 |---|---|---|
-| `STRAT` | - | Read one strategy containing exactly one US stock declaration. |
-| `--live` | paper | Use the live Alpaca account and API endpoint instead of paper. |
-| `--data-dir DIR` | `data/` | Set the Tiingo cache directory. |
+| `STRAT` | - | Read one strategy containing exactly one US or TW stock declaration. |
+| `--live` | paper or simulation | Use the US live Alpaca endpoint or request TW production mode. TW production currently exits at the accounting blocker. |
+| `--equity TWD` | - | Set total account equity for TW simulation. It is required for TW simulation and rejected for US and production modes. |
+| `--data-dir DIR` | `data/` | Set the Tiingo or FinMind cache directory selected by the strategy market. |
 | `-h`, `-help`, `--help` | - | Print the live options and exit with code 0. |
 
 > [!CAUTION]
-> `bt live --live` submits real-money market-on-close orders. Confirm the credentials, account, and strategy before starting it.
+> For US, `bt live --live` submits real-money market-on-close orders. Confirm the credentials, account, and strategy before starting it. TW reaches no production submission path in the current implementation.
 
 ### Environment and startup
 
-| Variable | Purpose |
-|---|---|
-| `TIINGO_TOKEN` | Authenticate the Tiingo history request. |
-| `APCA_API_KEY_ID` | Identify the selected paper or live Alpaca account. |
-| `APCA_API_SECRET_KEY` | Authenticate the selected paper or live Alpaca account. |
+| Variable | Default | Purpose |
+|---|---|---|
+| `TIINGO_TOKEN` | - | Authenticate US Tiingo history requests. |
+| `APCA_API_KEY_ID` | - | Identify the selected US paper or live Alpaca account. |
+| `APCA_API_SECRET_KEY` | - | Authenticate the selected US paper or live Alpaca account. |
+| `FINMIND_TOKEN` | - | Authenticate TW history and independent trading-calendar requests. |
+| `SHIOAJI_URL` | `http://localhost:8080` | Select the official Shioaji HTTP server for TW. |
+| `SJ_API_KEY` | - | Supply the Shioaji API key used in the client bearer credential. |
+| `SJ_SEC_KEY` | - | Supply the Shioaji secret key used in the client bearer credential. |
 
-At startup the daemon prints the mode, account number, and equity, and refuses inactive or trading-blocked accounts.
+For US, startup prints the mode, account number, and equity, and refuses inactive or trading-blocked accounts.
+
+### Taiwan market
+
+Install the official `shioaji` command, create the server `.env` shown in the TW target section, and start `shioaji server start`. `bt` needs `SHIOAJI_URL`, `FINMIND_TOKEN`, `SJ_API_KEY`, and `SJ_SEC_KEY`; `SJ_CA_PATH`, `SJ_CA_PASSWD`, and `SJ_PRODUCTION` remain server-only.
+
+The mode mismatch guard requires simulation commands to see `info.simulation = true` and `--live` to see `info.simulation = false`. Simulation also requires a finite positive `--equity TWD`; production rejects `--equity`.
+
+| Phase | Taipei timing | Implemented TW simulation action |
+|---|---|---|
+| Prepare | 13:05 | Check that a snapshot is dated today, query FinMind's independent trading calendar for the previous session, fetch prices through that session, refresh adjustment datasets through today, and require an exact price-cache end date. |
+| Decide | 13:20 | Request a fresh snapshot, validate its session and OHLCV values, append the provisional bar, evaluate the strategy, read Common-lot aggregate positions and dated margin details, prepend due 18-month rollover pairs, and plan ordinary cash, margin, and refinancing legs. |
+| Execute | Before 13:25 | Floor shares to 1000-share Common lots and submit `MKT` + `IOC` legs sequentially. Recheck the date and cutoff immediately before every order and during every status poll. |
+| Reconcile | After 13:30 | Query and log today's resulting trades, including fill status, deal lots, and weighted deal price. |
+
+Every successor leg requires the previous order to be uniquely identified and completely filled at a finite positive weighted price. Partial, missing, ambiguous, mismatched, failed, inactive, rejected, cancelled, timed-out, cutoff, or uncertain POST results stop all later legs. The daemon logs the observed fill and the resulting exposure instead of assuming the plan completed.
+
+A refinance sell and rebuy are sequential dependent orders, not an atomic broker operation. The rebuy runs only after the full sell is confirmed and only when its complete original lot count is funded. An ordinary buy may be floored to the confirmed cash budget; if capped, its remainder and every later leg stay unsubmitted. No execution path guarantees exactly once across concurrent daemon processes or every crash timing; the pre-submit query only reduces duplicate risk.
+
+> [!WARNING]
+> Simulation equity is a user-supplied sizing input. Board-lot flooring, real MKT fills, the spread, partial or cancelled IOC quantities, broker margin rules, settlements, and concurrent processes can make TW daemon execution differ from a daily close-fill backtest.
+
+TW production accounting remains blocked; see [Safety and failure in the TW live-trading design](./specs/tw-live-trading.md#safety-and-failure).
 
 ### Daily schedule
 
-The daemon derives every phase from Alpaca's `next_close`.
+For US, the daemon derives every phase from Alpaca's `next_close`.
 
 | Phase | Timing | Action |
 |---|---|---|
@@ -299,15 +362,16 @@ Logs are append-only ASCII text.
 | Provisional close | Record the price used for the decision. |
 | Target | Record the strategy exposure. |
 | Equity | Record the account equity used for sizing. |
-| Held shares | Record the current position. |
+| Held shares or Common lots | Record the current position. |
+| Planned legs | Record TW cash, margin, and refinance actions plus retained board-lot remainders. |
 | Order or skip reason | Record the action or why no order was placed. |
-| Fill state | Record post-close reconciliation. |
+| Fill state and price | Record reconciliation and any confirmed or observed TW exposure. |
 
 > [!IMPORTANT]
-> A stale cache, fetch or snapshot error, evaluation error, or order rejection logs one error line and skips the day without placing another order.
+> A stale cache, fetch or snapshot error, evaluation error, or order failure logs one error line and stops that market's remaining action for the day. TW never submits a successor after an unconfirmed predecessor.
 
 > [!NOTE]
-> Restarts recompute desired shares from the account and query the deterministic client order ID before submission, so no local state file is needed.
+> The US path recomputes desired shares from the account and queries the deterministic client order ID before submission. The TW path queries today's orders before planning and carries only confirmed fills between legs. Neither statement is an exactly-once guarantee for concurrent processes.
 
 ## `bt run`
 

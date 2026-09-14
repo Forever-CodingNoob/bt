@@ -215,6 +215,23 @@ let absolute_sell_cost costs capital index ~price value =
 let clamp_target value =
   if Float.is_nan value || value < 0. then 0. else value
 
+let rec iter_indices_from stop index function_ =
+  if index < stop then
+    let () = function_ index in
+    iter_indices_from stop (index + 1) function_
+
+let iter_indices stop function_ = iter_indices_from stop 0 function_
+
+let rec fold_indices_from stop index function_ accumulator =
+  if index = stop then accumulator
+  else
+    fold_indices_from stop (index + 1) function_
+      (function_ accumulator index)
+
+let fold_indices stop function_ initial =
+  fold_indices_from stop 0 function_ initial
+
+
 let effective_targets ~financing_ratios targets =
   if Array.length financing_ratios <> Array.length targets then
     invalid_arg "Engine.effective_targets: length mismatch";
@@ -239,17 +256,10 @@ let effective_targets ~financing_ratios targets =
 let plan_fills ~costs ~capital ~financing_ratios
     ~(state : plan_state) ~prices ~targets ~force =
   let asset_count = Array.length state.cash_values in
-  let rec iter_assets_from index f =
-    if index < asset_count then
-      let () = f index in
-      iter_assets_from (index + 1) f
+  let iter_assets function_ = iter_indices asset_count function_ in
+  let fold_assets function_ initial =
+    fold_indices asset_count function_ initial
   in
-  let iter_assets f = iter_assets_from 0 f in
-  let rec fold_assets_from index f accumulator =
-    if index = asset_count then accumulator
-    else fold_assets_from (index + 1) f (f accumulator index)
-  in
-  let fold_assets f initial = fold_assets_from 0 f initial in
   let sum values = Array.fold_left ( +. ) 0. values in
   let cash_values = state.cash_values in
   let margin_values = state.margin_values in
@@ -385,20 +395,24 @@ let plan_fills ~costs ~capital ~financing_ratios
                 Float.min 1. (fundable /. requested_buy_total)
               else 1.
             in
-            let remaining = ref fundable in
-            iter_assets (fun index ->
-              if changed.(index) && trades.(index) > 0. then
-                let current = total_value index in
-                let trade =
-                  Float.min !remaining (trades.(index) *. scale)
-                in
-                let () = trades.(index) <- trade in
-                let () = final_values.(index) <- current +. trade in
-                let () =
-                  to_es.(index) <- final_values.(index) /. equity_basis
-                in
-                let () = remaining := Float.max 0. (!remaining -. trade) in
-                scaled_buys.(index) <- true)
+            ignore
+              (fold_assets
+                 (fun remaining index ->
+                   if changed.(index) && trades.(index) > 0. then
+                     let current = total_value index in
+                     let trade =
+                       Float.min remaining (trades.(index) *. scale)
+                     in
+                     let () = trades.(index) <- trade in
+                     let () = final_values.(index) <- current +. trade in
+                     let () =
+                       to_es.(index) <- final_values.(index) /. equity_basis
+                     in
+                     let () = scaled_buys.(index) <- true in
+                     Float.max 0. (remaining -. trade)
+                   else
+                     remaining)
+                 fundable)
         in
         let cash_refinance_capacities = Array.make asset_count 0. in
         let margin_refinance_rates = Array.make asset_count 0. in
@@ -902,17 +916,10 @@ let run ?dividends ?(dividend_tax = 0.)
           invalid_arg "Engine.run: target length mismatch")
       strategy.targets
   in
-  let rec iter_assets_from index f =
-    if index < asset_count then
-      let () = f index in
-      iter_assets_from (index + 1) f
+  let iter_assets function_ = iter_indices asset_count function_ in
+  let fold_assets function_ initial =
+    fold_indices asset_count function_ initial
   in
-  let iter_assets f = iter_assets_from 0 f in
-  let rec fold_assets_from index f accumulator =
-    if index = asset_count then accumulator
-    else fold_assets_from (index + 1) f (f accumulator index)
-  in
-  let fold_assets f initial = fold_assets_from 0 f initial in
   let sum values = Array.fold_left ( +. ) 0. values in
   let cash = ref 1. in
   let cash_values = Array.make asset_count 0. in

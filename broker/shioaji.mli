@@ -18,6 +18,7 @@ type snapshot = {
 
 (** One Common-lot stock inventory entry. *)
 type position = {
+  id : int;
   code : string;
   cond : string;
   lots : int;
@@ -26,6 +27,14 @@ type position = {
   last_price : float;
   loan_amount : float;
   interest : float;
+}
+
+(** One dated Common-lot stock position detail used as a loan lot. *)
+type position_detail = {
+  code : string;
+  cond : string;
+  date : string;
+  lots : int;
 }
 
 (** Fields supplied for a Common-lot market order. *)
@@ -57,6 +66,13 @@ type trade = {
   order_datetime : string;
 }
 
+(** A dated raw stock-account settlement amount and its T-day offset. *)
+type settlement = {
+  date : string;
+  amount : float;
+  day : int;
+}
+
 (** Shioaji REST root from [SHIOAJI_URL], defaulting to localhost port 8080. *)
 val base_url : unit -> string
 
@@ -69,8 +85,14 @@ val parse_snapshot : string -> snapshot
 (** Parse Common-lot stock positions. *)
 val parse_positions : string -> position list
 
+(** Parse dated Common-lot stock position details. *)
+val parse_position_details : string -> position_detail list
+
 (** Parse settlement cash, raising [Failure] with a non-empty broker error. *)
 val parse_balance : string -> float
+
+(** Parse a list of dated raw stock-account settlement amounts. *)
+val parse_settlements : string -> settlement list
 
 (** Parse the initial result of placing an order. *)
 val parse_placed : string -> placed
@@ -87,11 +109,17 @@ val snapshot : exchange:string -> code:string -> snapshot
 (** Fetch Common-lot stock positions from the default account. *)
 val positions : unit -> position list
 
+(** Fetch dated details for one stock position id from the default account. *)
+val position_details : detail_id:int -> position_detail list
+
 (** Fetch settlement cash from the default stock account. *)
 val balance : unit -> float
+
+(** Fetch dated settlements from the default stock account. *)
+val settlements : unit -> settlement list
 
 (** Submit a Common-lot market order through the default stock account. *)
 val place_order : order_request -> placed
 
-(** Refresh order status and return today's trades for one stock code. *)
+(** Fetch trades and retain today's entries for one stock code. *)
 val orders_today : code:string -> today:string -> trade list

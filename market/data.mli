@@ -35,6 +35,22 @@ val fetch :
   data_dir:string ->
   unit
 
+(** Refresh only TW dividend, cash-dividend, and corporate-action caches
+    through [to_], leaving the price cache unchanged. *)
+val fetch_tw_adjustments :
+  symbol:string ->
+  to_:string ->
+  data_dir:string ->
+  unit
+
+(** Parse a FinMind [TaiwanStockTradingDate] response and return its latest
+    validated calendar date strictly before [before]. *)
+val parse_previous_trading_day : before:string -> string -> string
+
+(** Query a bounded FinMind trading-calendar window and return the latest
+    Taiwan trading date strictly before [before]. *)
+val previous_trading_day : before:string -> string
+
 (** Return the final dated row in a CSV cache, if any. *)
 val last_cached_date : string -> string option
 

@@ -51,8 +51,20 @@ let days_in_month year month =
 
 let parse_date label value =
   try
+    let rec digits index =
+      if index = 10 then true
+      else
+        match index with
+        | 4 | 7 -> digits (index + 1)
+        | _ ->
+            (match value.[index] with
+             | '0' .. '9' -> digits (index + 1)
+             | _ -> false)
+    in
     let () =
-      if String.length value <> 10 || value.[4] <> '-' || value.[7] <> '-' then
+      if String.length value <> 10 || value.[4] <> '-' || value.[7] <> '-'
+         || not (digits 0)
+      then
         raise Exit
     in
     let year = int_of_string (String.sub value 0 4) in
@@ -66,6 +78,8 @@ let parse_date label value =
     year, month, day
   with Failure _ | Exit ->
     failf "invalid %s date %S (expected YYYY-MM-DD)" label value
+
+
 
 let next_date value =
   let year, month, day = parse_date "cached" value in
@@ -196,7 +210,13 @@ let api_url_no_id ~dataset ~from_ ~to_ =
     "https://api.finmindtrade.com/api/v4/data?dataset=%s&start_date=%s&end_date=%s"
     (url_encode dataset) (url_encode from_) (url_encode to_)
 
-let curl_get ~scheme ~token ~url ~output =
+let curl_get ?timeout ~scheme ~token ~url ~output () =
+  let curl_args =
+    match timeout with
+    | None -> []
+    | Some seconds ->
+        ["--connect-timeout"; "10"; "--max-time"; string_of_int seconds]
+  in
   with_temp ".hdr" (fun header_path ->
     let channel = open_out header_path in
     let () =
@@ -209,11 +229,14 @@ let curl_get ~scheme ~token ~url ~output =
     with_temp ".status" (fun status_path ->
       let status =
         run_to_file "/usr/bin/curl"
-          ["-sfS"; "-H"; "@" ^ header_path; "-o"; output;
-           "-w"; "%{http_code}"; url]
+          (["-sfS"] @ curl_args @
+           ["-H"; "@" ^ header_path; "-o"; output;
+            "-w"; "%{http_code}"; url])
           status_path
       in
       status, String.trim (read_text status_path)))
+
+
 
 let jq_message json_path =
   with_temp ".msg" (fun output ->
@@ -250,6 +273,54 @@ let require_price_response json_path process_status http_code =
     match check_api_response json_path with
     | `Ok -> ()
     | `Error message -> failf "FinMind API error: %s" message
+
+let parse_previous_trading_day ~before raw =
+  let () = ignore (parse_date "before" before) in
+  with_temp ".json" (fun json_path ->
+    let output = open_out_bin json_path in
+    let () =
+      Fun.protect
+        ~finally:(fun () -> close_out output)
+        (fun () -> output_string output raw)
+    in
+    match check_api_response json_path with
+    | `Error message -> failf "FinMind API error: %s" message
+    | `Ok ->
+        with_temp ".dates" (fun dates_path ->
+          let expression =
+            ".data | if type != \"array\" or length == 0 then " ^
+            "error(\"missing trading dates\") else .[] | " ^
+            "if type == \"object\" and (.date | type) == \"string\" " ^
+            "then [.date] | @tsv else error(\"invalid trading date\") end end"
+          in
+          let status =
+            run_to_file "/usr/bin/jq" ["-er"; expression; json_path] dates_path
+          in
+          let () =
+            if not (process_ok status) then
+              failwith "invalid FinMind trading calendar response"
+          in
+          let dates =
+            String.split_on_char '\n' (read_text dates_path)
+          in
+          let latest =
+            List.fold_left
+              (fun latest date ->
+                let () = ignore (parse_date "trading calendar" date) in
+                if String.compare date before >= 0 then latest
+                else
+                  match latest with
+                  | None -> Some date
+                  | Some previous ->
+                      Some
+                        (if String.compare date previous > 0 then date
+                         else previous))
+              None dates
+          in
+          match latest with
+          | Some date -> date
+          | None -> failf "no trading date before %s" before))
+
 
 let unquote field =
   let length = String.length field in
@@ -434,7 +505,9 @@ let transform_json ~args ~expression ~json_path ~rows_path =
 let fetch_rows ~token ~dataset ~symbol ~from_ ~to_ ~expression ~consume =
   with_temp ".json" (fun json_path ->
     let url = api_url ~dataset ~symbol ~from_ ~to_ in
-    let process_status, http_code = curl_get ~scheme:"Bearer" ~token ~url ~output:json_path in
+    let process_status, http_code =
+      curl_get ~scheme:"Bearer" ~token ~url ~output:json_path ()
+    in
     let () = require_price_response json_path process_status http_code in
     with_temp ".rows" (fun rows_path ->
       let () = transform_json ~args:[] ~expression ~json_path ~rows_path in
@@ -480,7 +553,9 @@ let fetch_dividends ~token ~symbol ~to_ ~cache_path =
       api_url ~dataset:"TaiwanStockDividendResult" ~symbol
         ~from_:"1900-01-01" ~to_
     in
-    let process_status, http_code = curl_get ~scheme:"Bearer" ~token ~url ~output:json_path in
+    let process_status, http_code =
+      curl_get ~scheme:"Bearer" ~token ~url ~output:json_path ()
+    in
     let keep reason =
       Printf.eprintf "warning: dividend fetch failed (%s); %s\n" reason
         (if Sys.file_exists cache_path then "keeping cached dividend data"
@@ -537,7 +612,9 @@ let fetch_events ~token ~symbol ~to_ ~cache_path =
         if use_data_id then api_url ~dataset ~symbol ~from_:"1900-01-01" ~to_
         else api_url_no_id ~dataset ~from_:"1900-01-01" ~to_
       in
-      let process_status, http_code = curl_get ~scheme:"Bearer" ~token ~url ~output:json_path in
+      let process_status, http_code =
+        curl_get ~scheme:"Bearer" ~token ~url ~output:json_path ()
+      in
       if not (process_ok process_status) || http_code <> "200" then
         let () =
           keep
@@ -588,7 +665,9 @@ let fetch_stockinfo ~token ~symbol ~cache_path =
         "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo&data_id=%s"
         (url_encode symbol)
     in
-    let process_status, http_code = curl_get ~scheme:"Bearer" ~token ~url ~output:json_path in
+    let process_status, http_code =
+      curl_get ~scheme:"Bearer" ~token ~url ~output:json_path ()
+    in
     let keep reason =
       Printf.eprintf "warning: stockinfo fetch failed (%s); %s\n" reason
         (if Sys.file_exists cache_path then "keeping cached stock info"
@@ -1030,7 +1109,9 @@ let fetch_cash_dividends ~token ~symbol ~to_ ~price_cache ~factor_cache
       api_url ~dataset:"TaiwanStockDividend" ~symbol
         ~from_:"1900-01-01" ~to_
     in
-    let process_status, http_code = curl_get ~scheme:"Bearer" ~token ~url ~output:json_path in
+    let process_status, http_code =
+      curl_get ~scheme:"Bearer" ~token ~url ~output:json_path ()
+    in
     let tier_failure =
       match http_code with
       | "400" | "402" | "403" -> Some ("HTTP " ^ http_code)
@@ -1222,7 +1303,7 @@ let fetch_us ~token ~symbol ~from_ ~to_ ~directory =
           (url_encode symbol) (url_encode start) (url_encode stop)
       in
       let status, http =
-        curl_get ~scheme:"Token" ~token ~url ~output:csv_path
+        curl_get ~scheme:"Token" ~token ~url ~output:csv_path ()
       in
       let () =
         if not (process_ok status) || http <> "200" then
@@ -1309,6 +1390,54 @@ let require_token name =
   | Some token when String.trim token <> "" -> token
   | _ -> failf "export %s=\"your_api_token\"" name
 
+let fetch_tw_adjustments_with_token ~token ~symbol ~to_ ~directory =
+  let factor_cache = Filename.concat directory (symbol ^ ".div.csv") in
+  let cash_cache = Filename.concat directory (symbol ^ ".cashdiv.csv") in
+  let () =
+    fetch_dividends ~token ~symbol ~to_ ~cache_path:factor_cache
+  in
+  let () =
+    fetch_cash_dividends ~token ~symbol ~to_
+      ~price_cache:(Filename.concat directory (symbol ^ ".csv"))
+      ~factor_cache ~cache_path:cash_cache
+  in
+  fetch_events ~token ~symbol ~to_
+    ~cache_path:(Filename.concat directory (symbol ^ ".events.csv"))
+
+let fetch_tw_adjustments ~symbol ~to_ ~data_dir =
+  let () = check_symbol symbol in
+  let () = ignore (parse_date "to" to_) in
+  let directory = symbol_directory ~data_dir ~market:"tw" ~symbol in
+  let () = mkdir_p directory in
+  fetch_tw_adjustments_with_token ~token:(require_token "FINMIND_TOKEN")
+    ~symbol ~to_ ~directory
+
+
+let previous_trading_day ~before =
+  let () = ignore (parse_date "before" before) in
+  let () =
+    if before = "0001-01-01" then
+      failf "no trading date before %s" before
+  in
+  let rec start_date remaining date =
+    if remaining = 0 || date = "0001-01-01" then date
+    else start_date (remaining - 1) (previous_date date)
+  in
+  let token = require_token "FINMIND_TOKEN" in
+  let url =
+    api_url_no_id ~dataset:"TaiwanStockTradingDate"
+      ~from_:(start_date 366 before) ~to_:(previous_date before)
+  in
+  with_temp ".json" (fun json_path ->
+    let process_status, http_code =
+      curl_get ~timeout:60 ~scheme:"Bearer" ~token ~url
+        ~output:json_path ()
+    in
+    let () =
+      require_price_response json_path process_status http_code
+    in
+    parse_previous_trading_day ~before (read_text json_path))
+
 let fetch ~market ~symbol ~from_ ~to_ ~data_dir =
   let market = market_name market in
   let () = check_symbol symbol in
@@ -1325,23 +1454,12 @@ let fetch ~market ~symbol ~from_ ~to_ ~data_dir =
       fetch_us ~token ~symbol ~from_ ~to_ ~directory
   | "tw" ->
       let token = require_token "FINMIND_TOKEN" in
-      let price_cache = Filename.concat directory (symbol ^ ".csv") in
-      let factor_cache = Filename.concat directory (symbol ^ ".div.csv") in
-      let cash_cache = Filename.concat directory (symbol ^ ".cashdiv.csv") in
       let () =
         fetch_tw_prices ~token ~symbol ~from_ ~to_
-          ~cache_path:price_cache
+          ~cache_path:(Filename.concat directory (symbol ^ ".csv"))
       in
       let () =
-        fetch_dividends ~token ~symbol ~to_ ~cache_path:factor_cache
-      in
-      let () =
-        fetch_cash_dividends ~token ~symbol ~to_ ~price_cache ~factor_cache
-          ~cache_path:cash_cache
-      in
-      let () =
-        fetch_events ~token ~symbol ~to_
-          ~cache_path:(Filename.concat directory (symbol ^ ".events.csv"))
+        fetch_tw_adjustments_with_token ~token ~symbol ~to_ ~directory
       in
       let market_dir = Filename.concat data_dir market in
       fetch_stockinfo ~token ~symbol

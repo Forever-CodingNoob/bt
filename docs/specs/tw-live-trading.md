@@ -1,61 +1,84 @@
 # Design: TW live trading via Shioaji
 
 Date: 2026-09-06
-Status: approved
+Status: partially implemented; TW simulation is implemented and TW production is blocked
+
+> [!IMPORTANT]
+> TW production stops before sizing until real-account cash and settlement accounting is verified.
+
+## Contents
+
+- [Goal](#goal)
+- [Decisions](#decisions)
+- [Verified Shioaji facts](#verified-shioaji-facts)
+- [Modules](#modules)
+- [Daily cycle](#daily-cycle)
+- [Safety and failure](#safety-and-failure)
+- [Command surface](#command-surface)
+- [Testing and verification](#testing-and-verification)
+- [Docs](#docs)
+- [Authoritative sources](#authoritative-sources)
+- [Non-goals](#non-goals)
 
 ## Goal
 
-Extend `bt live` and `bt target` to the Taiwan market through SinoPac's Shioaji API, so the same strategies validated by the daily backtester run live with the same sizing, including margin financing. The US path, the daily engine, `bt fetch`, and all backtest outputs stay byte-identical.
+Extend `bt live` and `bt target` to the Taiwan market through SinoPac's Shioaji API, so the same strategies validated by the daily backtester use the same planner for DAILY execution, including margin financing. The implemented milestone is simulation only. Production remains required and blocked on verified real-money accounting. The US path, the daily engine, `bt fetch`, and all backtest outputs stay byte-identical.
 
-## Decisions (settled during design)
+## Decisions
 
-- Fill discipline: decide at 13:20 Taipei on the live near-close quote and submit immediately into continuous trading. The backtester's close-fill assumption is a stand-in for "the price minutes before the close" (FinMind has no intraday data), so this is its honest live realization. Orders are not held for the 13:25-13:30 closing call and the after-hours fixed-price session is not used.
+- Fill discipline: decide at 13:20 Taipei on the live near-close quote and submit immediately into continuous trading. The backtester's close-fill assumption is a stand-in for "the price minutes before the close" because FinMind daily data has no intraday bar. Orders are not held for the 13:25-13:30 closing call and the after-hours fixed-price session is not used.
+- Order discipline: every Common-lot leg is `price_type: MKT`, `order_type: IOC`, and `price: 0`, matching the official Shioaji stock-order fields. The executor rechecks the session and the `< 13:25` cutoff before every order and while polling it.
 - Margin from day one: exposure the engine funds with an exchange-ratio loan goes out as `order_cond: MarginTrading`; cash-inventory exposure as `order_cond: Cash`. The broker runs the actual loans, interest, and maintenance; bt's maintenance and call machinery stays backtest-only.
-- Engine alignment: the daemon does not reinvent sizing. The engine's per-bar fill planner (cash-first buys, standard-ratio loans, sell allocation across the two inventories) is extracted into an exported pure function, `Engine.run` partially applies it, and the daemon calls it with live account state. Behavior preservation is proven by the TW byte-identity gate.
-- Transport: the official Shioaji HTTP server (`shioaji server start`, a local Rust binary reading a `.env` with `SJ_API_KEY`, `SJ_SEC_KEY`, `SJ_CA_PATH`, `SJ_CA_PASSWD`, `SJ_PRODUCTION`) on `http://localhost:8080`. bt speaks curl+jq to it exactly as it does to Tiingo and Alpaca; no Python enters bt and no opam dependency is added. The server process is the one external prerequisite.
-- Board lots only: quantities are floored to `Common` lots of 1000 shares; the remainder is logged. Odd lots are a non-goal.
-- One strategy, one stock account; simulation by default, `--live` for production.
+- Engine alignment: the daemon does not reinvent sizing. The engine's per-bar fill planner is an exported pure function used by both `Engine.run` and TW decision planning. TW execution additionally floors lots and applies confirmed-fill cash and inventory constraints between orders.
+- Transport: the official Shioaji HTTP server (`shioaji server start`) reads its local `.env` with `SJ_API_KEY`, `SJ_SEC_KEY`, `SJ_CA_PATH`, `SJ_CA_PASSWD`, and `SJ_PRODUCTION`. `bt` reaches it through `SHIOAJI_URL`, default `http://localhost:8080`, using curl and jq; `SJ_API_KEY` and `SJ_SEC_KEY` must be available to both processes, while the CA path, CA password, and production setting remain server-only.
+- Board lots only: quantities are floored to `Common` lots of 1000 shares; the remainder is logged and retained. Odd lots are a non-goal.
+- One strategy, one stock account; simulation by default, `--live` requests production. Production currently fails at the accounting blocker before sizing or submission.
 
-## Verified Shioaji facts (sinotrade.github.io, 2026-09-06)
+## Verified Shioaji facts
 
-- Server: `shioaji server start` reads `.env`, logs in, activates the CA, serves REST on port 8080. `GET /api/v1/info` returns `{"simulation": bool, ...}`. `SJ_PRODUCTION=false` (or unset) is simulation.
-- Simulation APIs: `snapshots`, `kbars`, `place_order`, `update_order`, `cancel_order`, `update_status`, `list_trades`, `list_positions`, `list_profit_loss`. `account_balance` is NOT available in simulation. Simulation does not support odd lots.
-- Snapshot: `POST /api/v1/data/snapshots` with `{"contracts":[{"security_type":"STK","exchange":"TSE"|"OTC","code":"..."}]}`; response array with `datetime` (ISO, Taipei local), `open`, `high`, `low`, `close` (last), `buy_price`, `sell_price`, `total_volume`. Documented as a request-type query, not a feed: the daemon calls it at most twice a day.
-- Place order: `POST /api/v1/order/place_order` with `contract` (as above) and `stock_order` `{action: Buy|Sell, price, quantity (lots), price_type: LMT|MKT, order_type: ROD|IOC|FOK, order_lot: Common|Fixing|Odd|IntradayOdd, order_cond: Cash|MarginTrading|ShortSelling|..., custom_field (6 alphanumerics), account}`. Response is a Trade with `order.id`, `status.status` (`PendingSubmit` initially).
-- Order status: `POST /api/v1/order/update_status` with `{"account": {broker_id, account_id}}` returns Trades with `status.status` in `{Cancelled, Filled, PartFilled, Inactive, Failed, PendingSubmit, PreSubmitted, Submitted}`, `order_quantity`, `deal_quantity`, `deals[].price`, and `order_datetime` (ISO +08:00). `custom_field` is not echoed in responses.
-- Positions: `POST /api/v1/portfolio/position_unit` with `{"account_type":"S","unit":"Common"}` returns per position `code`, `direction`, `quantity` (lots under `Common`), `price`, `last_price`, `yd_quantity`, `cond` in `{Cash, Netting, MarginTrading, ShortSelling, Emerging}`, `margin_purchase_amount`, `collateral`, `interest`.
-- Balance: `POST /api/v1/portfolio/account_balance` returns `acc_balance` (settlement account cash), `date`, `errmsg`. Production only.
-- Accounts: login returns stock and futures accounts with `signed`; orders default to the server's default stock account when `account` is omitted.
-- CA: required for production orders; absent CA means the server refuses orders, not bt.
+- The official HTTP-server setup documents `shioaji server start`, the local `.env`, port 8080, and `GET /api/v1/info` with a `simulation` field. `SJ_PRODUCTION=false` or unset is simulation; `true` is production.
+- The official simulation page lists the APIs supported in simulation. Its omission of `account_balance` is not treated here as proof of runtime behavior. The implemented simulation path does not call `account_balance`; it requires user-supplied `--equity`.
+- Snapshot: `POST /api/v1/data/snapshots` with `{"contracts":[{"security_type":"STK","exchange":"TSE"|"OTC","code":"..."}]}` returns a snapshot array with `datetime`, `open`, `high`, `low`, `close`, `buy_price`, `sell_price`, and `total_volume`.
+- Place order: `POST /api/v1/order/place_order` accepts contract data and stock-order fields including `action`, `price`, `quantity`, `price_type`, `order_type`, `order_lot`, `order_cond`, `custom_field`, and optional `account`. The official stock-order reference permits `MKT` and `IOC`; the implemented request uses `price: 0`, `MKT`, `IOC`, and `Common`.
+- Order status: `POST /api/v1/order/trades` with `{}` returns trades with order identity, status, order and deal quantities, deal prices, and either a string `status.order_datetime` or numeric epoch-seconds `status.order_ts`. A placement initially reported as `PendingSubmit` must be queried through this endpoint before its result is known.
+- Positions: `POST /api/v1/portfolio/position_unit` with `{"account_type":"S","unit":"Common"}` returns position condition, Common-lot quantity, last price, margin purchase amount, and interest used by simulation planning.
+- Position details: authenticated `POST /api/v1/portfolio/position_detail` with `{"account_type":"S","detail_id":ID}` uses the aggregate position's integer `id` and returns dated per-lot stock details. A read-only `detail_id:0` probe returned `[]` for the empty account.
+- Balance and settlements: the client parses `acc_balance` and dated T-day settlement amounts for future production work. Their real-money sign and inclusion relationship are unresolved, so neither is used to size production.
+- Accounts: orders omit `account` and therefore use the server's default stock account.
+- CA: the official setup requires `SJ_CA_PATH` and `SJ_CA_PASSWD` for production order placement. This prerequisite does not remove bt's separate production accounting blocker.
 
 ## Modules
 
-Per-concern layout; every new module ships its `.mli`.
+The implemented layout is:
 
-- `broker/shioaji.ml` + `.mli` (new): REST client. Base URL from `SHIOAJI_URL` (default `http://localhost:8080`), no credentials in bt. Surface: `info`, `snapshot ~exchange ~code`, `positions` (parsed into cash and margin entries with lots, loan amount, interest), `balance`, `place_order` (typed record for the stock_order fields), `orders_today ~code` (via `update_status` then `list_trades`, filtered by `order_datetime` date and code), all with pure parse functions over recorded JSON.
-- `engine/engine.ml` + `.mli` (extraction only): the per-bar fill planner lifted to a top-level exported pure function with explicit state arguments; `run` partially applies it at its existing call site. Exact shape pinned from the code at implementation time. No behavior change.
-- `broker/live.ml` (additive arms): `decide` and the daemon gain `| "tw" ->` arms; the `"us"` arms are untouched. Market-neutral cycle pieces (logging, fail-safe wrapper, query-then-submit shape) are reused.
-- `market/data.ml`: read-only reuse of the stockinfo classification to map a symbol to `TSE` or `OTC` (the same table that resolves the financing ratio).
-- `bin/bt.ml`: no new subcommand. `bt live` and `bt target` stop rejecting `tw`; new flags `--equity TWD` (required in simulation, rejected in production) and the existing `--live`.
+- `broker/shioaji.ml` + `.mli`: REST client for server info, snapshots, aggregate positions, dated position details, balance, settlements, Common-lot order placement, and today's trades. The base URL comes from `SHIOAJI_URL`; `SJ_API_KEY` and `SJ_SEC_KEY` authenticate trading endpoints, while server information remains unauthenticated.
+- `engine/engine.ml` + `.mli`: exported pure fill planner used by the unchanged daily engine path and TW decision planning.
+- `broker/live.ml` + `.mli`: TW decision, independent-calendar preparation, 18-month position-detail rollover planning, simulation daemon, Common-lot translation, and sequential confirmed-fill execution beside the unchanged US arms.
+- `market/data.ml` + `.mli`: FinMind `TaiwanStockTradingDate` query for the latest trading day strictly before the session plus adjustment-only refresh through the current session without advancing raw prices.
+- `bin/bt.ml`: `bt live` and `bt target` accept TW and expose `--equity TWD`; production mode remains blocked after the server-mode guard.
 
-## Daily cycle (Asia/Taipei, fixed +8, no DST)
+## Daily cycle
 
-1. Wake. Weekend: sleep to Monday 13:00. Weekday: at 13:05 probe the snapshot; a `datetime` not dated today means a holiday: sleep to tomorrow.
-2. 13:05: run the existing FinMind fetch for the symbol; verify the cache's last date equals the previous trading session (the snapshot's `datetime` date minus one session, derived from the cache calendar). Stale means no trade today.
-3. 13:20: snapshot gives the near-close quote and today's running OHLC. Build the provisional bar (close = `close`, or the bid/ask midpoint when `close` is stale), append it, evaluate through the unchanged DSL and engine path, and take the final-bar target through `Engine.effective_targets` with the TW profile.
-4. Read live state: positions (cash lots, margin lots, loan amount, interest) and equity (production: `acc_balance` plus position values minus loans and interest; simulation: `--equity`). Convert lots to shares. Call the extracted engine planner with that state and the target; receive planned buys and sells per inventory in shares.
-5. Translate to orders: floor each leg to lots; drop legs below one lot with a log line; submit each remaining leg immediately as `price_type: MKT`, `order_type: ROD`, `order_lot: Common`, `order_cond` per inventory (`Cash` or `MarginTrading`), `custom_field` = `bt` + `MMDD`. Sells of margin inventory go out as `MarginTrading` sells (the broker repays the loan), cash-inventory sells as `Cash`.
-6. After 13:30: `update_status`; log each leg's status, `deal_quantity`, and deal price; sleep to the next session.
+Implemented TW simulation behavior, using fixed UTC+8 Asia/Taipei wall time:
 
-Dedup: before step 5, `orders_today ~code` non-empty means today's plan was already submitted (possibly partially); log and skip. A crash between legs therefore never double-submits; the next session's plan starts from read-back positions and self-corrects.
+1. On weekends, sleep toward Monday. On a weekday at or after 13:05, require a Shioaji snapshot dated today. A holiday or stale snapshot fails the day's cycle without trading.
+2. Query FinMind's independent `TaiwanStockTradingDate` dataset for the latest session strictly before today. Fetch prices through that date, refresh dividend factors, cash dividends, and corporate-action events through today, and require the loaded price cache to end exactly at the previous session. Cached price dates are never used as the calendar.
+3. At 13:20, request a fresh snapshot and validate its session plus internally consistent finite positive OHLCV fields. Build the provisional bar, evaluate the unchanged DSL path, and compute the final effective TW target.
+4. Read Common-lot aggregate positions and dated `position_detail` rows for each margin position id. Simulation takes total equity from required `--equity TWD` and infers cash as equity minus cash inventory value minus margin inventory value plus loan principal plus interest. A nonzero holding in another symbol is rejected. Production stops before this step because truthful real-account equity and spendable cash are not established.
+5. For each dated `MarginTrading` lot at or beyond the engine's 18-calendar-month, month-end-clamped maturity, prepend a margin sell/rebuy pair before ordinary cash and margin planner legs. Floor every leg to 1000-share Common lots and retain the remainder.
+6. Before each leg, require the Taipei date to remain the planned date and `13:20:00 <= now < 13:25:00`. Submit `MKT` + `IOC`, then refresh and poll its status. A successor is eligible only after one matching order record confirms the predecessor's complete fill and finite positive weighted price.
+7. Carry cash and inventory forward from confirmed fills. A refinance rebuy requires its entire original lot count to remain funded. A capped ordinary buy stops with its remainder and every later leg unsubmitted. After 13:30, query and log today's resulting trades.
+
+The pre-plan query for today's orders is conservative deduplication, not an exactly-once guarantee. A crash between orders or two concurrent daemons can still leave ambiguous exposure. A refinance sell and rebuy are sequential orders, not atomic. If a matured lot's sale cannot fund its complete Common-lot rebuy, dependent-leg gating stops after the sale; unlike the fractional daily engine, the daemon does not partially restore that lot.
 
 ## Safety and failure
 
-- Fail-safe: any failure (server unreachable, stale cache, stale snapshot, evaluation error, rejected leg) ends the day's cycle with one ASCII log line and no further action. No retries into the closing call window. A partially filled multi-leg plan is logged and left for the next session.
-- Mode: simulation by default. `--live` refuses to start unless `info.simulation` is false. In simulation, `--equity TWD` is required and its value is logged on every decision so simulated sizing is never mistaken for account truth; in production, `--equity` is a usage error and equity comes from the broker.
-- Startup banner: mode, broker and account id, equity source and value.
-- No state file: the account is the state.
-- Logging: append-only ASCII, one line per decision with date, fetched-through date, provisional close, target, equity, cash lots, margin lots, loan, planned legs, submitted or skip reason, and fill results.
+- Fail-safe: an unavailable server, calendar or fetch failure, stale cache, stale or invalid snapshot, evaluation error, unsupported inventory, order-placement uncertainty, missing or ambiguous status, mismatched order fields, partial or failed fill, timeout, or cutoff stops every remaining leg. The daemon logs any observed trade and resulting exposure.
+- Confirmation: the executor never infers a fill from successful POST return. It requires the placed order ID and one refreshed matching trade with `Filled`, full deal lots, and a finite positive weighted price before submitting a successor.
+- Mode: simulation requires `--equity TWD` and `info.simulation = true`. Production rejects `--equity` and requires `info.simulation = false`, then intentionally raises the accounting blocker before sizing.
+- Startup: implemented TW startup logs simulation mode, Shioaji, the default account, and override equity. No production startup claim is made.
+- No local state file: read-back account and trade state drive each cycle, subject to the documented lack of an exactly-once concurrent-process guarantee.
+- Production requirement: TW must trade DAILY even with pending payments. Skipping sessions merely because a T+0, T+1, or T+2 settlement exists is not an acceptable implementation.
 
 ## Command surface
 
@@ -64,22 +87,29 @@ bt live STRAT [--live] [--equity TWD] [--data-dir DIR]
 bt target STRAT [--live] [--equity TWD] [--data-dir DIR] [--provisional-close PRICE]
 ```
 
-The market arm is chosen from the strategy's `stock "tw/..."` declaration. `--provisional-close` works for tw as it does for us (fabricated snapshot, session date from the local Taipei clock). `SHIOAJI_URL` overrides the server address.
+The market arm is chosen from the strategy's `stock "tw/..."` declaration. `--provisional-close` supplies a TW provisional price dated from the local Taipei clock, but still enforces server mode, independent-calendar lookup, historical fetch, and exact cache freshness. `SHIOAJI_URL` overrides the server address.
 
 ## Testing and verification
 
-- Fixture tests for every Shioaji JSON shape (info, snapshot, positions with mixed Cash and MarginTrading entries, balance, place_order response, update_status trades) through the production parse functions; no network in tests.
-- Engine planner extraction: red test that the extracted function reproduces the planner's decisions on a hand-derived two-inventory case; TW byte-identity gate proves `run` unchanged.
-- Pure tests: Taipei schedule arithmetic (weekend, 13:05, 13:20, post-13:30 phases), lot flooring with remainder, TSE/OTC mapping, equity derivation from balance and positions, dedup predicate on `order_datetime` dates.
-- Plan translation: hand-derived cases for target 0 -> 1.0 (cash leg only), 1.0 -> 2.0 (margin leg), 2.0 -> 0 (two sells), and a sub-lot remainder.
-- Gates at every commit, all in the `/sandbox/stock-tw-live` worktree: build clean, suite green, TW byte-identity against the standing reference; `/sandbox/stock` is never built.
-- Smoke: requires the user's SinoPac API key and a running `shioaji server` in simulation; `bt target` on the TW strategy first, then supervised `bt live` sessions. Recorded as exact commands and deferred when absent.
+- Offline fixtures cover Shioaji server info, snapshots, mixed cash and margin positions, balance, settlements, placement responses, and refreshed trade statuses through production parsers.
+- The exported engine planner has hand-derived two-inventory checks; the TW daily backtest output remains byte-identical to the standing reference.
+- Calendar checks cover strict FinMind response parsing and a Tuesday-after-Monday-holiday previous session. TW decisions require the independent previous session and exact cache end date.
+- Execution checks cover zero-lot plans; full sequential sell, refinance, and buy progress; confirmed-price cash updates; partial, failed, missing, mismatched, ambiguous, and timed-out statuses; cutoff before a successor; capped buys; and retained residual legs.
+- Run one Shioaji network smoke against a simulation server; record the server version, commands, and output in the Task 4 report.
 
 ## Docs
 
-- docs/cli.md: TW subsections under `bt live` and `bt target` (server prerequisite, `.env` fields, `SHIOAJI_URL`, `--equity`, mode mapping), in the CONTRIBUTING.md documentation style.
-- docs/engine.md: TW gap section gains the live counterpart (13:20 decision, near-close continuous fill, lot flooring, unfilled-leg handling, simulation equity caveat).
-- CHANGELOG.md: Added entry under [Unreleased].
+- `docs/cli.md` documents TW target and daemon simulation, server environment, mode guards, `--equity`, lot flooring, confirmed-fill execution, and the production blocker.
+- `docs/engine.md` distinguishes the daily close-fill backtest from the TW simulation daemon.
+- `CHANGELOG.md` records simulation support and the unresolved production requirement under `[Unreleased]`.
+
+## Authoritative sources
+
+- [Shioaji HTTP server setup](https://sinotrade.github.io/env_setup/other/) documents installation, `.env` fields, server mode, CA activation, port 8080, and the info endpoint.
+- [Shioaji simulation](https://sinotrade.github.io/tutor/simulation/) documents the simulation environment and its supported API list; this design does not infer undocumented `account_balance` behavior from that list.
+- [Shioaji stock orders](https://sinotrade.github.io/tutor/order/Stock/) documents `MKT`, `IOC`, `Common`, order conditions, placement, and status refresh.
+- [FinMind Taiwan technical datasets](https://finmind.github.io/tutor/TaiwanMarket/Technical/#taiwanstocktradingdate) documents the independent `TaiwanStockTradingDate` dataset.
+- [TWSE trading mechanism](https://www.twse.com.tw/en/products/system/trading.html) documents continuous trading through 13:25 and the 13:25-13:30 closing call.
 
 ## Non-goals
 

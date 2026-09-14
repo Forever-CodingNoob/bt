@@ -14,8 +14,8 @@ let usage =
    \              [--from D] [--to D] [-p name=value] [--capital USD]\n\
    \              [--fee-bps F] [--tax-bps F] [--slip-bps F] [--per-share-fee F] [--per-share-cap F]\n\
    \              [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]\n\
-   \  bt target STRAT [--live] [--data-dir DIR] [--provisional-close PRICE]\n\
-   \  bt live STRAT [--live] [--data-dir DIR]"
+   \  bt target STRAT [--live] [--equity TWD] [--data-dir DIR] [--provisional-close PRICE]\n\
+   \  bt live STRAT [--live] [--equity TWD] [--data-dir DIR]"
 
 let help =
   usage ^
@@ -690,13 +690,28 @@ let print_decision provisional_close (decision : Live.decision) =
   | Live.Skip reason ->
       Printf.printf "action: skip\n";
       Printf.printf "reason: %s\n" reason
+  | Live.Orders legs ->
+      let () = Printf.printf "action: orders\n" in
+      List.iter
+        (fun (leg : Live.leg) ->
+          Printf.printf "leg: %s %s %d\n" leg.action leg.cond leg.lots)
+        legs
 
 let live_command_args command extra_options argv =
   let strat_path = ref None in
   let use_live = ref false in
   let data_dir = ref "data" in
+  let equity = ref None in
   let rec options () =
-    [ ("--live", Arg.Set use_live, "use the live Alpaca account");
+    [ ("--live", Arg.Set use_live, "use the selected broker in production");
+      ("--equity",
+       Arg.Float
+         (fun value ->
+           if Float.is_finite value && value > 0. then
+             equity := Some value
+           else
+             raise (Arg.Bad "--equity must be a positive float")),
+       "simulation account equity in TWD");
       ("--data-dir", Arg.Set_string data_dir, "cache directory");
       ("-h",
        Arg.Unit
@@ -739,15 +754,25 @@ let live_command_args command extra_options argv =
           (Printf.sprintf
              "%s: strategy must declare exactly one stock" command)
   in
+  let mode = if !use_live then Live.Live else Live.Paper in
   match market with
   | "us" ->
-      let mode =
-        match !use_live with
-        | false -> Live.Paper
-        | true -> Live.Live
-      in
-      strat_path, mode, !data_dir
-  | "tw" | _ -> usage_error "live trading supports us only"
+      (match !equity with
+       | None -> strat_path, market, mode, None, !data_dir
+       | Some _ -> usage_error "--equity is only available for tw")
+  | "tw" ->
+      (match mode, !equity with
+       | Live.Paper, None -> usage_error "simulation mode requires --equity"
+       | Live.Live, Some _ ->
+           usage_error "--equity is not allowed in production"
+       | Live.Paper, Some _ | Live.Live, None ->
+           strat_path, market, mode, !equity, !data_dir)
+  | _ -> usage_error "live trading supports us and tw only"
+
+let taipei_date () =
+  let local = Unix.gmtime (Unix.gettimeofday () +. (8. *. 60. *. 60.)) in
+  Printf.sprintf "%04d-%02d-%02d"
+    (local.tm_year + 1900) (local.tm_mon + 1) local.tm_mday
 
 let target argv =
   let provisional_close = ref None in
@@ -763,20 +788,34 @@ let target argv =
                   "--provisional-close must be a positive float")),
        "override the provisional close with a positive price") ]
   in
-  let strat_path, mode, data_dir =
+  let strat_path, market, mode, equity, data_dir =
     live_command_args "target" extra_options argv
   in
-  let clock = Alpaca.clock mode in
   let decision =
-    Live.decide ?provisional_close:!provisional_close mode
-      ~session_date:(Live.timestamp_date clock.timestamp)
-      ~strat_path ~data_dir
+    match market with
+    | "us" ->
+        let clock = Alpaca.clock mode in
+        Live.decide ?provisional_close:!provisional_close mode
+          ~session_date:(Live.timestamp_date clock.timestamp)
+          ~strat_path ~data_dir
+    | "tw" ->
+        let info = Shioaji.info () in
+        let () =
+          match Live.tw_startup_ok mode ~equity info with
+          | Ok () -> ()
+          | Error reason -> failwith reason
+        in
+        Live.decide ?provisional_close:!provisional_close ?equity mode
+          ~session_date:(taipei_date ()) ~strat_path ~data_dir
+    | _ -> assert false
   in
   print_decision !provisional_close decision
 
 let live argv =
-  let strat_path, mode, data_dir = live_command_args "live" [] argv in
-  Live.run mode ~strat_path ~data_dir
+  let strat_path, _, mode, equity, data_dir =
+    live_command_args "live" [] argv
+  in
+  Live.run ?equity mode ~strat_path ~data_dir
 
 let fetch_minute argv =
   let symbol = ref None in

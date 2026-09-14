@@ -2295,6 +2295,48 @@ let test_tiingo_token_required () =
   in
   ()
 
+let test_tw_adjustment_refresh_horizon () =
+  with_temp_market "tw" (fun data_dir tw_dir ->
+    let symbol_dir = Filename.concat tw_dir "2330" in
+    let () = Unix.mkdir symbol_dir 0o700 in
+    let write name contents =
+      let output = open_out (Filename.concat symbol_dir name) in
+      Fun.protect
+        ~finally:(fun () -> close_out output)
+        (fun () -> output_string output contents)
+    in
+    let () =
+      write "2330.csv"
+        "date,open,high,low,close,volume\n\
+         2026-05-21,100,100,100,100,1000\n\
+         2026-05-22,100,100,100,100,1000\n"
+    in
+    let () = write "2330.div.csv" "date,factor\n" in
+    let () =
+      write "2330.events.csv" "date,factor\n2026-05-26,0.5\n"
+    in
+    let () =
+      write "2330.cashdiv.csv" "ex_date,cash_per_share,pay_date\n"
+    in
+    let asset =
+      Data.load_asset ~market:"tw" ~symbol:"2330" ~from_:None
+        ~to_:(Some "2026-05-22") ~data_dir
+    in
+    (* A current-session action must adjust the previous-session signal plane. *)
+    let () = assert_close 50. asset.Data.signal.(1).c in
+    let saved = Sys.getenv_opt "FINMIND_TOKEN" in
+    let () = Unix.putenv "FINMIND_TOKEN" "" in
+    Fun.protect
+      ~finally:(fun () ->
+        match saved with
+        | Some value -> Unix.putenv "FINMIND_TOKEN" value
+        | None -> Unix.putenv "FINMIND_TOKEN" "")
+      (fun () ->
+        assert_failure (fun () ->
+          Data.fetch_tw_adjustments ~symbol:"2330" ~to_:"2026-05-26"
+            ~data_dir)))
+
+
 let test_tiingo_transform () =
   (* Build a small Tiingo CSV fixture: a split, a dividend, and a normal row. *)
   let csv =
@@ -4456,29 +4498,53 @@ let test_live_startup_guard () =
 
 let test_live_commands_reject_tw () =
   let binary = locate ["_build/default/bin/bt.exe"; "../bin/bt.exe"] in
-  List.iter
-    (fun subcommand ->
-      let stderr_path =
-        Filename.temp_file ("bt-test-" ^ subcommand ^ "-") ".txt"
-      in
-      Fun.protect
-        ~finally:(fun () ->
-          if Sys.file_exists stderr_path then Sys.remove stderr_path)
-        (fun () ->
-          with_temp_strategy "stock \"tw/00685L\"\ntarget 1.0\n" (fun path ->
-            let command =
-              String.concat " "
-                [ Filename.quote binary;
-                  subcommand;
-                  Filename.quote path;
-                  ">/dev/null";
-                  "2>" ^ Filename.quote stderr_path ]
-            in
-            assert (Sys.command command = 2);
-            assert
-              (contains (read_file stderr_path)
-                 "live trading supports us only"))))
-    ["target"; "live"]
+  let stderr_path = Filename.temp_file "bt-test-tw-equity-" ".txt" in
+  Fun.protect
+    ~finally:(fun () ->
+      if Sys.file_exists stderr_path then Sys.remove stderr_path)
+    (fun () ->
+      with_temp_strategy "stock \"tw/00685L\"\ntarget 1.0\n" (fun path ->
+        let command =
+          String.concat " "
+            [ Filename.quote binary;
+              "target";
+              Filename.quote path;
+              ">/dev/null";
+              "2>" ^ Filename.quote stderr_path ]
+        in
+        (* Omitting required TW simulation equity is a CLI usage error, exit 2. *)
+        let () = assert (Sys.command command = 2) in
+        match String.split_on_char '\n' (read_file stderr_path) with
+        (* The first stderr line states the missing-equity contract verbatim. *)
+        | first :: _ -> assert (first = "simulation mode requires --equity")
+        | [] -> assert false))
+
+let test_tw_live_rejects_production_equity () =
+  let binary = locate ["_build/default/bin/bt.exe"; "../bin/bt.exe"] in
+  let stderr_path = Filename.temp_file "bt-test-tw-live-equity-" ".txt" in
+  Fun.protect
+    ~finally:(fun () ->
+      if Sys.file_exists stderr_path then Sys.remove stderr_path)
+    (fun () ->
+      with_temp_strategy "stock \"tw/00685L\"\ntarget 1.0\n" (fun path ->
+        let command =
+          String.concat " "
+            [ Filename.quote binary;
+              "target";
+              Filename.quote path;
+              "--live";
+              "--equity";
+              "1000000";
+              ">/dev/null";
+              "2>" ^ Filename.quote stderr_path ]
+        in
+        (* Supplying simulation equity with --live is a CLI usage error, exit 2. *)
+        let () = assert (Sys.command command = 2) in
+        match String.split_on_char '\n' (read_file stderr_path) with
+        | first :: _ ->
+            (* The first stderr line states the production-equity contract. *)
+            assert (first = "--equity is not allowed in production")
+        | [] -> assert false))
 
 let test_target_rejects_invalid_provisional_close () =
   let binary = locate ["_build/default/bin/bt.exe"; "../bin/bt.exe"] in
@@ -4940,6 +5006,1084 @@ let test_intraday_session_boundaries () =
     assert (result.fills = []))
     [Engine.Close_same; Engine.Open_next]
 
+
+let test_engine_fill_planner () =
+  let plan ~cash ~cash_value ~margin_value ~loan ~previous target =
+    Engine.plan_fills ~costs:[| zero_costs |] ~capital:(Some 1000000.)
+      ~financing_ratios:[| 0.6 |]
+      ~state:
+        { Engine.equity = 1000000.; cash;
+          cash_values = [| cash_value |];
+          margin_values = [| margin_value |];
+          loans = [| loan |]; interests = [| 0. |];
+          tail_interests = [| 0. |]; debt = 0.; receivables = 0.;
+          previous_targets = [| previous |] }
+      ~prices:[| 10. |] ~targets:[| target |] ~force:false
+  in
+  let entry =
+    (plan ~cash:1000000. ~cash_value:0. ~margin_value:0.
+       ~loan:0. ~previous:0. 1.).Engine.planned_assets.(0)
+  in
+  (* TWD 1,000,000 / TWD 10 = 100,000 cash shares. *)
+  let () = assert_close 100000. (entry.Engine.plan_buy_cash /. 10.) in
+  (* A 1x unlevered entry needs no margin purchase. *)
+  let () = assert_close 0. entry.Engine.plan_buy_margin in
+  let scale_in =
+    (plan ~cash:0. ~cash_value:1000000. ~margin_value:0.
+       ~loan:0. ~previous:1. 2.).Engine.planned_assets.(0)
+  in
+  (* The 2x target adds TWD 1,000,000 / TWD 10 = 100,000 margin shares. *)
+  let () =
+    assert_close 100000. (scale_in.Engine.plan_buy_margin /. 10.)
+  in
+  (* The 60% financing ratio borrows 0.6 * TWD 1,000,000 = TWD 600,000. *)
+  let () =
+    assert_close 600000. (0.6 *. scale_in.Engine.plan_buy_margin)
+  in
+  (* The down payment is 0.4 * TWD 1,000,000 = TWD 400,000. *)
+  let () = assert_close 400000. scale_in.Engine.plan_down_payment in
+  let exit =
+    (plan ~cash:0. ~cash_value:(1000000. /. 3.)
+       ~margin_value:(5000000. /. 3.) ~loan:1000000.
+       ~previous:2. 0.).Engine.planned_assets.(0)
+  in
+  (* TWD 5/3m margin inventory / TWD 10 = 500,000/3 shares. *)
+  let () =
+    assert_close (500000. /. 3.) (exit.Engine.plan_sell_margin /. 10.)
+  in
+  (* TWD 1/3m cash inventory / TWD 10 = 100,000/3 shares. *)
+  let () =
+    assert_close (100000. /. 3.) (exit.Engine.plan_sell_cash /. 10.)
+  in
+  (* Selling all margin inventory repays the full TWD 1,000,000 loan. *)
+  assert_close 1000000. exit.Engine.plan_repayment
+
+
+let shioaji_fixture name =
+  read_file
+    (locate
+       [Filename.concat "test/fixtures/shioaji" name;
+        Filename.concat "fixtures/shioaji" name])
+
+let test_shioaji_info_parse () =
+  let actual = Shioaji.parse_info (shioaji_fixture "info.json") in
+  (* Expected values are copied from the documented server info response. *)
+  let expected : Shioaji.info =
+    { simulation = false; version = "1.7.2" }
+  in
+  assert (actual = expected)
+
+let test_shioaji_snapshot_parse () =
+  let actual = Shioaji.parse_snapshot (shioaji_fixture "snapshot.json") in
+  (* Expected values are copied from the documented 2330 snapshot row. *)
+  let expected : Shioaji.snapshot =
+    { datetime = "2026-05-18T14:30:00";
+      open_ = 2225.;
+      high = 2260.;
+      low = 2215.;
+      close = 2240.;
+      bid = 2240.;
+      ask = 2245.;
+      total_volume = 25820. }
+  in
+  assert (actual = expected)
+
+let test_shioaji_positions_parse () =
+  let actual = Shioaji.parse_positions (shioaji_fixture "positions.json") in
+  (* The first two rows are documented Common-lot cash positions. The third
+     applies the same shape to three margin lots with TWD 120,000 borrowed. *)
+  let expected : Shioaji.position list =
+    [{ id = 0; code = "2890"; cond = "Cash"; lots = 1; yd_lots = 1;
+       avg_price = 30.; last_price = 31.; loan_amount = 0.; interest = 0. };
+     { id = 1; code = "2330"; cond = "Cash"; lots = 1; yd_lots = 1;
+       avg_price = 2000.; last_price = 1980.; loan_amount = 0.; interest = 0. };
+     { id = 2; code = "2330"; cond = "MarginTrading"; lots = 3; yd_lots = 2;
+       avg_price = 1950.; last_price = 1980.; loan_amount = 120000.;
+       interest = 35. }]
+  in
+  assert (actual = expected)
+
+let test_shioaji_position_details_parse () =
+  let actual =
+    Shioaji.parse_position_details (shioaji_fixture "position_detail.json")
+  in
+  (* Each expected row copies code, condition, origination date, and quantity
+     from the five position_detail fixture objects in file order. *)
+  let expected : Shioaji.position_detail list =
+    [{ code = "2330"; cond = "MarginTrading"; date = "2024-11-26";
+       lots = 2 };
+     { code = "2330"; cond = "MarginTrading"; date = "2024-11-27";
+       lots = 3 };
+     { code = "2330"; cond = "MarginTrading"; date = "2024-05-31";
+       lots = 1 };
+     { code = "2330"; cond = "Cash"; date = "2024-01-01"; lots = 4 };
+     { code = "2890"; cond = "MarginTrading"; date = "2024-01-01";
+       lots = 5 }]
+  in
+  assert (actual = expected)
+
+
+let test_shioaji_balance_parse () =
+  (* The balance fixture's acc_balance field is exactly TWD 100,000. *)
+  let () =
+    assert (Shioaji.parse_balance (shioaji_fixture "balance.json") = 100000.)
+  in
+  match Shioaji.parse_balance (shioaji_fixture "balance_error.json") with
+  | _ -> assert false
+  | exception Failure message ->
+      (* The error fixture's errmsg field is returned verbatim. *)
+      assert (message = "account balance unavailable in simulation")
+
+let test_shioaji_placed_parse () =
+  let actual = Shioaji.parse_placed (shioaji_fixture "place_order.json") in
+  (* The documented initial response has not reached the exchange yet. *)
+  let expected : Shioaji.placed =
+    { order_id = "a647f23d"; status = "PendingSubmit" }
+  in
+  assert (actual = expected)
+
+let test_shioaji_parser_rejections () =
+  (* An object without both fields does not have the two-column info shape. *)
+  let () =
+    assert_failure (fun () -> ignore (Shioaji.parse_info {|{}|}))
+  in
+  (* "maybe" is not a JSON boolean string accepted by bool_of_string. *)
+  let () =
+    assert_failure (fun () ->
+      ignore (Shioaji.parse_info {|{"simulation":"maybe","version":"1"}|}))
+  in
+  (* An empty array violates the exactly-one-snapshot response shape. *)
+  let () =
+    assert_failure (fun () -> ignore (Shioaji.parse_snapshot {|[]|}))
+  in
+  (* Snapshot prices are nonnegative; open = -1 violates that field contract. *)
+  let () =
+    assert_failure (fun () ->
+      ignore
+        (Shioaji.parse_snapshot
+           {|[{"datetime":"2026-05-18T13:20:00","open":-1,"high":1,"low":1,"close":1,"buy_price":1,"sell_price":1,"total_volume":1}]|}))
+  in
+  (* A positions response must be an array, not an object. *)
+  let () =
+    assert_failure (fun () -> ignore (Shioaji.parse_positions {|{}|}))
+  in
+  (* Common-lot quantity must parse as a nonnegative integer. *)
+  let () =
+    assert_failure (fun () ->
+      ignore
+        (Shioaji.parse_positions
+           {|[{"id":0,"code":"2330","cond":"Cash","quantity":"lots","yd_quantity":0,"price":1,"last_price":1,"margin_purchase_amount":0,"interest":0}]|}))
+  in
+  (* Negative Common-lot quantity violates the nonnegative position value. *)
+  let () =
+    assert_failure (fun () ->
+      ignore
+        (Shioaji.parse_positions
+           {|[{"id":0,"code":"2330","cond":"Cash","quantity":-1,"yd_quantity":0,"price":1,"last_price":1,"margin_purchase_amount":0,"interest":0}]|}))
+  in
+  (* A position-detail response must be an array, not an object. *)
+  let () =
+    assert_failure (fun () -> ignore (Shioaji.parse_position_details {|{}|}))
+  in
+  (* The position-detail quantity field must have JSON number type. *)
+  let () =
+    assert_failure (fun () ->
+      ignore
+        (Shioaji.parse_position_details
+           {|[{"code":"2330","cond":"MarginTrading","date":"2024-11-26","quantity":"2"}]|}))
+  in
+  (* February 30 is not a valid position origination date. *)
+  let () =
+    assert_failure (fun () ->
+      ignore
+        (Shioaji.parse_position_details
+           {|[{"code":"2330","cond":"MarginTrading","date":"2024-02-30","quantity":2}]|}))
+  in
+  (* Negative Common-lot quantity violates the position-detail value. *)
+  let () =
+    assert_failure (fun () ->
+      ignore
+        (Shioaji.parse_position_details
+           {|[{"code":"2330","cond":"MarginTrading","date":"2024-11-26","quantity":-1}]|}))
+  in
+  (* A submitted-order response must supply both order id and status. *)
+  assert_failure (fun () -> ignore (Shioaji.parse_placed {|{}|}))
+
+let test_shioaji_orders_today_parse () =
+  let raw = shioaji_fixture "update_status.json" in
+  let actual =
+    Shioaji.parse_orders_today ~code:"2890" ~today:"2026-05-20" raw
+  in
+  (* The documented fill is two Common lots at TWD 27.1. *)
+  let expected : Shioaji.trade list =
+    [{ order_id = "a647f23d";
+       code = "2890";
+       action = "Buy";
+       cond = "Cash";
+       status = "Filled";
+       order_lots = 2;
+       deal_lots = 2;
+       deal_price = Some 27.1;
+       order_datetime = "2026-05-20T11:24:30+08:00" }]
+  in
+  let () = assert (actual = expected) in
+  (* Filtering the 2026-05-20 fixture for 2026-05-21 leaves no rows. *)
+  let () =
+    assert
+      (Shioaji.parse_orders_today ~code:"2890" ~today:"2026-05-21" raw = [])
+  in
+  (* Filtering the 2890 fixture for code 2330 leaves no rows. *)
+  let () =
+    assert
+      (Shioaji.parse_orders_today ~code:"2330" ~today:"2026-05-20" raw = [])
+  in
+  let timestamp_raw = shioaji_fixture "trades_order_ts.json" in
+  (* 1789104000.875 floors to 2026-09-11 05:20:00 UTC, which is
+     2026-09-11 13:20:00 in Taipei. *)
+  let expected_timestamp_trade : Shioaji.trade list =
+    [{ order_id = "ts-only";
+       code = "2890";
+       action = "Buy";
+       cond = "Cash";
+       status = "Filled";
+       order_lots = 2;
+       deal_lots = 2;
+       deal_price = Some 27.1;
+       order_datetime = "2026-09-11T13:20:00+08:00" }]
+  in
+  let () =
+    assert
+      (Shioaji.parse_orders_today ~code:"2890" ~today:"2026-09-11"
+         timestamp_raw
+       = expected_timestamp_trade)
+  in
+  (* The timestamp fixture is dated 2026-09-11, so 2026-09-12 has no rows. *)
+  assert
+    (Shioaji.parse_orders_today ~code:"2890" ~today:"2026-09-12"
+       timestamp_raw
+     = [])
+
+
+let test_tw_live_phase () =
+  (* 13:04:59 is one second before the 13:05 preparation window. *)
+  let () =
+    assert
+      (Live.taipei_phase ~now:"2026-05-22T13:04:59+08:00"
+       = `Before_fetch)
+  in
+  (* The fetch phase includes its 13:05:00 lower bound. *)
+  let () =
+    assert
+      (Live.taipei_phase ~now:"2026-05-22T13:05:00+08:00" = `Fetch)
+  in
+  (* 13:19:59 is one second before the 13:20 decision window. *)
+  let () =
+    assert
+      (Live.taipei_phase ~now:"2026-05-22T13:19:59+08:00" = `Fetch)
+  in
+  (* The decision phase includes its 13:20:00 lower bound. *)
+  let () =
+    assert
+      (Live.taipei_phase ~now:"2026-05-22T13:20:00+08:00" = `Decide)
+  in
+  (* 13:24:59 is one second before the 13:25 submission cutoff. *)
+  let () =
+    assert
+      (Live.taipei_phase ~now:"2026-05-22T13:24:59+08:00" = `Decide)
+  in
+  (* The 13:25:00 cutoff starts the after-close phase. *)
+  let () =
+    assert
+      (Live.taipei_phase ~now:"2026-05-22T13:25:00+08:00"
+       = `After_close)
+  in
+  (* 13:30:00 remains after the 13:25 cutoff. *)
+  let () =
+    assert
+      (Live.taipei_phase ~now:"2026-05-22T13:30:00+08:00"
+       = `After_close)
+  in
+  (* Saturday 2026-05-23 is a weekend regardless of clock time. *)
+  assert
+    (Live.taipei_phase ~now:"2026-05-23T13:20:00+08:00" = `Weekend)
+
+
+let test_tw_live_exchange () =
+  with_temp_market "tw" (fun data_dir tw_dir ->
+    let path = Filename.concat tw_dir "stockinfo.csv" in
+    let output = open_out path in
+    let () =
+      Fun.protect
+        ~finally:(fun () -> close_out output)
+        (fun () ->
+          output_string output
+            "stock_id,type,date\n2330,twse,2026-01-01\n\
+             6488,tpex,2026-01-01\n7777,emerging,2026-01-01\n")
+    in
+    (* The fixture maps 2330's twse field to Shioaji TSE. *)
+    let () = assert (Live.exchange_of_symbol ~data_dir "2330" = "TSE") in
+    (* The fixture maps 6488's tpex field to Shioaji OTC. *)
+    let () = assert (Live.exchange_of_symbol ~data_dir "6488" = "OTC") in
+    (* The emerging fixture field is not a supported exchange mapping. *)
+    let () =
+      assert_failure (fun () ->
+        ignore (Live.exchange_of_symbol ~data_dir "7777"))
+    in
+    (* No fixture row supplies an exchange for symbol 9999. *)
+    assert_failure (fun () ->
+      ignore (Live.exchange_of_symbol ~data_dir "9999")))
+
+let test_tw_live_equity () =
+  let positions = Shioaji.parse_positions (shioaji_fixture "positions.json") in
+  (* 100000 cash + 31000 + 1980000 + 5940000 inventory
+     - 120000 loan - 35 interest = 7930965. *)
+  assert_close 7930965. (Live.equity_of ~balance:100000. ~positions)
+
+let test_tw_live_plan_legs () =
+  let plan ~equity ~cash ~cash_value ~margin_value ~loan ~previous target =
+    Engine.plan_fills ~costs:[| zero_costs |] ~capital:(Some equity)
+      ~financing_ratios:[| 0.6 |]
+      ~state:
+        { Engine.equity; cash; cash_values = [| cash_value |];
+          margin_values = [| margin_value |]; loans = [| loan |];
+          interests = [| 0. |]; tail_interests = [| 0. |]; debt = 0.;
+          receivables = 0.; previous_targets = [| previous |] }
+      ~prices:[| 10. |] ~targets:[| target |] ~force:false
+  in
+  let entry =
+    plan ~equity:1000000. ~cash:1000000. ~cash_value:0.
+      ~margin_value:0. ~loan:0. ~previous:0. 1.
+  in
+  (* TWD 1,000,000 / TWD 10 / 1,000 = 100 Common cash lots. *)
+  let () =
+    assert
+      (Live.legs_of_plan ~price:10. entry
+       = [{ Live.action = "Buy"; cond = "Cash"; lots = 100 }])
+  in
+  let refinance =
+    plan ~equity:1000000. ~cash:0. ~cash_value:1000000.
+      ~margin_value:0. ~loan:0. ~previous:1. 2.
+  in
+  (* Refinancing TWD 2/3m floors to 66 lots; the TWD 1m margin buy is
+     exactly 100 lots at TWD 10 per share. *)
+  let () =
+    assert
+      (Live.legs_of_plan ~price:10. refinance
+       = [{ Live.action = "Sell"; cond = "Cash"; lots = 66 };
+          { Live.action = "Buy"; cond = "MarginTrading"; lots = 66 };
+          { Live.action = "Buy"; cond = "MarginTrading"; lots = 100 }])
+  in
+  let mixed_refinance =
+    plan ~equity:3000000. ~cash:0. ~cash_value:(2000000. /. 3.)
+      ~margin_value:(10000000. /. 3.) ~loan:1000000.
+      ~previous:2. 1.8
+  in
+  (* TWD 4/15m / 10 / 1,000 floors to 26 cash-refinance lots,
+     TWD 4/3m floors to 133 margin-refinance lots, and TWD 1.4m
+     buys 140 margin lots. *)
+  let () =
+    assert
+      (Live.legs_of_plan ~price:10. mixed_refinance
+       = [{ Live.action = "Sell"; cond = "Cash"; lots = 26 };
+          { Live.action = "Buy"; cond = "MarginTrading"; lots = 26 };
+          { Live.action = "Sell"; cond = "MarginTrading"; lots = 133 };
+          { Live.action = "Buy"; cond = "MarginTrading"; lots = 133 };
+          { Live.action = "Buy"; cond = "MarginTrading"; lots = 140 }])
+  in
+  let exit =
+    plan ~equity:1000000. ~cash:0. ~cash_value:(1000000. /. 3.)
+      ~margin_value:(5000000. /. 3.) ~loan:1000000. ~previous:2. 0.
+  in
+  (* TWD 5/3m and TWD 1/3m at TWD 10 floor to 166 margin lots and
+     33 cash lots, respectively. *)
+  let () =
+    assert
+      (Live.legs_of_plan ~price:10. exit
+       = [{ Live.action = "Sell"; cond = "MarginTrading"; lots = 166 };
+          { Live.action = "Sell"; cond = "Cash"; lots = 33 }])
+  in
+  let sub_lot =
+    plan ~equity:9990. ~cash:9990. ~cash_value:0. ~margin_value:0.
+      ~loan:0. ~previous:0. 1.
+  in
+  (* TWD 9,990 / TWD 10 = 999 shares, below one Common lot. *)
+  assert (Live.legs_of_plan ~price:10. sub_lot = [])
+
+let test_tw_live_startup_guard () =
+  let simulation : Shioaji.info =
+    { simulation = true; version = "test" }
+  in
+  let production = { simulation with Shioaji.simulation = false } in
+  (* Paper mode, positive equity, and a simulation server agree. *)
+  let () =
+    assert
+      (Live.tw_startup_ok Live.Paper ~equity:(Some 1000000.) simulation
+       = Ok ())
+  in
+  (* Live mode without CLI equity agrees with a production server. *)
+  let () =
+    assert (Live.tw_startup_ok Live.Live ~equity:None production = Ok ())
+  in
+  (* Live mode cannot use a server whose simulation field is true. *)
+  let () =
+    assert
+      (Live.tw_startup_ok Live.Live ~equity:None simulation
+       = Error "--live requires a production Shioaji server")
+  in
+  (* Paper mode cannot use a server whose simulation field is false. *)
+  let () =
+    assert
+      (Live.tw_startup_ok Live.Paper ~equity:(Some 1000000.) production
+       = Error "--live is required for a production Shioaji server")
+  in
+  (* Paper mode has no sizing equity when the option is absent. *)
+  let () =
+    assert
+      (Live.tw_startup_ok Live.Paper ~equity:None simulation
+       = Error "simulation mode requires --equity")
+  in
+  (* Zero is not a finite positive simulation equity. *)
+  let () =
+    assert
+      (Live.tw_startup_ok Live.Paper ~equity:(Some 0.) simulation
+       = Error "simulation equity must be finite and positive")
+  in
+  (* Production derives equity from the account, so CLI equity is forbidden. *)
+  assert
+    (Live.tw_startup_ok Live.Live ~equity:(Some 1000000.) production
+     = Error "--equity is not allowed in production")
+
+let test_tw_maturity_rollover_legs () =
+  let details =
+    Shioaji.parse_position_details (shioaji_fixture "position_detail.json")
+  in
+  (* 2024-11-26 + 18 months = 2026-05-26 for 2 lots; 2024-05-31
+     clamps to 2025-11-30 for 1 lot. Later, cash, and other-symbol rows
+     are excluded, leaving the two sell/rebuy pairs in fixture order. *)
+  let () =
+    assert
+      (Live.maturity_rollover_legs ~session_date:"2026-05-26"
+         ~symbol:"2330" details
+       = [{ Live.action = "Sell"; cond = "MarginTrading"; lots = 2 };
+          { Live.action = "Buy"; cond = "MarginTrading"; lots = 2 };
+          { Live.action = "Sell"; cond = "MarginTrading"; lots = 1 };
+          { Live.action = "Buy"; cond = "MarginTrading"; lots = 1 }])
+  in
+  (* 2026-05-25 is one day before the 2026-05-26 maturity. *)
+  assert
+    (Live.maturity_rollover_legs ~session_date:"2026-05-25"
+       ~symbol:"2330"
+       [{ Shioaji.code = "2330"; cond = "MarginTrading";
+          date = "2024-11-26"; lots = 2 }]
+     = [])
+
+let test_tw_live_decide_override () =
+  with_temp_market "tw" (fun data_dir tw_dir ->
+    let symbol_dir = Filename.concat tw_dir "2330" in
+    let () = Unix.mkdir symbol_dir 0o700 in
+    let write path contents =
+      let output = open_out path in
+      Fun.protect
+        ~finally:(fun () -> close_out output)
+        (fun () -> output_string output contents)
+    in
+    let () =
+      write (Filename.concat tw_dir "stockinfo.csv")
+        "stock_id,type,date\n2330,twse,2026-01-01\n"
+    in
+    let () =
+      write (Filename.concat symbol_dir "2330.csv")
+        "date,open,high,low,close,volume\n\
+         2026-05-14,1870,1880,1860,1870,900\n\
+         2026-05-15,1880,1890,1870,1880,900\n\
+         2026-05-21,1950,1960,1940,1950,1100\n\
+         2026-05-22,1980,1990,1970,1980,1200\n"
+    in
+    let () =
+      write (Filename.concat symbol_dir "2330.div.csv") "date,factor\n"
+    in
+    let () =
+      write (Filename.concat symbol_dir "2330.events.csv") "date,factor\n"
+    in
+    let () =
+      write (Filename.concat symbol_dir "2330.cashdiv.csv")
+        "ex_date,cash_per_share,pay_date\n"
+    in
+    with_temp_strategy "stock \"tw/2330\"\ntarget 1.0\n" (fun strat_path ->
+      let all_positions =
+        Shioaji.parse_positions (shioaji_fixture "positions.json")
+      in
+      let positions =
+        List.filter
+          (fun (position : Shioaji.position) -> position.code = "2330")
+          all_positions
+      in
+      let position_details =
+        Shioaji.parse_position_details
+          (shioaji_fixture "position_detail.json")
+      in
+      let decision =
+        Live.decide ~provisional_close:2000. ~previous_session:"2026-05-22"
+          ~equity:20000000. ~tw_positions:positions
+          ~tw_position_details:position_details Live.Paper
+          ~session_date:"2026-05-26" ~strat_path ~data_dir
+      in
+      (* The injected previous session is the fixture cache's final date. *)
+      let () = assert (decision.Live.fetched_through = "2026-05-22") in
+      (* The explicit provisional close is TWD 2,000. *)
+      let () = assert_close 2000. decision.Live.provisional.c in
+      (* The strategy source declares target 1.0. *)
+      let () = assert_close 1. decision.Live.target in
+      (* The two 2330 fixture rows hold 1 cash lot + 3 margin lots = 4,000 shares. *)
+      let () = assert_close 4000. decision.Live.held in
+      (* The 2024-11-26 two-lot and 2024-05-31 one-lot rows are both
+         mature on 2026-05-26, so their sell/rebuy pairs lead the plan. *)
+      let () =
+        match decision.Live.action with
+        | Live.Orders
+            ({ action = "Sell"; cond = "MarginTrading"; lots = 2 }
+             :: { action = "Buy"; cond = "MarginTrading"; lots = 2 }
+             :: { action = "Sell"; cond = "MarginTrading"; lots = 1 }
+             :: { action = "Buy"; cond = "MarginTrading"; lots = 1 }
+             :: _) -> ()
+        | _ -> assert false
+      in
+      let fixture = Shioaji.parse_snapshot (shioaji_fixture "snapshot.json") in
+      let fixture_decision =
+        Live.decide ~previous_session:"2026-05-15" ~equity:20000000.
+          ~tw_positions:positions ~tw_snapshot:fixture Live.Paper
+          ~session_date:"2026-05-18" ~strat_path ~data_dir
+      in
+      (* The snapshot fixture's close field is TWD 2,240. *)
+      let () = assert_close 2240. fixture_decision.Live.provisional.c in
+      let snapshot : Shioaji.snapshot =
+        { fixture with datetime = "2026-05-26T13:20:00";
+          open_ = 2000.; high = 2002.; low = 1998.; close = 0.;
+          bid = 1998.; ask = 2002. }
+      in
+      let midpoint =
+        Live.decide ~previous_session:"2026-05-22" ~equity:20000000.
+          ~tw_positions:positions ~tw_snapshot:snapshot Live.Paper
+          ~session_date:"2026-05-26" ~strat_path ~data_dir
+      in
+      (* A zero close falls back to (TWD 1,998 + TWD 2,002) / 2 = TWD 2,000. *)
+      let () = assert_close 2000. midpoint.Live.provisional.c in
+      (* Saturday 2026-05-23 cannot be the previous session for Tuesday. *)
+      let () =
+        assert_failure (fun () ->
+          ignore
+            (Live.decide ~provisional_close:2000.
+               ~previous_session:"2026-05-23" ~equity:20000000.
+               ~tw_positions:positions Live.Paper ~session_date:"2026-05-26"
+               ~strat_path ~data_dir))
+      in
+      (* A 2026-05-22 snapshot does not match the 2026-05-26 session. *)
+      let () =
+        assert_failure (fun () ->
+          ignore
+            (Live.decide ~previous_session:"2026-05-22" ~equity:20000000.
+               ~tw_positions:positions
+               ~tw_snapshot:{ snapshot with datetime =
+                 "2026-05-22T13:20:00" }
+               Live.Paper ~session_date:"2026-05-26" ~strat_path ~data_dir))
+      in
+      (* Hour 25 is outside the valid 00-23 timestamp range. *)
+      let () =
+        assert_failure (fun () ->
+          ignore
+            (Live.decide ~previous_session:"2026-05-22" ~equity:20000000.
+               ~tw_positions:positions
+               ~tw_snapshot:{ snapshot with datetime =
+                 "2026-05-26T25:20:00" }
+               Live.Paper ~session_date:"2026-05-26" ~strat_path ~data_dir))
+      in
+      (* Zero close, bid, and ask provide no positive provisional price. *)
+      let () =
+        assert_failure (fun () ->
+          ignore
+            (Live.decide ~previous_session:"2026-05-22" ~equity:20000000.
+               ~tw_positions:positions
+               ~tw_snapshot:{ snapshot with close = 0.; bid = 0.; ask = 0. }
+               Live.Paper ~session_date:"2026-05-26" ~strat_path ~data_dir))
+      in
+      (* An open of zero violates the positive OHLCV snapshot contract. *)
+      let () =
+        assert_failure (fun () ->
+          ignore
+            (Live.decide ~previous_session:"2026-05-22" ~equity:20000000.
+               ~tw_positions:positions
+               ~tw_snapshot:{ snapshot with open_ = 0. }
+               Live.Paper ~session_date:"2026-05-26" ~strat_path ~data_dir))
+      in
+      (* TWD 2,003 is above the fixture session high of TWD 2,002. *)
+      let () =
+        assert_failure (fun () ->
+          ignore
+            (Live.decide ~previous_session:"2026-05-22" ~equity:20000000.
+               ~tw_positions:positions
+               ~tw_snapshot:{ snapshot with close = 2003. }
+               Live.Paper ~session_date:"2026-05-26" ~strat_path ~data_dir))
+      in
+      (* NaN is not a finite positive simulation equity. *)
+      let () =
+        assert_failure (fun () ->
+          ignore
+            (Live.decide ~provisional_close:2000.
+               ~previous_session:"2026-05-22" ~equity:Float.nan
+               ~tw_positions:positions Live.Paper ~session_date:"2026-05-26"
+               ~strat_path ~data_dir))
+      in
+      (* The 2890 fixture row is nonzero unrelated-symbol inventory. *)
+      let () =
+        assert_failure (fun () ->
+          ignore
+            (Live.decide ~provisional_close:2000.
+               ~previous_session:"2026-05-22" ~equity:20000000.
+               ~tw_positions:all_positions Live.Paper
+               ~session_date:"2026-05-26" ~strat_path ~data_dir))
+      in
+      let unsupported =
+        match positions with
+        | first :: rest ->
+            { first with Shioaji.cond = "ShortSelling" } :: rest
+        | [] -> assert false
+      in
+      (* ShortSelling is outside the Cash and MarginTrading inventory contract. *)
+      assert_failure (fun () ->
+        ignore
+          (Live.decide ~provisional_close:2000.
+             ~previous_session:"2026-05-22" ~equity:20000000.
+             ~tw_positions:unsupported Live.Paper
+             ~session_date:"2026-05-26" ~strat_path ~data_dir))))
+
+let tw_position cond lots : Shioaji.position =
+  { id = 0; code = "2330"; cond; lots; yd_lots = lots; avg_price = 10.;
+    last_price = 10.; loan_amount = 0.; interest = 0. }
+
+let tw_trade id (leg : Live.leg) status deal_lots : Shioaji.trade =
+  { order_id = id; code = "2330"; action = leg.action; cond = leg.cond;
+    status; order_lots = leg.lots; deal_lots;
+    deal_price = if deal_lots = 0 then None else Some 10.;
+    order_datetime = "2026-05-22T13:20:00+08:00" }
+
+let execute_tw_test ?(now = fun () -> "2026-05-22T13:20:00+08:00")
+    ?(sleep = fun _ -> ())
+    ?(place_order = fun _ ->
+      { Shioaji.order_id = "1"; status = "PendingSubmit" })
+    ?(orders_today = fun ~code:_ ~today:_ -> [])
+    ?(costs = zero_costs) ~cash ~positions legs =
+  Live.execute_tw_legs ~now ~sleep ~place_order ~orders_today
+    ~exchange:"TSE" ~code:"2330" ~date:"2026-05-22" ~price:10.
+    ~financing_ratio:0.6 ~costs ~cash ~positions legs
+
+let scripted_placements entries =
+  let entries = Queue.of_seq (List.to_seq entries) in
+  fun (request : Shioaji.order_request) ->
+    match Queue.take_opt entries with
+    | None -> failwith "unexpected TW test order"
+    | Some (order_id, (expected : Live.leg)) ->
+        let () = assert (request.action = expected.action) in
+        let () = assert (request.cond = expected.cond) in
+        let () = assert (request.lots = expected.lots) in
+        { Shioaji.order_id = order_id; status = "PendingSubmit" }
+
+let test_tw_default_sell_has_no_per_share_fee () =
+  let sell : Live.leg = { action = "Sell"; cond = "Cash"; lots = 1 } in
+  let buy : Live.leg = { action = "Buy"; cond = "Cash"; lots = 1 } in
+  let result =
+    execute_tw_test
+      ~place_order:(scripted_placements ["1", sell; "2", buy])
+      ~orders_today:(fun ~code:_ ~today:_ ->
+        [tw_trade "1" sell "Filled" 1; tw_trade "2" buy "Filled" 1])
+      ~costs:(Engine.default_costs ~market:"tw" ~symbol:"2330")
+      ~cash:70. ~positions:[tw_position "Cash" 1] [sell; buy]
+  in
+  (* Both scripted legs fill, so the execution records two trades. *)
+  let () = assert (List.length result.Live.trades = 2) in
+  (* TWD 70 + 10,000 sale - 20 commission - 30 tax exactly funds
+     the TWD 10,000 repurchase plus its TWD 20 commission. *)
+  let () = assert (result.Live.remaining = []) in
+  (* Exact funding leaves no stop reason. *)
+  assert (result.Live.stop_reason = None)
+
+let test_tw_execution_stops_on_predecessor () =
+  let sell : Live.leg = { action = "Sell"; cond = "Cash"; lots = 2 } in
+  let buy : Live.leg =
+    { action = "Buy"; cond = "MarginTrading"; lots = 2 }
+  in
+  let run status trades =
+    let result =
+      execute_tw_test
+        ~place_order:(scripted_placements ["1", sell])
+        ~orders_today:(fun ~code:_ ~today:_ -> trades)
+        ~cash:0. ~positions:[tw_position "Cash" 2] [sell; buy]
+    in
+    (* A non-complete predecessor leaves the dependent buy unsubmitted. *)
+    let () = assert (result.Live.remaining = [buy]) in
+    (* The supplied status text is the exact executor stop reason. *)
+    assert (result.Live.stop_reason = Some status)
+  in
+  (* One of two sold lots is a partial fill. *)
+  let () =
+    run "order 1 partially filled 1 of 2 lots"
+      [tw_trade "1" sell "PartFilled" 1]
+  in
+  (* The broker status is explicitly Failed. *)
+  let () = run "order 1 failed" [tw_trade "1" sell "Failed" 0] in
+  (* An empty status response contains no order 1. *)
+  let () = run "order 1 has no status" [] in
+  (* A Buy status cannot confirm the requested Sell. *)
+  run "order 1 status does not match request"
+    [{ (tw_trade "1" sell "Filled" 2) with Shioaji.action = "Buy" }]
+
+let test_tw_execution_times_out () =
+  let buy : Live.leg = { action = "Buy"; cond = "Cash"; lots = 1 } in
+  let sleeps = Queue.create () in
+  let result =
+    execute_tw_test
+      ~sleep:(fun _ -> Queue.add () sleeps)
+      ~place_order:(scripted_placements ["1", buy])
+      ~orders_today:(fun ~code:_ ~today:_ ->
+        [tw_trade "1" buy "Submitted" 0])
+      ~cash:10000. ~positions:[] [buy]
+  in
+  (* Five status polls have four one-second sleeps between them. *)
+  let () = assert (Queue.length sleeps = 4) in
+  (* The posted leg has no successor, so no leg remains unsubmitted. *)
+  let () = assert (result.Live.remaining = []) in
+  (* Five unchanged Submitted statuses exhaust the poll budget. *)
+  assert (result.Live.stop_reason = Some "order 1 status timed out")
+
+let test_tw_execution_polls_zero_qty_pending () =
+  let buy : Live.leg = { action = "Buy"; cond = "Cash"; lots = 1 } in
+  let statuses =
+    Queue.of_seq
+      (List.to_seq
+         [[{ (tw_trade "1" buy "PendingSubmit" 0) with
+              Shioaji.order_lots = 0 }];
+          [tw_trade "1" buy "Filled" 1]])
+  in
+  let sleeps = Queue.create () in
+  let result =
+    execute_tw_test
+      ~sleep:(fun _ -> Queue.add () sleeps)
+      ~place_order:(scripted_placements ["1", buy])
+      ~orders_today:(fun ~code:_ ~today:_ -> Queue.take statuses)
+      ~cash:10000. ~positions:[] [buy]
+  in
+  (* The two scripted status responses are both consumed. *)
+  let () = assert (Queue.is_empty statuses) in
+  (* One pending response before the fill causes exactly one sleep. *)
+  let () = assert (Queue.length sleeps = 1) in
+  (* The eventual complete fill leaves no unsubmitted leg. *)
+  let () = assert (result.Live.remaining = []) in
+  (* The eventual complete fill is successful. *)
+  assert (result.Live.stop_reason = None)
+
+let test_tw_execution_rechecks_cutoff () =
+  let first : Live.leg = { action = "Buy"; cond = "Cash"; lots = 1 } in
+  let second : Live.leg =
+    { action = "Buy"; cond = "MarginTrading"; lots = 1 }
+  in
+  let times =
+    Queue.of_seq
+      (List.to_seq
+         ["2026-05-22T13:20:00+08:00";
+          "2026-05-22T13:20:00+08:00";
+          "2026-05-22T13:25:00+08:00"])
+  in
+  let result =
+    execute_tw_test ~now:(fun () -> Queue.take times)
+      ~place_order:(scripted_placements ["1", first])
+      ~orders_today:(fun ~code:_ ~today:_ ->
+        [tw_trade "1" first "Filled" 1])
+      ~cash:20000. ~positions:[] [first; second]
+  in
+  (* Submit, poll, and successor checks consume all three clock values. *)
+  let () = assert (Queue.is_empty times) in
+  (* The 13:25 successor check leaves the second leg unsubmitted. *)
+  let () = assert (result.Live.remaining = [second]) in
+  (* 13:25 is the exact submission-window cutoff. *)
+  assert
+    (result.Live.stop_reason =
+     Some "submission window closed before Buy MarginTrading 1")
+
+let test_tw_execution_advances_when_funded () =
+  let sell : Live.leg = { action = "Sell"; cond = "Cash"; lots = 1 } in
+  let refinance : Live.leg =
+    { action = "Buy"; cond = "MarginTrading"; lots = 1 }
+  in
+  let ordinary : Live.leg =
+    { action = "Buy"; cond = "MarginTrading"; lots = 1 }
+  in
+  let result =
+    execute_tw_test
+      ~place_order:
+        (scripted_placements
+           ["1", sell; "2", refinance; "3", ordinary])
+      ~orders_today:(fun ~code:_ ~today:_ ->
+        [tw_trade "1" sell "Filled" 1;
+         tw_trade "2" refinance "Filled" 1;
+         tw_trade "3" ordinary "Filled" 1])
+      ~cash:0. ~positions:[tw_position "Cash" 1]
+      [sell; refinance; ordinary]
+  in
+  (* Three funded legs produce three confirmed trades. *)
+  let () = assert (List.length result.Live.trades = 3) in
+  (* Every planned leg is submitted. *)
+  let () = assert (result.Live.remaining = []) in
+  (* Complete matching fills produce no stop. *)
+  assert (result.Live.stop_reason = None)
+
+let test_tw_execution_caps_rounded_funding () =
+  let sell : Live.leg = { action = "Sell"; cond = "Cash"; lots = 1 } in
+  let refinance : Live.leg =
+    { action = "Buy"; cond = "MarginTrading"; lots = 1 }
+  in
+  let ordinary : Live.leg =
+    { action = "Buy"; cond = "MarginTrading"; lots = 2 }
+  in
+  let capped = { ordinary with Live.lots = 1 } in
+  let result =
+    execute_tw_test
+      ~place_order:
+        (scripted_placements ["1", sell; "2", refinance; "3", capped])
+      ~orders_today:(fun ~code:_ ~today:_ ->
+        [tw_trade "1" sell "Filled" 1;
+         tw_trade "2" refinance "Filled" 1;
+         tw_trade "3" capped "Filled" 1])
+      ~cash:0. ~positions:[tw_position "Cash" 1]
+      [sell; refinance; ordinary]
+  in
+  (* The confirmed trade order_lots fields show requests of 1, 1, and 1. *)
+  let () =
+    assert
+      (List.map (fun (trade : Shioaji.trade) -> trade.order_lots)
+         result.Live.trades
+       = [1; 1; 1])
+  in
+  (* The unfunded second ordinary lot remains. *)
+  let () =
+    assert
+      (result.Live.remaining =
+       [{ Live.action = "Buy"; cond = "MarginTrading"; lots = 1 }])
+  in
+  (* Two requested lots minus one funded lot gives the reported 2-to-1 cap. *)
+  assert
+    (result.Live.stop_reason =
+     Some "capped Buy MarginTrading from 2 to 1 funded lots")
+
+let test_tw_execution_tracks_refinanced_loan () =
+  let cash_sell : Live.leg =
+    { action = "Sell"; cond = "Cash"; lots = 1 }
+  in
+  let margin_buy : Live.leg =
+    { action = "Buy"; cond = "MarginTrading"; lots = 1 }
+  in
+  let margin_sell : Live.leg =
+    { action = "Sell"; cond = "MarginTrading"; lots = 1 }
+  in
+  let ordinary : Live.leg =
+    { action = "Buy"; cond = "MarginTrading"; lots = 2 }
+  in
+  let capped = { ordinary with Live.lots = 1 } in
+  let result =
+    execute_tw_test
+      ~place_order:
+        (scripted_placements
+           ["1", cash_sell; "2", margin_buy; "3", margin_sell;
+            "4", margin_buy; "5", capped])
+      ~orders_today:(fun ~code:_ ~today:_ ->
+        [tw_trade "1" cash_sell "Filled" 1;
+         tw_trade "2" margin_buy "Filled" 1;
+         tw_trade "3" margin_sell "Filled" 1;
+         tw_trade "4" margin_buy "Filled" 1;
+         tw_trade "5" capped "Filled" 1])
+      ~cash:0. ~positions:[tw_position "Cash" 1]
+      [cash_sell; margin_buy; margin_sell; margin_buy; ordinary]
+  in
+  (* The confirmed order_lots fields show five one-lot requests. *)
+  let () =
+    assert
+      (List.map (fun (trade : Shioaji.trade) -> trade.order_lots)
+         result.Live.trades
+       = [1; 1; 1; 1; 1])
+  in
+  (* Repaying the refinanced loan leaves only one ordinary lot funded. *)
+  let () =
+    assert
+      (result.Live.remaining =
+       [{ Live.action = "Buy"; cond = "MarginTrading"; lots = 1 }])
+  in
+  (* Two requested lots minus one funded lot gives the reported 2-to-1 cap. *)
+  assert
+    (result.Live.stop_reason =
+     Some "capped Buy MarginTrading from 2 to 1 funded lots")
+
+let test_tw_execution_remaining_stops () =
+  let buy : Live.leg = { action = "Buy"; cond = "Cash"; lots = 1 } in
+  let sell : Live.leg = { action = "Sell"; cond = "Cash"; lots = 2 } in
+  let run ?(cash = 10000.) ?(positions = [])
+      ?(place_order = scripted_placements ["1", buy]) statuses leg =
+    execute_tw_test ~place_order
+      ~orders_today:(fun ~code:_ ~today:_ -> statuses)
+      ~cash ~positions [leg]
+  in
+  let filled = tw_trade "1" buy "Filled" 1 in
+  (* Two rows with order id 1 are ambiguous, so no observed trade is chosen. *)
+  let ambiguous = run [filled; filled] buy in
+  let () =
+    assert
+      (ambiguous.Live.stop_reason = Some "order 1 has ambiguous status")
+  in
+  (* A Filled row with no weighted deal price cannot settle cash. *)
+  let invalid_price = run [{ filled with Shioaji.deal_price = None }] buy in
+  let () =
+    assert
+      (invalid_price.Live.stop_reason =
+       Some "order 1 filled without a valid price")
+  in
+  (* One dealt lot under Submitted is unconfirmed partial exposure. *)
+  let pending_partial = run [tw_trade "1" buy "Submitted" 1] buy in
+  let () =
+    assert
+      (pending_partial.Live.stop_reason =
+       Some "order 1 has unconfirmed partial exposure")
+  in
+  (* A two-lot status cannot confirm the one-lot request. *)
+  let wrong_quantity =
+    run
+      [{ (tw_trade "1" buy "Submitted" 0) with Shioaji.order_lots = 2 }]
+      buy
+  in
+  let () =
+    assert
+      (wrong_quantity.Live.stop_reason =
+       Some "order 1 status quantity does not match request")
+  in
+  (* Mystery is outside the executor's documented broker status set. *)
+  let unsupported = run [tw_trade "1" buy "Mystery" 0] buy in
+  let () =
+    assert
+      (unsupported.Live.stop_reason =
+       Some "order 1 has unsupported status Mystery")
+  in
+  (* A placement exception makes POST outcome uncertain and forbids retry. *)
+  let uncertain =
+    run ~place_order:(fun _ -> failwith "lost response") [] buy
+  in
+  let () =
+    assert
+      (uncertain.Live.stop_reason =
+       Some "order submission uncertain: lost response")
+  in
+  (* An empty broker id cannot be polled safely. *)
+  let no_id =
+    run
+      ~place_order:(fun _ ->
+        { Shioaji.order_id = ""; status = "PendingSubmit" })
+      [] buy
+  in
+  let () =
+    assert
+      (no_id.Live.stop_reason = Some "order submission returned no order id")
+  in
+  (* One cash lot cannot satisfy a two-lot sell request. *)
+  let inventory =
+    run ~cash:0. ~positions:[tw_position "Cash" 1]
+      ~place_order:(fun _ -> assert false) [] sell
+  in
+  let () =
+    assert
+      (inventory.Live.stop_reason =
+       Some "insufficient Cash inventory for 2 lots")
+  in
+  (* Zero cash funds zero lots of a TWD 10,000 cash buy. *)
+  let cash =
+    run ~cash:0. ~place_order:(fun _ -> assert false) [] buy
+  in
+  let () =
+    assert
+      (cash.Live.stop_reason =
+       Some "insufficient confirmed cash for Buy Cash 1")
+  in
+  (* TWD 10,000 funds at the TWD 10 plan price, but a TWD 11 fill costs
+     TWD 11,000 and overruns the confirmed budget by TWD 1,000. *)
+  let overrun =
+    run [{ filled with Shioaji.deal_price = Some 11. }] buy
+  in
+  assert
+    (overrun.Live.stop_reason =
+     Some "confirmed fill exceeded cash budget by 1000")
+
+
+let test_tw_previous_session_calendar () =
+  let raw =
+    {|{"status":200,"data":[{"date":"2026-05-26"},{"date":"2026-05-22"},{"date":"2026-05-21"}]}|}
+  in
+  (* Before Tuesday 2026-05-26, the fixture's latest earlier row is
+     Friday 2026-05-22 because Monday is absent. *)
+  let () =
+    assert
+      (Data.parse_previous_trading_day ~before:"2026-05-26" raw
+       = "2026-05-22")
+  in
+  (* An empty data array has no previous trading date. *)
+  let () =
+    assert_failure (fun () ->
+      ignore
+        (Data.parse_previous_trading_day ~before:"2026-05-26"
+           {|{"status":200,"data":[]}|}))
+  in
+  (* API status 400 is not a successful calendar response. *)
+  let () =
+    assert_failure (fun () ->
+      ignore
+        (Data.parse_previous_trading_day ~before:"2026-05-26"
+           {|{"status":400,"data":[{"date":"2026-05-22"}]}|}))
+  in
+  (* February 30 is not a valid Gregorian calendar row. *)
+  let () =
+    assert_failure (fun () ->
+      ignore
+        (Data.parse_previous_trading_day ~before:"2026-05-26"
+           {|{"status":200,"data":[{"date":"2026-02-30"}]}|}))
+  in
+  (* A signed month does not match the YYYY-MM-DD digit shape. *)
+  let () =
+    assert_failure (fun () ->
+      ignore
+        (Data.parse_previous_trading_day ~before:"2026-05-26"
+           {|{"status":200,"data":[{"date":"2026-+1-08"}]}|}))
+  in
+  (* The request bound itself must also have YYYY-MM-DD digit shape. *)
+  assert_failure (fun () ->
+    ignore (Data.parse_previous_trading_day ~before:"2026-+1-08" raw))
+
+let test_shioaji_settlement_amounts () =
+  let raw =
+    {|[{"date":"2026-05-22","amount":0,"T":0},{"date":"2026-05-25","amount":-30000,"T":1},{"date":"2026-05-26","amount":50000,"T":2}]|}
+  in
+  let amounts =
+    Shioaji.parse_settlements raw
+    |> List.map (fun (item : Shioaji.settlement) -> item.day, item.amount)
+  in
+  (* The three fixture rows carry (T, amount) values (0, 0), (1, -30000),
+     and (2, 50000) in that order. *)
+  assert (amounts = [0, 0.; 1, -30000.; 2, 50000.])
+
+let test_shioaji_weighted_fill_price () =
+  let raw =
+    {|[{"contract":{"code":"2890"},"order":{"id":"weighted","action":"Buy","order_cond":"Cash","quantity":3},"status":{"id":"weighted","status":"Filled","order_quantity":3,"deal_quantity":3,"order_datetime":"2026-05-22T13:20:00+08:00","deals":[{"price":27,"quantity":1},{"price":30,"quantity":2}]}}]|}
+  in
+  match Shioaji.parse_orders_today ~code:"2890" ~today:"2026-05-22" raw with
+  | [trade] ->
+      (* Fixture deal quantities 1 + 2 = 3 lots. *)
+      let () = assert (trade.Shioaji.deal_lots = 3) in
+      (* (TWD 27 * 1 + TWD 30 * 2) / 3 = TWD 29. *)
+      assert (trade.Shioaji.deal_price = Some 29.)
+  | _ -> assert false
+
 let () =
   let () = test_daytrade_cli () in
   let () = test_intraday_latency () in
@@ -4967,6 +6111,7 @@ let () =
   test_live_schedule ();
   test_live_startup_guard ();
   test_live_commands_reject_tw ();
+  let () = test_tw_live_rejects_production_equity () in
   test_target_rejects_invalid_provisional_close ();
   test_profile_of_market ();
   test_parser ();
@@ -5074,6 +6219,7 @@ let () =
   test_fallback_preserves_direct_overlap ();
   test_stock_dividend_restates_volume ();
   test_load_adjustments ();
+  let () = test_tw_adjustment_refresh_horizon () in
   test_financing_ratio ();
   test_nested_cache_layout ();
   test_event_transform ();
@@ -5094,140 +6240,32 @@ let () =
   test_us_cure_interest_single_charge ();
   test_cure_shortfall_preserves_liability ();
   test_us_cure_tail_aware ();
-  print_endline "ok"
-
-(* Task 2: engine fill-planner extraction. *)
-let test_engine_fill_planner () =
-  let plan ~cash ~cash_value ~margin_value ~loan ~previous target =
-    Engine.plan_fills ~costs:[| zero_costs |] ~capital:(Some 1000000.)
-      ~financing_ratios:[| 0.6 |]
-      ~state:
-        { Engine.equity = 1000000.; cash;
-          cash_values = [| cash_value |];
-          margin_values = [| margin_value |];
-          loans = [| loan |]; interests = [| 0. |];
-          tail_interests = [| 0. |]; debt = 0.; receivables = 0.;
-          previous_targets = [| previous |] }
-      ~prices:[| 10. |] ~targets:[| target |] ~force:false
-  in
-  (* At 1x, TWD 1,000,000 / TWD 10 buys 100,000 cash shares. *)
-  let entry = (plan ~cash:1000000. ~cash_value:0. ~margin_value:0.
-      ~loan:0. ~previous:0. 1.).Engine.planned_assets.(0)
-  in
-  assert_close 100000. (entry.Engine.plan_buy_cash /. 10.);
-  assert_close 0. entry.Engine.plan_buy_margin;
-  (* Scaling 1x cash inventory to 2x refinances TWD 2/3m of that
-     inventory, then buys TWD 1m on margin. The new purchase borrows
-     0.6 * 1m and settles the remaining 0.4 * 1m in cash. *)
-  let scale_in = (plan ~cash:0. ~cash_value:1000000. ~margin_value:0.
-      ~loan:0. ~previous:1. 2.).Engine.planned_assets.(0)
-  in
-  assert_close 100000. (scale_in.Engine.plan_buy_margin /. 10.);
-  assert_close 600000. (0.6 *. scale_in.Engine.plan_buy_margin);
-  assert_close 400000. scale_in.Engine.plan_down_payment;
-  (* The resulting 2x split is TWD 1/3m cash inventory plus TWD 5/3m
-     margin inventory with a TWD 1m loan. Target zero sells both. *)
-  let exit = (plan ~cash:0. ~cash_value:(1000000. /. 3.)
-      ~margin_value:(5000000. /. 3.) ~loan:1000000.
-      ~previous:2. 0.).Engine.planned_assets.(0)
-  in
-  assert_close (500000. /. 3.) (exit.Engine.plan_sell_margin /. 10.);
-  assert_close (100000. /. 3.) (exit.Engine.plan_sell_cash /. 10.);
-  assert_close 1000000. exit.Engine.plan_repayment
-
-let () = test_engine_fill_planner ()
-
-(* Task 1: Shioaji client fixture parsing. *)
-let shioaji_fixture name =
-  read_file
-    (locate
-       [Filename.concat "test/fixtures/shioaji" name;
-        Filename.concat "fixtures/shioaji" name])
-
-let test_shioaji_info_parse () =
-  let actual = Shioaji.parse_info (shioaji_fixture "info.json") in
-  (* Expected values are copied from the documented server info response. *)
-  let expected : Shioaji.info =
-    { simulation = false; version = "1.7.2" }
-  in
-  assert (actual = expected)
-
-let test_shioaji_snapshot_parse () =
-  let actual = Shioaji.parse_snapshot (shioaji_fixture "snapshot.json") in
-  (* Expected values are copied from the documented 2330 snapshot row. *)
-  let expected : Shioaji.snapshot =
-    { datetime = "2026-05-18T14:30:00";
-      open_ = 2225.;
-      high = 2260.;
-      low = 2215.;
-      close = 2240.;
-      bid = 2240.;
-      ask = 2245.;
-      total_volume = 25820. }
-  in
-  assert (actual = expected)
-
-let test_shioaji_positions_parse () =
-  let actual = Shioaji.parse_positions (shioaji_fixture "positions.json") in
-  (* The first two rows are documented Common-lot cash positions. The third
-     applies the same shape to three margin lots with TWD 120,000 borrowed. *)
-  let expected : Shioaji.position list =
-    [{ code = "2890"; cond = "Cash"; lots = 1; yd_lots = 1;
-       avg_price = 30.; last_price = 31.; loan_amount = 0.; interest = 0. };
-     { code = "2330"; cond = "Cash"; lots = 1; yd_lots = 1;
-       avg_price = 2000.; last_price = 1980.; loan_amount = 0.; interest = 0. };
-     { code = "2330"; cond = "MarginTrading"; lots = 3; yd_lots = 2;
-       avg_price = 1950.; last_price = 1980.; loan_amount = 120000.;
-       interest = 35. }]
-  in
-  assert (actual = expected)
-
-let test_shioaji_balance_parse () =
-  let () =
-    assert (Shioaji.parse_balance (shioaji_fixture "balance.json") = 100000.)
-  in
-  match Shioaji.parse_balance (shioaji_fixture "balance_error.json") with
-  | _ -> assert false
-  | exception Failure message ->
-      assert (message = "account balance unavailable in simulation")
-
-let test_shioaji_placed_parse () =
-  let actual = Shioaji.parse_placed (shioaji_fixture "place_order.json") in
-  (* The documented initial response has not reached the exchange yet. *)
-  let expected : Shioaji.placed =
-    { order_id = "a647f23d"; status = "PendingSubmit" }
-  in
-  assert (actual = expected)
-
-let test_shioaji_orders_today_parse () =
-  let raw = shioaji_fixture "update_status.json" in
-  let actual =
-    Shioaji.parse_orders_today ~code:"2890" ~today:"2026-05-20" raw
-  in
-  (* The documented fill is two Common lots at TWD 27.1. *)
-  let expected : Shioaji.trade list =
-    [{ order_id = "a647f23d";
-       code = "2890";
-       action = "Buy";
-       cond = "Cash";
-       status = "Filled";
-       order_lots = 2;
-       deal_lots = 2;
-       deal_price = Some 27.1;
-       order_datetime = "2026-05-20T11:24:30+08:00" }]
-  in
-  let () = assert (actual = expected) in
-  let () =
-    assert
-      (Shioaji.parse_orders_today ~code:"2890" ~today:"2026-05-21" raw = [])
-  in
-  assert
-    (Shioaji.parse_orders_today ~code:"2330" ~today:"2026-05-20" raw = [])
-
-let () =
+  let () = test_engine_fill_planner () in
   let () = test_shioaji_info_parse () in
   let () = test_shioaji_snapshot_parse () in
   let () = test_shioaji_positions_parse () in
+  let () = test_shioaji_position_details_parse () in
   let () = test_shioaji_balance_parse () in
   let () = test_shioaji_placed_parse () in
-  test_shioaji_orders_today_parse ()
+  let () = test_shioaji_parser_rejections () in
+  let () = test_shioaji_orders_today_parse () in
+  let () = test_tw_live_phase () in
+  let () = test_tw_live_exchange () in
+  let () = test_tw_live_equity () in
+  let () = test_tw_live_plan_legs () in
+  let () = test_tw_live_startup_guard () in
+  let () = test_tw_maturity_rollover_legs () in
+  let () = test_tw_live_decide_override () in
+  let () = test_tw_execution_stops_on_predecessor () in
+  let () = test_tw_execution_times_out () in
+  let () = test_tw_default_sell_has_no_per_share_fee () in
+  let () = test_tw_execution_polls_zero_qty_pending () in
+  let () = test_tw_execution_rechecks_cutoff () in
+  let () = test_tw_execution_advances_when_funded () in
+  let () = test_tw_execution_caps_rounded_funding () in
+  let () = test_tw_execution_tracks_refinanced_loan () in
+  let () = test_tw_execution_remaining_stops () in
+  let () = test_tw_previous_session_calendar () in
+  let () = test_shioaji_settlement_amounts () in
+  let () = test_shioaji_weighted_fill_price () in
+  print_endline "ok"
