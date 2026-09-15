@@ -1,8 +1,6 @@
 # bt
 
-`bt` is a command-line backtest tool written in OCaml. It downloads daily
-prices from FinMind (Taiwan) and Tiingo (US) and runs one or more strategy
-scripts. A run can compare all strategies with an optional buy-and-hold baseline.
+`bt` is a command-line backtest tool written in OCaml. It downloads daily prices from FinMind (Taiwan) and Tiingo (US) and runs one or more strategy scripts. A run can compare all strategies with an optional buy-and-hold baseline.
 
 ## Contents
 
@@ -13,9 +11,8 @@ scripts. A run can compare all strategies with an optional buy-and-hold baseline
 - [Strategy language (DSL)](#strategy-language-dsl)
 - [Engine overview](#engine-overview)
 - [Data notes](#data-notes)
-  - [Taiwan (tw)](#taiwan-tw)
-  - [United States (us)](#united-states-us)
-  - [Both markets](#both-markets)
+  - [US market (us)](#us-market-us)
+  - [Taiwan market (tw)](#taiwan-market-tw)
 - [Contributing](#contributing)
 - [License](#license)
 - [Acknowledgements](#acknowledgements)
@@ -27,15 +24,11 @@ scripts. A run can compare all strategies with an optional buy-and-hold baseline
 - `python3` with matplotlib (optional; used by `scripts/plot.py` for the equity graph)
 - A FinMind API token (for TW data) and/or a Tiingo API token (for US data)
 
-For plotting, `bt` runs `scripts/plot.py` directly. If `python3` or matplotlib
-is unavailable, it prints `warning: plot failed; skipping <stem>.png` and
-skips the graph without failing the backtest.
+For plotting, `bt` runs `scripts/plot.py` directly. If `python3` or matplotlib is unavailable, it prints `warning: plot failed; skipping <stem>.png` and skips the graph without failing the backtest.
 
 ## Build and test
 
-One-time preparation: create the project-local opam switch. This pins
-the compiler to OCaml 5.5.0 and installs dune into `_opam/` inside the
-project, so the build does not depend on a global toolchain.
+One-time preparation: create the project-local opam switch. This pins the compiler to OCaml 5.5.0 and installs dune into `_opam/` inside the project, so the build does not depend on a global toolchain.
 
 ```sh
 opam switch create . ocaml-base-compiler.5.5.0 --no-install -y
@@ -70,14 +63,9 @@ The binary is `_build/default/bin/bt.exe`.
      --baseline tw/00685L
    ```
 
-The report has one column for each strategy and one baseline column. Each
-strategy metric has a `W` or `L` marker when you use `--baseline`.
+The report has one column for each strategy and one baseline column. Each strategy metric has a `W` or `L` marker when you use `--baseline`.
 
-The default output stem joins the strategy basenames with `_vs_`. This
-example writes `out/sma_cross_vs_00685L_bh.csv` and
-`out/sma_cross_vs_00685L_bh.png`. It also writes the fill logs
-`out/sma_cross.trades.csv` and `out/00685L_bh.trades.csv`. A fill log has
-the header `date,stock,price,from_exposure,to_exposure`.
+The default output stem joins the strategy basenames with `_vs_`. This example writes `out/sma_cross_vs_00685L_bh.csv` and `out/sma_cross_vs_00685L_bh.png`. It also writes the fill logs `out/sma_cross.trades.csv` and `out/00685L_bh.trades.csv`. A fill log has the header `date,stock,price,from_exposure,to_exposure`.
 
 ## Commands
 
@@ -94,29 +82,21 @@ bt run STRAT... [--baseline M/SYM] [--from D] [--to D]
 
 See [docs/cli.md](./docs/cli.md) for the complete reference.
 
-- Use a value such as `tw/0050` for `MARKET/SYMBOL`. For `bt fetch` you
-  can use `--market tw|us --symbol SYM` instead.
+- Use a value such as `tw/0050` for `MARKET/SYMBOL`. For `bt fetch` you can use `--market tw|us --symbol SYM` instead.
 - The default fetch range starts on `1994-10-01` and ends today.
-- A strategy file holds one stock, or several stocks declared with `as`
-  aliases and dotted statements; see [docs/strategy.md](./docs/strategy.md).
+- A strategy file holds one stock, or several stocks declared with `as` aliases and dotted statements; see [docs/strategy.md](./docs/strategy.md).
 - `--baseline M/SYM` adds an optional buy-and-hold baseline.
 - `-p name=value` overrides a matching `param` in the strategy files.
-- `--fill` selects the fill point. `close` fills at the decision close
-  and is the default. `open` fills at the next open.
-- The default curve stem joins strategy basenames with `_vs_`.
-  `--out-name NAME` replaces this stem. The curve files are
-  `<stem>.csv` and `<stem>.png`.
-- Each strategy gets a separate `<name>.trades.csv` fill log.
-  `--out-name` does not change these log names.
+- `--fill` selects the fill point. `close` fills at the decision close and is the default. `open` fills at the next open.
+- The default curve stem joins strategy basenames with `_vs_`. `--out-name NAME` replaces this stem. The curve files are `<stem>.csv` and `<stem>.png`.
+- Each strategy gets a separate `<name>.trades.csv` fill log. `--out-name` does not change these log names.
 - `--no-plot` skips `scripts/plot.py` and prevents updates to `<stem>.png`.
-- `--fee-bps`, `--tax-bps`, and `--slip-bps` take basis points. 100 basis
-  points are 1%. `--capital` and `--min-fee` take TWD.
+- `--fee-bps`, `--tax-bps`, and `--slip-bps` take basis points. 100 basis points are 1%. `--capital` and `--min-fee` take TWD.
 - `--dividend-tax` takes a percentage. It defaults to 0 and reduces each dividend before the engine books it.
 
 ## Strategy language (DSL)
 
-A strategy file is a small script with one statement per line. Example
-(`examples/bb_macd.strat`):
+A strategy file is a small script with one statement per line. Example (`examples/bb_macd.strat`):
 
 ```
 stock "tw/0050"
@@ -133,44 +113,31 @@ Line by line:
 - `stock "tw/0050"` selects the market and the symbol to trade.
 - `param` declares a tunable number. `-p n=30` overrides it from the CLI.
 - `let` names an intermediate series. Here `hist` is the MACD histogram.
-- `entry when` gives the buy condition: the close crosses above the
-  middle Bollinger band while the histogram is positive.
-- `exit when` gives the sell condition: the close crosses below the
-  lower band, or the histogram turns negative.
+- `entry when` gives the buy condition: the close crosses above the middle Bollinger band while the histogram is positive.
+- `exit when` gives the sell condition: the close crosses below the lower band, or the histogram turns negative.
 - `size 1.0` invests the full equity while in a position.
 
-The DSL also supports fractional and staged exposure through two more
-styles (`target` expressions and partial orders), about 20 builtin
-indicator functions, and scalar/series arithmetic. See
-[docs/strategy.md](./docs/strategy.md) for the complete reference:
-styles, grammar, statements, types, and every builtin.
+The DSL also supports fractional and staged exposure through two more styles (`target` expressions and partial orders), about 20 builtin indicator functions, and scalar/series arithmetic. See [docs/strategy.md](./docs/strategy.md) for the complete reference: styles, grammar, statements, types, and every builtin.
 
 ## Engine overview
 
-The engine reads each bar's target exposure and trades only the difference.
-Positions drift between fills. Each asset has separate cash and margin
-inventories with lot-level loan tracking. See
-[docs/engine.md](./docs/engine.md) for the complete engine guide, including
-per-market costs, margin financing, dividend accounting, and simulation gaps.
+The engine reads each bar's target exposure and trades only the difference. Positions drift between fills. Each asset has separate cash and margin inventories with lot-level loan tracking. See [docs/engine.md](./docs/engine.md) for the complete engine guide, including per-market costs, margin financing, dividend accounting, and simulation gaps.
 
 ## Data notes
 
-### Taiwan (tw)
+Both markets use one loader with two price planes. The signal plane adjusts for dividends and every corporate event. The money plane adjusts for splits and share-count events and keeps cash-dividend drops. `bt fetch` prepends rows when `--from` is earlier than the first cached date and appends rows after the last cached date. Cached dates are not added again, so repeated fetches are idempotent.
 
-- TW prices come from [FinMind](https://finmind.github.io). `bt fetch` stores raw OHLCV bars, signal-plane dividend factors, cash dividends, and unit events in four files per symbol under `data/tw/<symbol>/`.
-- Cash dividends carry real pay dates when FinMind provides them. A missing pay date falls back to one calendar month after the ex-date.
-- If FinMind denies the cash-dividend table with HTTP or API status 400, 402, or 403, `bt fetch` derives cash amounts from the legacy `<symbol>.div.csv` factors and treats every factor as cash-only. This is exact for cash-only TW ETFs. It can misprice stocks that also pay stock dividends.
-
-### United States (us)
+### US market (us)
 
 - US prices come from [Tiingo](https://www.tiingo.com). `bt fetch` stores raw OHLCV bars, signal-plane dividend factors, cash dividends, and split events in four files per symbol under `data/us/<symbol>/`.
 - Cash dividends have no pay date at Tiingo. The engine credits them on the ex-date.
 - Split factors are snapped to the nearest small rational to remove vendor floating-point noise.
 
-### Both markets
+### Taiwan market (tw)
 
-- One unified loader builds two price planes. The signal plane adjusts for dividends and every corporate event. The money plane adjusts for splits and share-count events and keeps cash-dividend drops.
-- `bt fetch` prepends rows when `--from` is earlier than the first cached date and appends rows after the last cached date. Cached dates are not added again, so repeated fetches are idempotent.
+- TW prices come from [FinMind](https://finmind.github.io). `bt fetch` stores raw OHLCV bars, signal-plane dividend factors, cash dividends, and unit events in four files per symbol under `data/tw/<symbol>/`.
+- Cash dividends carry real pay dates when FinMind provides them. A missing pay date falls back to one calendar month after the ex-date.
+- If FinMind denies the cash-dividend table with HTTP or API status 400, 402, or 403, `bt fetch` derives cash amounts from the legacy `<symbol>.div.csv` factors and treats every factor as cash-only. This is exact for cash-only TW ETFs. It can misprice stocks that also pay stock dividends.
 
 ## Contributing
 

@@ -2323,18 +2323,56 @@ let test_tw_adjustment_refresh_horizon () =
         ~to_:(Some "2026-05-22") ~data_dir
     in
     (* A current-session action must adjust the previous-session signal plane. *)
-    let () = assert_close 50. asset.Data.signal.(1).c in
-    let saved = Sys.getenv_opt "FINMIND_TOKEN" in
-    let () = Unix.putenv "FINMIND_TOKEN" "" in
-    Fun.protect
-      ~finally:(fun () ->
-        match saved with
-        | Some value -> Unix.putenv "FINMIND_TOKEN" value
-        | None -> Unix.putenv "FINMIND_TOKEN" "")
-      (fun () ->
-        assert_failure (fun () ->
-          Data.fetch_tw_adjustments ~symbol:"2330" ~to_:"2026-05-26"
-            ~data_dir)))
+    assert_close 50. asset.Data.signal.(1).c)
+
+let test_tw_adjustment_refresh_failure () =
+  with_temp_market "tw" (fun data_dir tw_dir ->
+    let symbol_dir = Filename.concat tw_dir "2330" in
+    let () = Unix.mkdir symbol_dir 0o700 in
+    let price_cache = Filename.concat symbol_dir "2330.csv" in
+    let output = open_out price_cache in
+    let () =
+      Fun.protect
+        ~finally:(fun () -> close_out output)
+        (fun () ->
+          output_string output
+            "date,open,high,low,close,volume\n\
+             2026-05-26,100,100,100,100,1000\n")
+    in
+    match Unix.fork () with
+    | 0 ->
+        (try
+          let () = Unix.putenv "FINMIND_TOKEN" "x" in
+          let () =
+            Unix.putenv "https_proxy" "http://127.0.0.1:1"
+          in
+          let () = Unix.putenv "NO_PROXY" "" in
+          let failure =
+            try
+              let () =
+                Data.fetch_tw_adjustments ~symbol:"2330" ~to_:"2026-05-26"
+                  ~data_dir
+              in
+              None
+            with Failure message -> Some message
+          in
+          (* The legacy factor source is the first failed adjustment dataset. *)
+          let () =
+            assert
+              (failure =
+               Some "TaiwanStockDividendResult adjustment refresh failed")
+          in
+          (* Historical fetch keeps its existing best-effort warning contract. *)
+          let () =
+            Data.fetch ~market:"tw" ~symbol:"2330" ~from_:None
+              ~to_:"2026-05-26" ~data_dir
+          in
+          Unix._exit 0
+        with _ -> Unix._exit 1)
+    | child ->
+        let _, status = Unix.waitpid [] child in
+        (* The child isolates all three environment changes from later tests. *)
+        assert (status = Unix.WEXITED 0))
 
 
 let test_tiingo_transform () =
@@ -6250,6 +6288,7 @@ let () =
   test_stock_dividend_restates_volume ();
   test_load_adjustments ();
   let () = test_tw_adjustment_refresh_horizon () in
+  let () = test_tw_adjustment_refresh_failure () in
   test_financing_ratio ();
   test_nested_cache_layout ();
   test_event_transform ();

@@ -562,24 +562,32 @@ let fetch_dividends ~token ~symbol ~to_ ~cache_path =
          else "prices will be unadjusted for dividends")
     in
     if not (process_ok process_status) || http_code <> "200" then
-      keep
-        ("HTTP " ^
-         (if http_code = "" || http_code = "000" then "unavailable"
-          else http_code))
+      let () =
+        keep
+          ("HTTP " ^
+           (if http_code = "" || http_code = "000" then "unavailable"
+            else http_code))
+      in
+      Some "TaiwanStockDividendResult"
     else
       match check_api_response json_path with
-      | `Error message -> keep message
+      | `Error message ->
+          let () = keep message in
+          Some "TaiwanStockDividendResult"
       | `Ok ->
-          with_temp ".rows" (fun rows_path ->
-            let () =
-              transform_json ~args:[]
-                ~expression:(
-                  ".data[] | select(.before_price != null and .after_price != null) " ^
-                  "| select((.before_price | tonumber) != 0) " ^
-                  "| [.date, ((.after_price | tonumber) / (.before_price | tonumber))] | @csv")
-                ~json_path ~rows_path
-            in
-            rewrite_rows ~header:"date,factor" ~rows_path ~cache_path))
+          let () =
+            with_temp ".rows" (fun rows_path ->
+              let () =
+                transform_json ~args:[]
+                  ~expression:(
+                    ".data[] | select(.before_price != null and .after_price != null) " ^
+                    "| select((.before_price | tonumber) != 0) " ^
+                    "| [.date, ((.after_price | tonumber) / (.before_price | tonumber))] | @csv")
+                  ~json_path ~rows_path
+              in
+              rewrite_rows ~header:"date,factor" ~rows_path ~cache_path)
+          in
+          None)
 
 let event_expression ~before ~after =
   ".data[] | select(.stock_id == $sym) " ^
@@ -622,12 +630,12 @@ let fetch_events ~token ~symbol ~to_ ~cache_path =
              (if http_code = "" || http_code = "000" then "unavailable"
               else http_code))
         in
-        None
+        Error dataset
       else
         match check_api_response json_path with
         | `Error message ->
             let () = keep (dataset ^ ": " ^ message) in
-            None
+            Error dataset
         | `Ok ->
             with_temp ".rows" (fun rows_path ->
               let () =
@@ -635,28 +643,31 @@ let fetch_events ~token ~symbol ~to_ ~cache_path =
                   ~expression:(event_expression ~before ~after)
                   ~json_path ~rows_path
               in
-              Some (non_empty_lines rows_path)))
+              Ok (non_empty_lines rows_path)))
   in
   let rec collect acc = function
-    | [] -> Some (List.concat (List.rev acc))
+    | [] -> Ok (List.concat (List.rev acc))
     | source :: rest ->
         (match fetch_one source with
-         | None -> None
-         | Some rows -> collect (rows :: acc) rest)
+         | Error dataset -> Error dataset
+         | Ok rows -> collect (rows :: acc) rest)
   in
   match collect [] event_sources with
-  | None -> ()
-  | Some rows ->
+  | Error dataset -> Some dataset
+  | Ok rows ->
       let rows = List.sort String.compare rows in
-      with_temp ".rows" (fun rows_path ->
-        let output = open_out rows_path in
-        let () =
-          Fun.protect
-            ~finally:(fun () -> close_out output)
-            (fun () ->
-              List.iter (fun row -> output_string output (row ^ "\n")) rows)
-        in
-        rewrite_rows ~header:"date,factor" ~rows_path ~cache_path)
+      let () =
+        with_temp ".rows" (fun rows_path ->
+          let output = open_out rows_path in
+          let () =
+            Fun.protect
+              ~finally:(fun () -> close_out output)
+              (fun () ->
+                List.iter (fun row -> output_string output (row ^ "\n")) rows)
+          in
+          rewrite_rows ~header:"date,factor" ~rows_path ~cache_path)
+      in
+      None
 
 let fetch_stockinfo ~token ~symbol ~cache_path =
   with_temp ".json" (fun json_path ->
@@ -1093,16 +1104,21 @@ let fetch_cash_dividends ~token ~symbol ~to_ ~price_cache ~factor_cache
          "cash dividend data is unavailable")
   in
   let derive reason =
-    Printf.eprintf
-      "warning: TaiwanStockDividend unavailable (%s); deriving cash dividends from cached price factors and treating every factor as cash-only\n"
-      reason;
-    try
-      let bars = read_bars ~market:"tw" price_cache in
-      let factors = read_dividends factor_cache in
-      let dividends = derive_cash_dividends bars factors in
-      merge_cash_dividend_cache dividends ~cache_path
-    with Failure message | Sys_error message ->
-      keep (reason ^ "; factor derivation failed: " ^ message)
+    let () =
+      Printf.eprintf
+        "warning: TaiwanStockDividend unavailable (%s); deriving cash dividends from cached price factors and treating every factor as cash-only\n"
+        reason
+    in
+    let () =
+      try
+        let bars = read_bars ~market:"tw" price_cache in
+        let factors = read_dividends factor_cache in
+        let dividends = derive_cash_dividends bars factors in
+        merge_cash_dividend_cache dividends ~cache_path
+      with Failure message | Sys_error message ->
+        keep (reason ^ "; factor derivation failed: " ^ message)
+    in
+    Some "TaiwanStockDividend"
   in
   with_temp ".json" (fun json_path ->
     let url =
@@ -1125,29 +1141,37 @@ let fetch_cash_dividends ~token ~symbol ~to_ ~price_cache ~factor_cache
     match tier_failure with
     | Some reason -> derive reason
     | None when not (process_ok process_status) || http_code <> "200" ->
-        keep
-          ("HTTP " ^
-           (if http_code = "" || http_code = "000" then "unavailable"
-            else http_code))
+        let () =
+          keep
+            ("HTTP " ^
+             (if http_code = "" || http_code = "000" then "unavailable"
+              else http_code))
+        in
+        Some "TaiwanStockDividend"
     | None ->
         (match check_api_response json_path with
-         | `Error message -> keep message
+         | `Error message ->
+             let () = keep message in
+             Some "TaiwanStockDividend"
          | `Ok ->
-             with_temp ".rows" (fun rows_path ->
-               let () =
-                 transform_json ~args:[]
-                   ~expression:(
-                     ".data[] " ^
-                     "| select((.CashExDividendTradingDate // \"\") != \"\") " ^
-                     "| [.CashExDividendTradingDate, " ^
-                     "(((.CashEarningsDistribution // 0) | tonumber) + " ^
-                     "((.CashStatutorySurplus // 0) | tonumber)), " ^
-                     "(.CashDividendPaymentDate // \"\")] " ^
-                     "| select(.[1] != 0) | @csv")
-                   ~json_path ~rows_path
-               in
-               rewrite_rows ~header:"ex_date,cash_per_share,pay_date"
-                 ~rows_path ~cache_path)))
+             let () =
+               with_temp ".rows" (fun rows_path ->
+                 let () =
+                   transform_json ~args:[]
+                     ~expression:(
+                       ".data[] " ^
+                       "| select((.CashExDividendTradingDate // \"\") != \"\") " ^
+                       "| [.CashExDividendTradingDate, " ^
+                       "(((.CashEarningsDistribution // 0) | tonumber) + " ^
+                       "((.CashStatutorySurplus // 0) | tonumber)), " ^
+                       "(.CashDividendPaymentDate // \"\")] " ^
+                       "| select(.[1] != 0) | @csv")
+                     ~json_path ~rows_path
+                 in
+                 rewrite_rows ~header:"ex_date,cash_per_share,pay_date"
+                   ~rows_path ~cache_path)
+             in
+             None))
 
 let snap_split_factor value =
   let rec search p q best best_err =
@@ -1393,24 +1417,36 @@ let require_token name =
 let fetch_tw_adjustments_with_token ~token ~symbol ~to_ ~directory =
   let factor_cache = Filename.concat directory (symbol ^ ".div.csv") in
   let cash_cache = Filename.concat directory (symbol ^ ".cashdiv.csv") in
-  let () =
+  let dividend_failure =
     fetch_dividends ~token ~symbol ~to_ ~cache_path:factor_cache
   in
-  let () =
+  let cash_failure =
     fetch_cash_dividends ~token ~symbol ~to_
       ~price_cache:(Filename.concat directory (symbol ^ ".csv"))
       ~factor_cache ~cache_path:cash_cache
   in
-  fetch_events ~token ~symbol ~to_
-    ~cache_path:(Filename.concat directory (symbol ^ ".events.csv"))
+  let events_failure =
+    fetch_events ~token ~symbol ~to_
+      ~cache_path:(Filename.concat directory (symbol ^ ".events.csv"))
+  in
+  match dividend_failure with
+  | Some _ as failure -> failure
+  | None ->
+      (match cash_failure with
+       | Some _ as failure -> failure
+       | None -> events_failure)
 
 let fetch_tw_adjustments ~symbol ~to_ ~data_dir =
   let () = check_symbol symbol in
   let () = ignore (parse_date "to" to_) in
   let directory = symbol_directory ~data_dir ~market:"tw" ~symbol in
   let () = mkdir_p directory in
-  fetch_tw_adjustments_with_token ~token:(require_token "FINMIND_TOKEN")
-    ~symbol ~to_ ~directory
+  match
+    fetch_tw_adjustments_with_token ~token:(require_token "FINMIND_TOKEN")
+      ~symbol ~to_ ~directory
+  with
+  | None -> ()
+  | Some dataset -> failf "%s adjustment refresh failed" dataset
 
 
 let previous_trading_day ~before =
@@ -1459,7 +1495,8 @@ let fetch ~market ~symbol ~from_ ~to_ ~data_dir =
           ~cache_path:(Filename.concat directory (symbol ^ ".csv"))
       in
       let () =
-        fetch_tw_adjustments_with_token ~token ~symbol ~to_ ~directory
+        ignore
+          (fetch_tw_adjustments_with_token ~token ~symbol ~to_ ~directory)
       in
       let market_dir = Filename.concat data_dir market in
       fetch_stockinfo ~token ~symbol

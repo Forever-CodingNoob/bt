@@ -36,7 +36,8 @@ val fetch :
   unit
 
 (** Refresh only TW dividend, cash-dividend, and corporate-action caches
-    through [to_], leaving the price cache unchanged. *)
+    through [to_], leaving the price cache unchanged. Raises [Failure] when
+    any adjustment dataset cannot be refreshed. *)
 val fetch_tw_adjustments :
   symbol:string ->
   to_:string ->
