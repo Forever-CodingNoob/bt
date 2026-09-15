@@ -360,24 +360,40 @@ let shioaji_timestamp_seconds value =
   let () =
     if hour > 23 || minute > 59 || second > 59 then invalid ()
   in
-  let normalized =
-    if length = 19 then
-      value ^ "+08:00"
-    else if length = 20 && value.[19] = 'Z' then
-      value
-    else if length = 25
-            && (value.[19] = '+' || value.[19] = '-')
-            && value.[22] = ':' && digits value 20 22
-            && digits value 23 25
+  let zone_start =
+    if length > 19 && value.[19] = '.' then
+      let rec fraction_end index =
+        if index < length && digit value.[index] then
+          fraction_end (index + 1)
+        else
+          index
+      in
+      let index = fraction_end 20 in
+      if index = 20 || index - 20 > 9 then invalid () else index
+    else
+      19
+  in
+  let zone =
+    if zone_start = length then
+      "+08:00"
+    else if zone_start + 1 = length && value.[zone_start] = 'Z' then
+      "Z"
+    else if zone_start + 6 = length
+            && (value.[zone_start] = '+' || value.[zone_start] = '-')
+            && value.[zone_start + 3] = ':'
+            && digits value (zone_start + 1) (zone_start + 3)
+            && digits value (zone_start + 4) (zone_start + 6)
     then
-      let offset_hour = int_field value 20 2 in
-      let offset_minute = int_field value 23 2 in
-      if offset_hour <= 23 && offset_minute <= 59 then value
-      else invalid ()
+      let offset_hour = int_field value (zone_start + 1) 2 in
+      let offset_minute = int_field value (zone_start + 4) 2 in
+      if offset_hour <= 23 && offset_minute <= 59 then
+        String.sub value zone_start 6
+      else
+        invalid ()
     else
       invalid ()
   in
-  rfc3339_seconds normalized
+  rfc3339_seconds (String.sub value 0 19 ^ zone)
 
 let tw_snapshot_date (snapshot : Shioaji.snapshot) =
   let () = ignore (shioaji_timestamp_seconds snapshot.datetime) in

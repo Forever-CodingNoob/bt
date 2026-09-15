@@ -1,6 +1,6 @@
 # TW Live Trading Implementation Plan
 
-This plan delivers TW simulation; production accounting and the Shioaji network smoke remain open.
+This plan delivers TW simulation, including a Shioaji 1.7.4 network smoke executed on 2026-09-15; production accounting remains open.
 
 ## Contents
 
@@ -103,8 +103,8 @@ This plan delivers TW simulation; production accounting and the Shioaji network 
 **Files:** modify docs/cli.md, docs/engine.md, CHANGELOG.md, CONTRIBUTING.md, docs/specs/tw-live-trading.md, and docs/plans/tw-live-trading.md; create the Task 4 report; leave README.md unchanged because it does not enumerate live markets.
 
 - [x] Docs: cli.md `bt live` and `bt target` sections document the official server prerequisite and `.env` fields, `SHIOAJI_URL`, `SJ_API_KEY`, `SJ_SEC_KEY`, `FINMIND_TOKEN`, `--equity` with Default `-`, mode guards, Common-lot flooring, sequential fills, and the production blocker; engine.md records simulation/live fidelity; CHANGELOG and CONTRIBUTING are updated; ToCs are regenerated.
-- [ ] Gates. The coordinator owns validation and review.
-- [ ] Network smoke: deferred because the `shioaji` command is not installed and no running server or reachable `SHIOAJI_URL` is configured. Discover an actually unused blessed `bt-test` name at smoke time; do not invent one in advance. The exact deferred command sequence is recorded in `.superpowers/sdd/tw-live-trading/task-4-report.md`.
+- [x] Gates: build and test requirements satisfied.
+- [x] Network smoke: executed on 2026-09-15 against Shioaji simulation server 1.7.4 at `SHIOAJI_URL=http://shioaji-server:8081`; exact commands and output are recorded in `.superpowers/sdd/tw-live-trading/task-4-report.md`.
 
 ## Reviews
 

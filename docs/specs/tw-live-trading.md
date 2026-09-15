@@ -95,7 +95,7 @@ The market arm is chosen from the strategy's `stock "tw/..."` declaration. `--pr
 - The exported engine planner has hand-derived two-inventory checks; the TW daily backtest output remains byte-identical to the standing reference.
 - Calendar checks cover strict FinMind response parsing and a Tuesday-after-Monday-holiday previous session. TW decisions require the independent previous session and exact cache end date.
 - Execution checks cover zero-lot plans; full sequential sell, refinance, and buy progress; confirmed-price cash updates; partial, failed, missing, mismatched, ambiguous, and timed-out statuses; cutoff before a successor; capped buys; and retained residual legs.
-- Run one Shioaji network smoke against a simulation server; record the server version, commands, and output in the Task 4 report.
+- The required Shioaji network smoke against a simulation server was executed on 2026-09-15 against server 1.7.4; the Task 4 report records the commands and output.
 
 ## Docs
 

@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `bt live` adds a TW simulation daemon with 18-month margin-lot rollovers and sequential `MKT` + `IOC` fill confirmation.
 - TW `--live` verifies production server mode, then stops before sizing until real-account cash and settlement accounting is verified.
 
+### Fixed
+
+- TW Shioaji snapshots with 1 to 9 fractional-second digits are accepted and truncated to whole seconds for session-time checks.
+
 ## [0.9.0] - 2026-09-06
 
 ### Added

@@ -5568,6 +5568,36 @@ let test_tw_live_decide_override () =
       in
       (* A zero close falls back to (TWD 1,998 + TWD 2,002) / 2 = TWD 2,000. *)
       let () = assert_close 2000. midpoint.Live.provisional.c in
+      let decide_at datetime =
+        Live.decide ~previous_session:"2026-05-22" ~equity:20000000.
+          ~tw_positions:positions
+          ~tw_snapshot:{ snapshot with datetime }
+          Live.Paper ~session_date:"2026-05-26" ~strat_path ~data_dir
+      in
+      let fractional = decide_at "2026-05-26T13:20:00.671475" in
+      (* 13:20:00.671475 floors to 13:20:00, retaining 2026-05-26. *)
+      let () = assert (fractional = midpoint) in
+      let offset = decide_at "2026-05-26T13:20:00+08:00" in
+      let fractional_offset =
+        decide_at "2026-05-26T13:20:00.5+08:00"
+      in
+      (* At +08:00, 13:20:00.5 floors to the unfractioned 13:20:00. *)
+      let () = assert (fractional_offset = offset) in
+      (* A decimal point without a fractional digit is malformed. *)
+      let () =
+        assert_failure (fun () ->
+          ignore (decide_at "2026-05-26T13:20:00."))
+      in
+      (* Letters do not satisfy the one-to-nine fractional-digit contract. *)
+      let () =
+        assert_failure (fun () ->
+          ignore (decide_at "2026-05-26T13:20:00.abc"))
+      in
+      (* Ten digits exceed the accepted fractional precision of nine digits. *)
+      let () =
+        assert_failure (fun () ->
+          ignore (decide_at "2026-05-26T13:20:00.1234567890"))
+      in
       (* Saturday 2026-05-23 cannot be the previous session for Tuesday. *)
       let () =
         assert_failure (fun () ->
