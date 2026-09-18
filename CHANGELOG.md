@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - TW Shioaji snapshots with 1 to 9 fractional-second digits are accepted and truncated to whole seconds for session-time checks.
+- TW live planning now preserves drift when the effective target is unchanged, trades only when it changes, and applies the 20 TWD minimum commission without rescaling absolute broker values.
 
 ## [0.9.0] - 2026-09-06
 

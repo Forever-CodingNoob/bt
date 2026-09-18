@@ -679,15 +679,22 @@ let decide ?provisional_close ?previous_session ?equity ?tw_balance
       let financing_ratio =
         Data.financing_ratio ~market:"tw" ~data_dir ~symbol
       in
-      let target =
+      let effective_target raw =
+        let effective, _ =
+          Engine.effective_targets
+            ~financing_ratios:[| financing_ratio |] [| raw |]
+        in
+        effective.(0)
+      in
+      let target, previous_target =
         match strategy.Engine.targets with
         | [| targets |] when Array.length targets > 0 ->
-            let raw = targets.(Array.length targets - 1) in
-            let effective, _ =
-              Engine.effective_targets
-                ~financing_ratios:[| financing_ratio |] [| raw |]
+            let last = Array.length targets - 1 in
+            let target = effective_target targets.(last) in
+            let previous =
+              if last = 0 then 0. else effective_target targets.(last - 1)
             in
-            effective.(0)
+            target, previous
         | _ -> failwith "live trading requires exactly one stock target"
       in
       let positions =
@@ -730,18 +737,17 @@ let decide ?provisional_close ?previous_session ?equity ?tw_balance
         if not (Float.is_finite cash) then
           failwith "TW inferred cash balance is not finite"
       in
-      let current = (cash_value +. margin_value) /. equity in
       let costs = Engine.default_costs ~market:"tw" ~symbol in
       let plan =
-        Engine.plan_fills ~costs:[| costs |] ~capital:(Some equity)
+        Engine.plan_fills ~costs:[| costs |] ~capital:(Some 1.)
           ~financing_ratios:[| financing_ratio |]
           ~state:
             { Engine.equity; cash; cash_values = [| cash_value |];
               margin_values = [| margin_value |]; loans = [| loans |];
               interests = [| interests |]; tail_interests = [| 0. |];
               debt = 0.; receivables = 0.;
-              previous_targets = [| current |] }
-          ~prices:[| provisional.c |] ~targets:[| target |] ~force:true
+              previous_targets = [| previous_target |] }
+          ~prices:[| provisional.c |] ~targets:[| target |] ~force:false
       in
       let action =
         Orders

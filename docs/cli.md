@@ -455,7 +455,7 @@ The Shioaji server may still need its own keys to log in. `bt` never fails becau
 | Phase | Taipei timing | Implemented TW action |
 |---|---|---|
 | Prepare | 13:05 | Check that a snapshot is dated today, query FinMind's independent trading calendar for the previous session, fetch prices through that session, refresh adjustment datasets through today, and require an exact price-cache end date. |
-| Decide | 13:20 | Request a fresh snapshot, validate its session and OHLCV values, append the provisional bar, evaluate the strategy, read Common-lot aggregate positions and dated margin details, derive simulation or production cash and equity, prepend due 18-month rollover pairs, and plan ordinary cash, margin, and refinancing legs. |
+| Decide | 13:20 | Request a fresh snapshot, validate its session and OHLCV values, append the provisional bar, evaluate the final and previous effective targets, read Common-lot aggregate positions and dated margin details, derive simulation or production cash and equity, prepend due 18-month rollover pairs, and plan ordinary cash, margin, and refinancing legs in absolute TWD. An unchanged effective target preserves drift; a changed target trades from current inventory. |
 | Execute | Before 13:25 | Floor shares to 1000-share Common lots and submit `MKT` + `IOC` legs sequentially. Recheck the date and cutoff immediately before every order and during every status poll. |
 | Reconcile | After 13:30 | Query and log today's resulting trades, including fill status, deal lots, and weighted deal price. |
 
