@@ -82,8 +82,13 @@ val decide_action :
 (** Resolve a TW symbol to Shioaji's [TSE] or [OTC] exchange name. *)
 val exchange_of_symbol : data_dir:string -> string -> string
 
-(** Value cash and Common-lot positions net of broker loans and interest. *)
-val equity_of : balance:float -> positions:Shioaji.position list -> float
+(** Require exactly one signed T+0, T+1, and T+2 settlement, then add only
+    T+1 and T+2 to the broker balance. T+0 is already reflected in balance. *)
+val tw_production_cash :
+  balance:float -> settlements:Shioaji.settlement list -> float
+
+(** Value spendable cash and Common-lot positions net of loans and interest. *)
+val equity_of : cash:float -> positions:Shioaji.position list -> float
 
 (** Convert a one-asset value-denominated plan to board-lot order legs,
     retaining each cash and margin refinance sell-and-rebuy pair. *)
@@ -136,6 +141,9 @@ val timestamp_date : string -> string
 (** Reject inactive or trading-blocked Alpaca accounts before startup. *)
 val startup_ok : Alpaca.account_t -> (unit, string) result
 
+(** Require the current Shioaji server mode to match the CLI mode. *)
+val tw_server_mode_ok : mode -> Shioaji.info -> (unit, string) result
+
 (** Require CLI mode, equity source, and Shioaji server mode to agree. *)
 val tw_startup_ok :
   mode -> equity:float option -> Shioaji.info -> (unit, string) result
@@ -145,6 +153,8 @@ val decide :
   ?provisional_close:float ->
   ?previous_session:string ->
   ?equity:float ->
+  ?tw_balance:float ->
+  ?tw_settlements:Shioaji.settlement list ->
   ?tw_positions:Shioaji.position list ->
   ?tw_position_details:Shioaji.position_detail list ->
   ?tw_snapshot:Shioaji.snapshot ->

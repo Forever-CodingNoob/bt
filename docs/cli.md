@@ -204,7 +204,7 @@ These flags are usage errors (exit 2). `bt run`, `bt target`, and `bt live` reje
 
 ## `bt target`
 
-Runs one US Alpaca or TW Shioaji simulation decision and prints the daemon's proposed action without submitting an order.
+Runs one US Alpaca or TW Shioaji decision, simulation or production, and prints the proposed action without submitting an order.
 
 The following options are shared by both market arms.
 
@@ -300,21 +300,21 @@ SJ_CA_PASSWD=YOUR_CA_PASSWORD
 SJ_PRODUCTION=false
 ```
 
-`SJ_API_KEY` and `SJ_SEC_KEY` log the server in and let `bt` authenticate to its trading endpoints. `SJ_CA_PATH` and `SJ_CA_PASSWD` activate the certificate required for production order placement, and `SJ_PRODUCTION=false` or an unset value selects simulation while `true` selects production. The CA path, CA password, and production setting remain server-only.
+`SJ_API_KEY` and `SJ_SEC_KEY` let the server log in to Shioaji. Copies in the `bt` environment are optional: `bt` sends a Bearer header only when both are set and nonempty, for servers that enforce Bearer authentication. `SJ_CA_PATH` and `SJ_CA_PASSWD` activate the certificate required for production order placement, and `SJ_PRODUCTION=false` or an unset value selects simulation while `true` selects production. The CA path, CA password, and production setting remain server-only.
 
 #### Options
 
-TW production accounting remains blocked; see [Safety and failure in the TW live-trading design](./specs/tw-live-trading.md#safety-and-failure).
+TW production sizes from broker balance, signed T+1 and T+2 settlements, and Common-lot positions. T+0 is required for settlement-window validation and startup audit but is already reflected in the balance.
 
 | Option | Default | Description |
 |---|---|---|
-| `--live` | simulation | Request TW production mode, which currently stops at the accounting blocker. |
+| `--live` | simulation | Request TW production mode and broker-derived sizing. |
 | `--equity TWD` | - | Set total account equity for simulation. It is required in simulation and rejected in production. |
 
 | Command mode | Required server mode | Equity source | Current availability |
 |---|---|---|---|
 | `bt target --equity TWD` | `simulation: true` | User-supplied total equity | Implemented |
-| `bt target --live` | `simulation: false` | Real account accounting | Blocked before sizing |
+| `bt target --live` | `simulation: false` | Broker balance, settlements, and positions | Implemented |
 
 #### Environment
 
@@ -322,10 +322,10 @@ TW production accounting remains blocked; see [Safety and failure in the TW live
 |---|---|---|
 | `FINMIND_TOKEN` | - | Authenticate history and the independent `TaiwanStockTradingDate` calendar request. |
 | `SHIOAJI_URL` | `http://localhost:8080` | Select the official Shioaji HTTP server used for account, snapshot, and order APIs. |
-| `SJ_API_KEY` | - | Supply the Shioaji API key used in the client bearer credential. |
-| `SJ_SEC_KEY` | - | Supply the Shioaji secret key used in the client bearer credential. |
+| `SJ_API_KEY` | - | Optional; sent only with `SJ_SEC_KEY` when the server enforces Bearer authentication. |
+| `SJ_SEC_KEY` | - | Optional; sent only with `SJ_API_KEY` when the server enforces Bearer authentication. |
 
-`SJ_API_KEY` and `SJ_SEC_KEY` must be available to both `bt` and the Shioaji server.
+The Shioaji server may still need its own keys to log in. `bt` never fails because these optional client credentials are absent or incomplete.
 
 #### Decision cycle
 
@@ -334,6 +334,8 @@ The TW target reads account and snapshot data from Shioaji and historical data f
 On TW, `--provisional-close PRICE` replaces only the snapshot price: the command still checks Shioaji server mode, queries the independent FinMind trading calendar, fetches history, and requires the cache to end on the verified previous session.
 
 The resulting plan preserves cash and margin inventories. It can contain cash sells, margin sells, cash buys, margin buys, and paired sell/rebuy refinancing legs. Dated `MarginTrading` position details that reach the engine's 18-calendar-month, month-end-clamped maturity produce sell/rebuy pairs before ordinary target legs. Every share quantity is floored to a `Common` lot of 1000 shares; the remainder is retained rather than rounded up or sent as an odd-lot order.
+
+Production requires exactly one settlement row for each of T+0, T+1, and T+2 and rejects missing, duplicate, or other T-day rows. Spendable cash is `acc_balance + T+1 + T+2` using each signed amount; T+0 is already reflected in `acc_balance`, so it is validated and logged but not added again. Equity adds all Common-lot positions at broker `last_price`, then subtracts margin loan principal and interest. A real-account probe tracked a TWD -107 purchase payable at T+2 on 2026-09-16 and T+1 on 2026-09-17 while `acc_balance` remained TWD 100,000, then at T+0 on 2026-09-18 when `acc_balance` fell to TWD 99,893. Pending T+1 and T+2 settlements change the daily cash budget without skipping the session.
 
 #### Output
 
@@ -351,11 +353,11 @@ The mode mismatch guard refuses simulation commands against a production server 
 > [!WARNING]
 > `--equity` is user-supplied simulation total equity, not broker cash or an `account_balance` result. With the supported one-stock account shape, `bt` infers simulation cash from equity, the selected symbol's cash and margin inventory values, loan principal, and interest. It rejects a nonzero holding in another symbol.
 
-TW production accounting remains blocked; see [Safety and failure in the TW live-trading design](./specs/tw-live-trading.md#safety-and-failure).
+Production startup logs `acc_balance`, each T-day amount, derived spendable cash, and derived equity. T+0 remains visible for audit even though the verified cash formula excludes it.
 
 ## `bt live`
 
-Runs the close-scheduled trading daemon for one US strategy or the TW simulation daemon for one TW strategy.
+Runs the close-scheduled trading daemon for one US or TW strategy.
 
 The following options are shared by both market arms.
 
@@ -430,11 +432,11 @@ Install the official `shioaji` command, create the server `.env` shown in the TW
 
 #### Options
 
-TW production accounting remains blocked; see [Safety and failure in the TW live-trading design](./specs/tw-live-trading.md#safety-and-failure).
+Production uses broker-derived cash and equity; see [Safety and failure in the TW live-trading design](./specs/tw-live-trading.md#safety-and-failure).
 
 | Option | Default | Description |
 |---|---|---|
-| `--live` | simulation | Request production mode, which currently stops at the accounting blocker. |
+| `--live` | simulation | Request TW production mode and broker-derived sizing. |
 | `--equity TWD` | - | Set finite positive total account equity for simulation. It is required in simulation and rejected in production. |
 
 #### Environment
@@ -443,17 +445,17 @@ TW production accounting remains blocked; see [Safety and failure in the TW live
 |---|---|---|
 | `FINMIND_TOKEN` | - | Authenticate history and independent trading-calendar requests. |
 | `SHIOAJI_URL` | `http://localhost:8080` | Select the official Shioaji HTTP server. |
-| `SJ_API_KEY` | - | Supply the Shioaji API key used in the client bearer credential. |
-| `SJ_SEC_KEY` | - | Supply the Shioaji secret key used in the client bearer credential. |
+| `SJ_API_KEY` | - | Optional; sent only with `SJ_SEC_KEY` when the server enforces Bearer authentication. |
+| `SJ_SEC_KEY` | - | Optional; sent only with `SJ_API_KEY` when the server enforces Bearer authentication. |
 
-`bt` needs all four variables. `SJ_CA_PATH`, `SJ_CA_PASSWD`, and `SJ_PRODUCTION` remain server-only.
+The Shioaji server may still need its own keys to log in. `bt` never fails because these optional client credentials are absent or incomplete. `SJ_CA_PATH`, `SJ_CA_PASSWD`, and `SJ_PRODUCTION` remain server-only.
 
 #### Decision cycle
 
-| Phase | Taipei timing | Implemented TW simulation action |
+| Phase | Taipei timing | Implemented TW action |
 |---|---|---|
 | Prepare | 13:05 | Check that a snapshot is dated today, query FinMind's independent trading calendar for the previous session, fetch prices through that session, refresh adjustment datasets through today, and require an exact price-cache end date. |
-| Decide | 13:20 | Request a fresh snapshot, validate its session and OHLCV values, append the provisional bar, evaluate the strategy, read Common-lot aggregate positions and dated margin details, prepend due 18-month rollover pairs, and plan ordinary cash, margin, and refinancing legs. |
+| Decide | 13:20 | Request a fresh snapshot, validate its session and OHLCV values, append the provisional bar, evaluate the strategy, read Common-lot aggregate positions and dated margin details, derive simulation or production cash and equity, prepend due 18-month rollover pairs, and plan ordinary cash, margin, and refinancing legs. |
 | Execute | Before 13:25 | Floor shares to 1000-share Common lots and submit `MKT` + `IOC` legs sequentially. Recheck the date and cutoff immediately before every order and during every status poll. |
 | Reconcile | After 13:30 | Query and log today's resulting trades, including fill status, deal lots, and weighted deal price. |
 
@@ -461,11 +463,11 @@ Every successor leg requires the previous order to be uniquely identified and co
 
 #### Output and logs
 
-The TW log records held Common lots, planned cash, margin, and refinance legs, retained board-lot remainders, every observed fill, and resulting exposure. Reconciliation includes fill status, deal lots, and weighted deal price.
+The TW log records held Common lots, planned cash, margin, and refinance legs, retained board-lot remainders, every observed fill, and resulting exposure. Production startup also records `acc_balance`, T+0, T+1, T+2, spendable cash, and equity. Reconciliation includes fill status, deal lots, and weighted deal price.
 
 #### Failure handling
 
-The mode mismatch guard requires simulation commands to see `info.simulation = true` and `--live` to see `info.simulation = false`. Partial, missing, ambiguous, mismatched, failed, inactive, rejected, cancelled, timed-out, cutoff, or uncertain POST results stop all later legs.
+The mode mismatch guard requires simulation commands to see `info.simulation = true` and `--live` to see `info.simulation = false`. The daemon re-reads server info at the start of each unsubmitted daily Decide phase; if the server mode changed after startup, it logs the mismatch and skips the day's action before any order can be submitted. Partial, missing, ambiguous, mismatched, failed, inactive, rejected, cancelled, timed-out, cutoff, or uncertain POST results stop all later legs.
 
 No execution path guarantees exactly once across concurrent daemon processes or every crash timing; the pre-submit query only reduces duplicate risk.
 
@@ -478,7 +480,7 @@ No execution path guarantees exactly once across concurrent daemon processes or 
 > [!NOTE]
 > The TW path queries today's orders before planning and carries only confirmed fills between legs. This reduces duplicate risk but is not an exactly-once guarantee for concurrent processes.
 
-TW production accounting remains blocked; see [Safety and failure in the TW live-trading design](./specs/tw-live-trading.md#safety-and-failure).
+Pending T+1 and T+2 settlements never suppress a production session; their signed amounts alter the available cash passed to the unchanged planner and executor. T+0 remains required and logged but is already reflected in `acc_balance`.
 
 ## `bt run`
 

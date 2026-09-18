@@ -76,6 +76,11 @@ type settlement = {
 (** Shioaji REST root from [SHIOAJI_URL], defaulting to localhost port 8080. *)
 val base_url : unit -> string
 
+(** Build JSON request headers. Include Bearer authentication only when
+    requested and both supplied credentials are nonempty. *)
+val request_headers :
+  auth:bool -> api_key:string option -> secret_key:string option -> string
+
 (** Parse a Shioaji server information response. *)
 val parse_info : string -> info
 

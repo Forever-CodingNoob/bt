@@ -353,19 +353,19 @@ let jq_object label args expression =
   | status, output when process_ok status -> String.trim output
   | _ -> failf "jq failed while building Shioaji %s request" label
 
-let require_env name =
-  match Sys.getenv_opt name with
-  | Some value when String.trim value <> "" -> value
-  | _ -> failf "export %s=\"your_shioaji_key\"" name
+let request_headers ~auth ~api_key ~secret_key =
+  match auth, api_key, secret_key with
+  | true, Some api_key, Some secret_key
+    when String.trim api_key <> "" && String.trim secret_key <> "" ->
+      Printf.sprintf
+        "Authorization: Bearer %s:%s\nContent-Type: application/json\n"
+        api_key secret_key
+  | _ -> "Content-Type: application/json\n"
 
 let request ?(method_ = "GET") ?body ?(auth = true) ~path () =
   let headers =
-    match auth with
-    | false -> "Content-Type: application/json\n"
-    | true ->
-        Printf.sprintf
-          "Authorization: Bearer %s:%s\nContent-Type: application/json\n"
-          (require_env "SJ_API_KEY") (require_env "SJ_SEC_KEY")
+    request_headers ~auth ~api_key:(Sys.getenv_opt "SJ_API_KEY")
+      ~secret_key:(Sys.getenv_opt "SJ_SEC_KEY")
   in
   with_temp ".headers" (fun header_path ->
     let () = write_text header_path headers in

@@ -5111,6 +5111,36 @@ let test_shioaji_info_parse () =
   in
   assert (actual = expected)
 
+let test_shioaji_request_headers () =
+  let plain = "Content-Type: application/json\n" in
+  let bearer =
+    "Authorization: Bearer key:secret\nContent-Type: application/json\n"
+  in
+  (* Bearer authentication requires both nonempty credentials. Missing or
+     empty credentials leave the otherwise identical JSON header. *)
+  let () =
+    assert
+      (Shioaji.request_headers ~auth:true ~api_key:(Some "key")
+         ~secret_key:(Some "secret")
+       = bearer)
+  in
+  let () =
+    assert
+      (Shioaji.request_headers ~auth:true ~api_key:(Some "key")
+         ~secret_key:None
+       = plain)
+  in
+  let () =
+    assert
+      (Shioaji.request_headers ~auth:true ~api_key:(Some " ")
+         ~secret_key:(Some "secret")
+       = plain)
+  in
+  assert
+    (Shioaji.request_headers ~auth:false ~api_key:(Some "key")
+       ~secret_key:(Some "secret")
+     = plain)
+
 let test_shioaji_snapshot_parse () =
   let actual = Shioaji.parse_snapshot (shioaji_fixture "snapshot.json") in
   (* Expected values are copied from the documented 2330 snapshot row. *)
@@ -5375,7 +5405,76 @@ let test_tw_live_equity () =
   let positions = Shioaji.parse_positions (shioaji_fixture "positions.json") in
   (* 100000 cash + 31000 + 1980000 + 5940000 inventory
      - 120000 loan - 35 interest = 7930965. *)
-  assert_close 7930965. (Live.equity_of ~balance:100000. ~positions)
+  assert_close 7930965. (Live.equity_of ~cash:100000. ~positions)
+
+let test_tw_production_cash () =
+  let s day amount : Shioaji.settlement =
+    { date = "2026-09-16"; amount; day }
+  in
+  let settlement_morning = [s 0 (-107.); s 1 0.; s 2 0.] in
+  (* The bank balance is already debited on settlement morning, so the
+     T+0 payable is required for validation but not subtracted again:
+     99,893 + T+1 0 + T+2 0 = TWD 99,893. *)
+  let () =
+    assert_close 99893.
+      (Live.tw_production_cash ~balance:99893.
+         ~settlements:settlement_morning)
+  in
+  (* Before settlement morning, the T+2 payable remains pending:
+     100,000 + T+1 0 - T+2 107 = TWD 99,893. *)
+  let () =
+    assert_close 99893.
+      (Live.tw_production_cash ~balance:100000.
+         ~settlements:[s 0 0.; s 1 0.; s 2 (-107.)])
+  in
+  (* On the preceding day, the same payable is T+1:
+     100,000 - T+1 107 + T+2 0 = TWD 99,893. *)
+  let () =
+    assert_close 99893.
+      (Live.tw_production_cash ~balance:100000.
+         ~settlements:[s 0 0.; s 1 (-107.); s 2 0.])
+  in
+  (* A T+1 sale credit adds TWD 50,000:
+     100,000 + T+1 50,000 + T+2 0 = TWD 150,000. *)
+  let () =
+    assert_close 150000.
+      (Live.tw_production_cash ~balance:100000.
+         ~settlements:[s 0 0.; s 1 50000.; s 2 0.])
+  in
+  (* Two rows cannot supply the required one row for each of T+0..T+2. *)
+  let () =
+    assert_failure (fun () ->
+      ignore
+        (Live.tw_production_cash ~balance:100000.
+           ~settlements:[s 0 0.; s 1 0.]))
+  in
+  (* Four rows with T+2 twice make its signed amount ambiguous. *)
+  let () =
+    assert_failure (fun () ->
+      ignore
+        (Live.tw_production_cash ~balance:100000.
+           ~settlements:[s 0 0.; s 1 0.; s 2 50000.; s 2 50000.]))
+  in
+  (* A T+3 row is outside the exact T+0..T+2 broker cash window. *)
+  let () =
+    assert_failure (fun () ->
+      ignore
+        (Live.tw_production_cash ~balance:100000.
+           ~settlements:[s 0 0.; s 1 0.; s 2 0.; s 3 1.]))
+  in
+  (* Non-finite broker balance or T+0..T+2 amount cannot size money,
+     including the validated but excluded T+0 amount. *)
+  let () =
+    assert_failure (fun () ->
+      ignore
+        (Live.tw_production_cash ~balance:Float.nan
+           ~settlements:[s 0 0.; s 1 0.; s 2 0.]))
+  in
+  assert_failure (fun () ->
+    ignore
+      (Live.tw_production_cash ~balance:100000.
+         ~settlements:[s 0 Float.infinity; s 1 0.; s 2 0.]))
+
 
 let test_tw_live_plan_legs () =
   let plan ~equity ~cash ~cash_value ~margin_value ~loan ~previous target =
@@ -5452,6 +5551,18 @@ let test_tw_live_startup_guard () =
     { simulation = true; version = "test" }
   in
   let production = { simulation with Shioaji.simulation = false } in
+  (* A daily simulation-mode recheck rejects a server flipped to production. *)
+  let () =
+    assert
+      (Live.tw_server_mode_ok Live.Paper production
+       = Error "--live is required for a production Shioaji server")
+  in
+  (* A daily production-mode recheck rejects a server flipped to simulation. *)
+  let () =
+    assert
+      (Live.tw_server_mode_ok Live.Live simulation
+       = Error "--live requires a production Shioaji server")
+  in
   (* Paper mode, positive equity, and a simulation server agree. *)
   let () =
     assert
@@ -5560,6 +5671,31 @@ let test_tw_live_decide_override () =
         Shioaji.parse_position_details
           (shioaji_fixture "position_detail.json")
       in
+      let production_position : Shioaji.position =
+        { id = 0; code = "2330"; cond = "Cash"; lots = 1; yd_lots = 1;
+          avg_price = 2000.; last_price = 2000.; loan_amount = 0.;
+          interest = 0. }
+      in
+      let production_settlements : Shioaji.settlement list =
+        [{ date = "2026-09-16"; amount = 0.; day = 0 };
+         { date = "2026-09-17"; amount = 0.; day = 1 };
+         { date = "2026-09-18"; amount = -107.; day = 2 }]
+      in
+      let production =
+        Live.decide ~provisional_close:2000.
+          ~previous_session:"2026-05-22" ~tw_balance:2000000.
+          ~tw_settlements:production_settlements
+          ~tw_positions:[production_position] ~tw_position_details:[]
+          Live.Live ~session_date:"2026-05-26" ~strat_path ~data_dir
+      in
+      (* Spendable cash is 2,000,000 - 107 = TWD 1,999,893. Adding one
+         1,000-share position at TWD 2,000 gives equity TWD 3,999,893. *)
+      let () = assert_close 3999893. production.Live.equity in
+      (* Target 1.0 requests TWD 1,999,893 / 2,000 = 999.9465 new shares,
+         below one Common lot. The pending payable reduces sizing but does
+         not skip the production session. *)
+      let () = assert (production.Live.action = Live.Orders []) in
+
       let decision =
         Live.decide ~provisional_close:2000. ~previous_session:"2026-05-22"
           ~equity:20000000. ~tw_positions:positions
@@ -6311,6 +6447,7 @@ let () =
   test_us_cure_tail_aware ();
   let () = test_engine_fill_planner () in
   let () = test_shioaji_info_parse () in
+  let () = test_shioaji_request_headers () in
   let () = test_shioaji_snapshot_parse () in
   let () = test_shioaji_positions_parse () in
   let () = test_shioaji_position_details_parse () in
@@ -6321,6 +6458,7 @@ let () =
   let () = test_tw_live_phase () in
   let () = test_tw_live_exchange () in
   let () = test_tw_live_equity () in
+  let () = test_tw_production_cash () in
   let () = test_tw_live_plan_legs () in
   let () = test_tw_live_startup_guard () in
   let () = test_tw_maturity_rollover_legs () in

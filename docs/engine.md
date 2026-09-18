@@ -186,11 +186,12 @@ Stock-dividend and share-count factors restate per-share cash amounts and volume
 
 #### Live trading fidelity
 
-The implemented TW daemon is a Shioaji simulation execution path around the unchanged daily engine planner. It is not TW production support.
+The TW daemon is a Shioaji simulation and production execution path around the unchanged daily engine planner.
 
 - At 13:05 Taipei it validates a same-session Shioaji snapshot, queries FinMind's independent `TaiwanStockTradingDate` calendar for the previous session, refreshes prices only through that date, refreshes dividend and corporate-action data through the current session, and rejects any price cache that does not end exactly at the previous session.
 - At 13:20 it validates a fresh per-decision snapshot, builds today's provisional OHLCV bar, and runs the same strategy compiler, target normalization, costs, financing ratio, and fill planner used by the daily backtest.
 - Simulation requires `--equity TWD` as total account equity. With the supported one-stock account shape, cash is inferred as equity minus cash and margin inventory value plus loan principal and interest. A nonzero holding in another symbol is rejected.
+- Production requires exactly one broker settlement row for each of T+0, T+1, and T+2 and rejects missing, duplicate, or other T-day rows. Spendable cash is `acc_balance + T+1 + T+2`; T+0 is already reflected in `acc_balance`, so it is validated and logged but excluded from the sum. Equity adds Common-lot positions at broker `last_price` and subtracts loans and interest. Pending T+1 and T+2 settlements alter the cash budget but do not skip the session.
 - The client reads each margin position's dated Shioaji `position_detail`. A lot due under the engine's 18-calendar-month, month-end-clamped TW rule adds a margin sell/rebuy pair before ordinary planner legs. The executor floors every leg to `Common` lots of 1000 shares and retains the remainder.
 - Orders use `MKT` + `IOC` during continuous trading. The executor rechecks the Taipei session and the fresh per-order cutoff before every submission and every status poll; nothing is submitted at or after 13:25.
 - Every successor waits for a unique, matching, completely filled predecessor with a finite positive weighted fill price. A partial, ambiguous, missing, mismatched, rejected, failed, inactive, cancelled, timed-out, cutoff, or uncertain submission stops the remaining legs and logs the observed exposure.
@@ -200,7 +201,7 @@ The implemented TW daemon is a Shioaji simulation execution path around the unch
 > [!WARNING]
 > Daily backtests fill fractional shares at recorded closes and make proceeds immediately available. TW daemon simulation floors to 1000-share Common lots, uses a 13:20 snapshot and actual IOC fill reports, may stop after a partial plan, and applies a confirmed-cash budget between orders. Results can therefore diverge even though both paths use the same planner.
 
-TW production accounting remains blocked; see [Safety and failure in the TW live-trading design](./specs/tw-live-trading.md#safety-and-failure).
+Production startup logs every cash-formula input and the derived cash and equity. The 2026-09-16 through 2026-09-18 real-account observation verified that `acc_balance` is debited when the payable reaches T+0, so the logged T+0 amount is audit-only.
 
 #### Gaps between simulation and the real market
 
@@ -210,7 +211,7 @@ TW production accounting remains blocked; see [Safety and failure in the TW live
 - The engine assumes every Taiwan symbol is marginable at the standard TWSE or TPEX ratio. Leveraged ETFs such as 00685L have historically been excluded from margin financing or assigned reduced ratios.
 - Board lots (1000 shares for ordinary stocks, 1 share for ETFs) and tick sizes are not modeled. The engine trades fractional shares.
 - Dividend cash timing uses a one-month fallback when the pay date is missing. Real pay dates vary.
-- T+2 cash settlement is not modeled. Proceeds from a sale are immediately available.
+- T+2 cash settlement is not modeled by the daily backtest. The production daemon includes signed broker T+1 and T+2 amounts in spendable cash and requires the T+0 row for validation and audit.
 - Day-trade tax reduction (half sell tax for same-day round trips) is not modeled.
 - Odd-lot trades (below the board-lot size) are not modeled.
 

@@ -196,10 +196,46 @@ let exchange_of_symbol ~data_dir symbol =
           failwith
             (Printf.sprintf "TW stockinfo has no exchange for %s" symbol))
 
-let equity_of ~balance ~positions =
+let tw_settlement_amount day settlements =
+  match
+    List.filter
+      (fun (settlement : Shioaji.settlement) -> settlement.day = day)
+      settlements
+  with
+  | [settlement] -> settlement.amount
+  | [] ->
+      failwith (Printf.sprintf "TW settlements missing T+%d row" day)
+  | _ ->
+      failwith (Printf.sprintf "TW settlements contain duplicate T+%d rows" day)
+
+let tw_production_cash ~balance ~settlements =
   let () =
     if not (Float.is_finite balance) then
       failwith "TW account balance is not finite"
+  in
+  let () =
+    List.iter
+      (fun (settlement : Shioaji.settlement) ->
+        if not (Float.is_finite settlement.amount) then
+          failwith "TW settlement amount is not finite"
+        else if settlement.day < 0 || settlement.day > 2 then
+          failwith
+            (Printf.sprintf "TW settlements contain unexpected T+%d row"
+               settlement.day))
+      settlements
+  in
+  let () = ignore (tw_settlement_amount 0 settlements) in
+  let cash =
+    balance +. tw_settlement_amount 1 settlements
+    +. tw_settlement_amount 2 settlements
+  in
+  if Float.is_finite cash then cash
+  else failwith "TW spendable cash is not finite"
+
+let equity_of ~cash ~positions =
+  let () =
+    if not (Float.is_finite cash) then
+      failwith "TW spendable cash is not finite"
   in
   let equity =
     List.fold_left
@@ -215,10 +251,11 @@ let equity_of ~balance ~positions =
         equity
         +. (float_of_int position.lots *. 1000. *. position.last_price)
         -. position.loan_amount -. position.interest)
-      balance positions
+      cash positions
   in
   if Float.is_finite equity then equity
   else failwith "TW account equity is not finite"
+
 
 let legs_of_plan ~price (plan : Engine.fill_plan) =
   let () =
@@ -285,18 +322,21 @@ let startup_ok (account : Alpaca.account_t) =
   | "ACTIVE", true -> Error "account trading is blocked"
   | status, _ -> Error (Printf.sprintf "account status is %s" status)
 
-let tw_startup_ok mode ~equity (info : Shioaji.info) =
-  match mode, equity, info.simulation with
-  | Paper, Some value, _ when not (Float.is_finite value) || value <= 0. ->
-      Error "simulation equity must be finite and positive"
-  | Paper, None, _ -> Error "simulation mode requires --equity"
-  | Live, Some _, _ -> Error "--equity is not allowed in production"
-  | Paper, Some _, true -> Ok ()
-  | Paper, Some _, false ->
+let tw_server_mode_ok mode (info : Shioaji.info) =
+  match mode, info.simulation with
+  | Paper, true | Live, false -> Ok ()
+  | Paper, false ->
       Error "--live is required for a production Shioaji server"
-  | Live, None, false -> Ok ()
-  | Live, None, true ->
+  | Live, true ->
       Error "--live requires a production Shioaji server"
+
+let tw_startup_ok mode ~equity info =
+  match mode, equity with
+  | Paper, Some value when not (Float.is_finite value) || value <= 0. ->
+      Error "simulation equity must be finite and positive"
+  | Paper, None -> Error "simulation mode requires --equity"
+  | Live, Some _ -> Error "--equity is not allowed in production"
+  | Paper, Some _ | Live, None -> tw_server_mode_ok mode info
 
 let date_prefix timestamp =
   let () =
@@ -490,8 +530,9 @@ let fetch_position_details symbol positions =
       else [])
     positions
 
-let decide ?provisional_close ?previous_session ?equity ?tw_positions
-    ?tw_position_details ?tw_snapshot mode ~session_date ~strat_path ~data_dir =
+let decide ?provisional_close ?previous_session ?equity ?tw_balance
+    ?tw_settlements ?tw_positions ?tw_position_details ?tw_snapshot mode
+    ~session_date ~strat_path ~data_dir =
   let ast = Dsl.parse_file strat_path in
   match Dsl.stocks_of ~filename:strat_path ast with
   | [alias, "us", symbol] ->
@@ -575,10 +616,7 @@ let decide ?provisional_close ?previous_session ?equity ?tw_positions
             failwith "simulation equity must be finite and positive"
         | Paper, None -> failwith "simulation mode requires --equity"
         | Live, Some _ -> failwith "--equity is not allowed in production"
-        | Live, None ->
-            failwith
-              "production sizing requires verified real-money cash and \
-               settlement accounting"
+        | Live, None -> ()
       in
       let fetch_required = Option.is_none previous_session in
       let previous_session =
@@ -668,15 +706,28 @@ let decide ?provisional_close ?previous_session ?equity ?tw_positions
         position_totals symbol provisional.c positions
       in
       let held = cash_shares +. margin_shares in
-      let balance, equity =
+      let cash, equity =
         match mode, equity with
         | Paper, Some equity ->
             equity -. cash_value -. margin_value +. loans +. interests,
             equity
-        | Paper, None | Live, Some _ | Live, None -> assert false
+        | Live, None ->
+            let balance =
+              match tw_balance with
+              | Some balance -> balance
+              | None -> Shioaji.balance ()
+            in
+            let settlements =
+              match tw_settlements with
+              | Some settlements -> settlements
+              | None -> Shioaji.settlements ()
+            in
+            let cash = tw_production_cash ~balance ~settlements in
+            cash, equity_of ~cash ~positions
+        | Paper, None | Live, Some _ -> assert false
       in
       let () =
-        if not (Float.is_finite balance) then
+        if not (Float.is_finite cash) then
           failwith "TW inferred cash balance is not finite"
       in
       let current = (cash_value +. margin_value) /. equity in
@@ -685,7 +736,7 @@ let decide ?provisional_close ?previous_session ?equity ?tw_positions
         Engine.plan_fills ~costs:[| costs |] ~capital:(Some equity)
           ~financing_ratios:[| financing_ratio |]
           ~state:
-            { Engine.equity; cash = balance; cash_values = [| cash_value |];
+            { Engine.equity; cash; cash_values = [| cash_value |];
               margin_values = [| margin_value |]; loans = [| loans |];
               interests = [| interests |]; tail_interests = [| 0. |];
               debt = 0.; receivables = 0.;
@@ -1319,29 +1370,38 @@ let run_tw mode ~equity ~symbol ~strat_path ~data_dir =
     | Ok () -> ()
     | Error reason -> failwith reason
   in
-  let () =
-    match mode with
-    | Paper -> ()
-    | Live ->
-        failwith
-          "production sizing is blocked: real-money account balance and \
-           settlement sign/inclusion are unverified"
-  in
   let startup_equity =
-    match equity with
-    | Some value -> value
-    | None -> assert false
+    match mode, equity with
+    | Paper, Some equity ->
+        let () =
+          log
+            "startup mode=simulation broker=shioaji account=default \
+             equity-source=override equity=%.10g"
+            equity
+        in
+        equity
+    | Live, None ->
+        let balance = Shioaji.balance () in
+        let settlements = Shioaji.settlements () in
+        let positions = Shioaji.positions () in
+        let cash = tw_production_cash ~balance ~settlements in
+        let equity = equity_of ~cash ~positions in
+        let () =
+          log
+            "startup mode=production broker=shioaji account=default \
+             equity-source=broker acc-balance=%.10g t0=%.10g t1=%.10g \
+             t2=%.10g cash=%.10g equity=%.10g"
+            balance (tw_settlement_amount 0 settlements)
+            (tw_settlement_amount 1 settlements)
+            (tw_settlement_amount 2 settlements) cash equity
+        in
+        equity
+    | Paper, None | Live, Some _ -> assert false
   in
   let exchange = exchange_of_symbol ~data_dir symbol in
   let costs = Engine.default_costs ~market:"tw" ~symbol in
   let financing_ratio =
     Data.financing_ratio ~market:"tw" ~data_dir ~symbol
-  in
-  let () =
-    log
-      "startup mode=simulation broker=shioaji account=default \
-       equity-source=override equity=%.10g"
-      startup_equity
   in
   let rec cycle prepared submitted =
     let now = taipei_now () in
@@ -1375,6 +1435,13 @@ let run_tw mode ~equity ~symbol ~strat_path ~data_dir =
                let () = sleep_taipei ~days:0 ~hour:13 ~minute:30 in
                cycle prepared (Some submitted)
            | Some _ | None ->
+               let () =
+                 match tw_server_mode_ok mode (Shioaji.info ()) with
+                 | Ok () -> ()
+                 | Error reason ->
+                     failwith
+                       ("Shioaji server mode changed after startup: " ^ reason)
+               in
                let prepared =
                  match prepared with
                  | Some (prepared_date, _) when prepared_date = date ->
@@ -1409,9 +1476,19 @@ let run_tw mode ~equity ~symbol ~strat_path ~data_dir =
                     let position_details =
                       fetch_position_details symbol positions
                     in
+                    let tw_balance, tw_settlements, production_cash =
+                      match mode, equity with
+                      | Paper, Some _ -> None, None, None
+                      | Live, None ->
+                          let balance = Shioaji.balance () in
+                          let settlements = Shioaji.settlements () in
+                          Some balance, Some settlements,
+                          Some (tw_production_cash ~balance ~settlements)
+                      | Paper, None | Live, Some _ -> assert false
+                    in
                     let decision =
-                      decide ~previous_session ?equity
-                        ~tw_positions:positions
+                      decide ~previous_session ?equity ?tw_balance
+                        ?tw_settlements ~tw_positions:positions
                         ~tw_position_details:position_details
                         ~tw_snapshot:snapshot mode ~session_date:date
                         ~strat_path ~data_dir
@@ -1421,8 +1498,12 @@ let run_tw mode ~equity ~symbol ~strat_path ~data_dir =
                       position_totals symbol decision.provisional.c positions
                     in
                     let cash =
-                      startup_equity -. cash_value -. margin_value +. loans
-                      +. interests
+                      match mode, equity, production_cash with
+                      | Paper, Some equity, None ->
+                          equity -. cash_value -. margin_value +. loans
+                          +. interests
+                      | Live, None, Some cash -> cash
+                      | _ -> assert false
                     in
                     let outcome, legs =
                       match decision.action with

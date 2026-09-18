@@ -10,7 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - `bt target` supports TW strategies through Shioaji simulation with required `--equity TWD`, independent FinMind calendar freshness, and Common-lot cash, margin, and refinance plans.
 - `bt live` adds a TW simulation daemon with 18-month margin-lot rollovers and sequential `MKT` + `IOC` fill confirmation.
-- TW `--live` verifies production server mode, then stops before sizing until real-account cash and settlement accounting is verified.
+- TW `--live` production sizing requires exactly one T+0, T+1, and T+2 row and uses `acc_balance + T+1 + T+2` for spendable cash, while logging T+0 for audit. A 2026-09-16 through 2026-09-18 real-account observation verified the rule: the TWD -107 payable moved from T+2 to T+1 with `acc_balance` at TWD 100,000, then reached T+0 when `acc_balance` fell to TWD 99,893.
 
 ### Fixed
 

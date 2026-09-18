@@ -1,6 +1,6 @@
 # TW Live Trading Implementation Plan
 
-This plan delivers TW simulation, including a Shioaji 1.7.4 network smoke executed on 2026-09-15; production accounting remains open.
+This plan delivers TW simulation and production sizing; all implementation and verification gates are complete.
 
 ## Contents
 
@@ -11,7 +11,7 @@ This plan delivers TW simulation, including a Shioaji 1.7.4 network smoke execut
 - [Task 4: docs and smoke](#task-4-docs-and-smoke)
 - [Reviews](#reviews)
 
-**Goal:** Execute docs/specs/tw-live-trading.md: `bt live` and `bt target` for the Taiwan market through the local Shioaji HTTP server, with live sizing produced by the engine's own fill planner, margin legs included. The completed milestone is TW simulation; production remains required.
+**Goal:** Execute docs/specs/tw-live-trading.md: `bt live` and `bt target` for the Taiwan market through the local Shioaji HTTP server, with live sizing produced by the engine's own fill planner, margin legs included. Simulation and production sizing are implemented.
 
 **Architecture:** `broker/shioaji.ml` is the curl+jq REST client for the official Shioaji server; the engine's per-bar fill planner is an exported pure function that `Engine.run` and TW decision planning both call; `broker/live.ml` has `"tw"` arms beside the untouched `"us"` arms; `market/data.ml` queries FinMind's independent `TaiwanStockTradingDate` calendar; `bin/bt.ml` exposes `--equity`.
 
@@ -56,7 +56,7 @@ This plan delivers TW simulation, including a Shioaji 1.7.4 network smoke execut
 - `val balance : unit -> float` (`POST /api/v1/portfolio/account_balance`, `acc_balance`; raise `Failure` with `errmsg` when non-empty).
 - `type order_request = { exchange : string; code : string; action : string; lots : int; cond : string; custom_field : string }`, `type placed = { order_id : string; status : string }`, `val place_order : order_request -> placed` (`POST /api/v1/order/place_order` with `price 0`, `price_type MKT`, `order_type IOC`, `order_lot Common`; account omitted so the server default applies).
 - `type trade = { order_id : string; code : string; action : string; cond : string; status : string; order_lots : int; deal_lots : int; deal_price : float option; order_datetime : string }`, `val orders_today : code:string -> today:string -> trade list` (`POST /api/v1/order/trades` with `{}` then parse the returned Trade array; accept string `status.order_datetime` or numeric `status.order_ts` converted to Taipei RFC3339, and filter that date plus contract code).
-- All parse functions pure (`parse_info : string -> info` etc.) so fixtures test them offline; authenticated requests use a mode-`0600` curl header file containing `Authorization: Bearer <SJ_API_KEY>:<SJ_SEC_KEY>` and JSON content type, missing credentials raise a `Failure` export hint, `/api/v1/info` remains unauthenticated, transport failure raises `Failure "curl failed while calling Shioaji"`, and non-2xx raises `Failure` with the HTTP code.
+- All parse functions pure (`parse_info : string -> info` etc.) so fixtures test them offline; requests use a mode-`0600` curl header file containing JSON content type and, only when both `SJ_API_KEY` and `SJ_SEC_KEY` are set and nonempty, `Authorization: Bearer <key>:<secret>`. Missing, empty, or incomplete optional credentials omit the authorization header without failing. `/api/v1/info` remains explicitly unauthenticated, transport failure raises `Failure "curl failed while calling Shioaji"`, and non-2xx raises `Failure` with the HTTP code.
 
 - [ ] RED: fixture-parse tests. Fixtures verbatim from the spec's documented examples: info `{"name":"Shioaji API Server","version":"1.7.2",...,"simulation":false}`; the documented snapshot array for 2330 (datetime `2026-05-18T14:30:00`, close 2240, buy_price 2240, sell_price 2245); positions with the two documented Cash entries plus one hand-written MarginTrading entry (`quantity 3, margin_purchase_amount 120000, interest 35`); balance `{"acc_balance":100000.0,"date":"...","errmsg":""}` plus an error fixture with non-empty errmsg; place_order Trade response with `order.id "a647f23d"` and `status.status "PendingSubmit"`; update_status array with the documented Filled trade (deal_quantity 2, deals[0].price 27.1, order_datetime `2026-05-20T11:24:30+08:00`). Assert parsed records equal hand-written expected values; `orders_today` filter keeps the 2026-05-20 trade for today `2026-05-20` and drops it for `2026-05-21`.
 - [ ] Run: `opam exec -- dune runtest --force`. Expected: FAIL, `Shioaji` unbound. Record.
@@ -84,7 +84,7 @@ This plan delivers TW simulation, including a Shioaji 1.7.4 network smoke execut
 
 **Consumes:** Task 1 client types and functions; Task 2 planner; existing `Live.decide` structure, `Engine.effective_targets`, `Engine.profile_of_market "tw"`, `Data.financing_ratio`, the FinMind fetch, and the US arms as the template.
 
-**Implemented simulation surface:**
+**Implemented surface:**
 
 - `taipei_phase` divides weekdays into before 13:05, 13:05-13:20 preparation, 13:20-13:25 decision and execution, and after-cutoff phases. `legs_of_plan` floors to 1000-share Common lots and emits cash, margin, and refinance legs. `exchange_of_symbol` maps cached stock information to `TSE` or `OTC`.
 - `Data.previous_trading_day` queries FinMind `TaiwanStockTradingDate` independently. Preparation validates today's snapshot, fetches once through that previous session, and requires the cache to end exactly there. Decision reuses the verified previous session and still validates a fresh snapshot.
@@ -92,17 +92,17 @@ This plan delivers TW simulation, including a Shioaji 1.7.4 network smoke execut
 - Every leg is floored to Common lots and submitted as `MKT` + `IOC` before 13:25. The executor confirms one fully filled matching status and a finite positive weighted deal price before any successor. Partial, failed, missing, ambiguous, mismatched, timed-out, cutoff, and uncertain submissions stop the remaining legs and log observed exposure.
 - Refinance sells and rebuys are sequential, not atomic. The dependent rebuy requires a complete confirmed predecessor and full funding. Confirmed-fill cash can cap an ordinary buy, after which its residual and later legs remain unsubmitted.
 - The pre-plan query for today's orders is conservative deduplication only. It does not guarantee exactly-once behavior under concurrent daemons or every crash timing.
-- Mode guards require `--equity` plus a simulation server for simulation and require `--live` plus a production server for production. TW production then raises the unresolved real-money accounting blocker before sizing; it does not skip days merely because settlements are pending.
+- Mode guards require `--equity` plus a simulation server for simulation and require `--live` plus a production server for production. Production requires exactly one settlement row for each of T+0 through T+2, rejects missing, duplicate, or extra rows, derives spendable cash from their signed amounts plus `account_balance`, and derives equity from that cash plus Common-lot positions net of loans and interest. Pending settlements never skip a session.
 
-- [ ] Production: establish and exercise the DAILY real-money equity and spendable-cash formula from `account_balance`, positions, and T+0 through T+2 settlements without double-counting, omission, or pending-payment session skips.
+- [x] Production: establish and exercise the DAILY real-money equity and spendable-cash formula from `account_balance`, positions, and T+0 through T+2 settlements without double-counting, omission, or pending-payment session skips.
 - [x] Simulation: independent calendar, freshness, target planning, Common-lot translation, MKT+IOC execution, confirmed-fill sequencing, exposure logging, CLI guards, and offline checks.
-- [ ] Gates and completion review for the full production requirement.
+- [x] Gates and completion review for the full production requirement.
 
 ## Task 4: docs and smoke
 
 **Files:** modify docs/cli.md, docs/engine.md, CHANGELOG.md, CONTRIBUTING.md, docs/specs/tw-live-trading.md, and docs/plans/tw-live-trading.md; create the Task 4 report; leave README.md unchanged because it does not enumerate live markets.
 
-- [x] Docs: cli.md `bt live` and `bt target` sections document the official server prerequisite and `.env` fields, `SHIOAJI_URL`, `SJ_API_KEY`, `SJ_SEC_KEY`, `FINMIND_TOKEN`, `--equity` with Default `-`, mode guards, Common-lot flooring, sequential fills, and the production blocker; engine.md records simulation/live fidelity; CHANGELOG and CONTRIBUTING are updated; ToCs are regenerated.
+- [x] Docs: cli.md `bt live` and `bt target` sections document the official server prerequisite and `.env` fields, `SHIOAJI_URL`, `SJ_API_KEY`, `SJ_SEC_KEY`, `FINMIND_TOKEN`, `--equity` with Default `-`, mode guards, Common-lot flooring, sequential fills, and production cash and equity sourcing; engine.md records simulation/live fidelity; CHANGELOG and CONTRIBUTING are updated; ToCs are regenerated.
 - [x] Gates: build and test requirements satisfied.
 - [x] Network smoke: executed on 2026-09-15 against Shioaji simulation server 1.7.4 at `SHIOAJI_URL=http://shioaji-server:8081`; exact commands and output are recorded in `.superpowers/sdd/tw-live-trading/task-4-report.md`.
 
