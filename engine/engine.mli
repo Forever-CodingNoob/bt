@@ -130,14 +130,14 @@ val taf_dollars : costs -> shares:float -> float
     target month's final day. *)
 val add_months_clamped : string -> int -> string
 
-(** Fill cost as a fraction of pre-fill equity; capital enables dollar fees. *)
+(** Fill cost as a fraction of pre-fill equity; capital scales dollar fees. *)
 val charge :
-  costs array -> float option -> int ->
+  costs array -> float -> int ->
   equity_before:float -> delta:float -> price:float -> float
 
-(** Sell cost in equity units, including capital-dependent dollar fees. *)
+(** Sell cost in equity units, including capital-scaled dollar fees. *)
 val absolute_sell_cost :
-  costs array -> float option -> int -> price:float -> float -> float
+  costs array -> float -> int -> price:float -> float -> float
 
 (** Clamp invalid targets and rescale a bar's portfolio to its funding cap. *)
 val effective_targets :
@@ -146,7 +146,7 @@ val effective_targets :
 (** Return the exact pure per-bar fill plan used by [run]. *)
 val plan_fills :
   costs:costs array ->
-  capital:float option ->
+  capital:float ->
   financing_ratios:float array ->
   state:plan_state ->
   prices:float array ->
@@ -164,6 +164,6 @@ val run :
   costs array ->
   profile:market_profile ->
   margin:margin ->
-  capital:float option ->
+  capital:float ->
   fill:fill ->
   result

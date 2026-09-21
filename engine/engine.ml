@@ -173,22 +173,20 @@ let charge costs capital index ~equity_before ~delta ~price =
   let amount = abs_float delta in
   let commission = amount *. costs.fee_bps /. 10000. in
   let commission =
-    match capital with
-    | Some value when costs.min_fee > 0. ->
-        Float.max commission (costs.min_fee /. (equity_before *. value))
-    | _ -> commission
+    if costs.min_fee > 0. then
+      Float.max commission (costs.min_fee /. (equity_before *. capital))
+    else commission
   in
   let non_commission_bps =
     if delta > 0. then costs.slip_bps else costs.tax_bps +. costs.slip_bps
   in
   let bps_cost = commission +. amount *. non_commission_bps /. 10000. in
   let taf =
-    match capital with
-    | Some cap when delta < 0. && costs.per_share_sell_fee > 0. ->
-        let dollars = equity_before *. cap in
-        let shares = amount *. dollars /. price in
-        taf_dollars costs ~shares /. dollars
-    | _ -> 0.
+    if delta < 0. && costs.per_share_sell_fee > 0. then
+      let dollars = equity_before *. capital in
+      let shares = amount *. dollars /. price in
+      taf_dollars costs ~shares /. dollars
+    else 0.
   in
   bps_cost +. taf
 
@@ -196,17 +194,14 @@ let absolute_sell_cost costs capital index ~price value =
   let costs = costs.(index) in
   let commission = value *. costs.fee_bps /. 10000. in
   let commission =
-    match capital with
-    | Some cap when costs.min_fee > 0. ->
-        Float.max commission (costs.min_fee /. cap)
-    | _ -> commission
+    if costs.min_fee > 0. then Float.max commission (costs.min_fee /. capital)
+    else commission
   in
   let taf =
-    match capital with
-    | Some cap when costs.per_share_sell_fee > 0. ->
-        let shares = value *. cap /. price in
-        taf_dollars costs ~shares /. cap
-    | _ -> 0.
+    if costs.per_share_sell_fee > 0. then
+      let shares = value *. capital /. price in
+      taf_dollars costs ~shares /. capital
+    else 0.
   in
   commission
   +. value *. (costs.tax_bps +. costs.slip_bps) /. 10000.
@@ -874,7 +869,7 @@ let market_of_label label =
 let run ?dividends ?(dividend_tax = 0.)
     (assets : (string * Data.bar array) array) (strategy : strategy)
     (costs : costs array) ~(profile : market_profile) ~(margin : margin)
-    ~capital:(capital : float option) ~fill =
+    ~capital:(capital : float) ~fill =
   let asset_count = Array.length assets in
   let () =
     if asset_count = 0 then invalid_arg "Engine.run: no assets"

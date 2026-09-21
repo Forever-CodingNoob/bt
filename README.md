@@ -60,7 +60,7 @@ The binary is `_build/default/bin/bt.exe`.
 3. Run two strategies and add a buy-and-hold baseline:
    ```sh
    bt run examples/sma_cross.strat examples/00685L_bh.strat \
-     --baseline tw/00685L
+     --baseline tw/00685L --capital 1000000
    ```
 
 The report has one column for each strategy and one baseline column. Each strategy metric has a `W` or `L` marker when you use `--baseline`.
@@ -77,7 +77,7 @@ bt run STRAT... [--baseline M/SYM] [--from D] [--to D]
        [--per-share-fee F] [--per-share-cap F]
        [--financing-rate PCT] [--maintenance-ratio PCT] [--financing-ratio PCT]
        [--loan-term-months N] [--dividend-tax PCT]
-       [--capital TWD] [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]
+       --capital TWD [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]
 ```
 
 See [docs/cli.md](./docs/cli.md) for the complete reference.

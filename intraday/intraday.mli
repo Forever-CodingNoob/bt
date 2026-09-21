@@ -1,9 +1,9 @@
-(** Intraday sizing uses exposure units; capital enables dollar-based costs. *)
+(** Intraday sizing uses exposure units; capital scales dollar-based costs. *)
 type config = {
   fill : Engine.fill;
   leverage : float;
   costs : Engine.costs;
-  capital : float option;
+  capital : float;
 }
 
 (** Executed change, timestamped with the execution bar's left edge. *)
@@ -31,7 +31,7 @@ type result = {
     power. Unchanged targets drift without rebalancing or liquidation.
     Last-bar decisions are ignored and positions close at that bar's close.
     Empty calendar sessions are omitted. Initial equity is in exposure units,
-    with dollar value [initial_equity * capital] when capital is supplied. *)
+    with dollar value [initial_equity * capital]. *)
 val run :
   config -> sessions:Data.session array -> bars:Data.bar array ->
   targets:float array -> initial_equity:float -> result

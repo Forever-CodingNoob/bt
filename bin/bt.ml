@@ -9,9 +9,9 @@ let usage =
    \         [--per-share-fee F] [--per-share-cap F]\n\
    \         [--dividend-tax PCT] [--financing-rate PCT] [--maintenance-ratio PCT] [--financing-ratio PCT]\n\
    \         [--loan-term-months N]\n\
-   \         [--capital TWD] [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]\n\
+   \         --capital TWD [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]\n\
    \  bt daytrade STRAT... [--baseline us/SYM] [--fill open|close] [--leverage N]\n\
-   \              [--from D] [--to D] [-p name=value] [--capital USD]\n\
+   \              [--from D] [--to D] [-p name=value] --capital USD\n\
    \              [--fee-bps F] [--tax-bps F] [--slip-bps F] [--per-share-fee F] [--per-share-cap F]\n\
    \              [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]\n\
    \  bt target STRAT [--live] [--equity TWD] [--data-dir DIR] [--provisional-close PRICE]\n\
@@ -267,6 +267,11 @@ let run argv =
        exit 0);
   let strategy_files = List.rev !strategy_files in
   if strategy_files = [] then usage_error "run: at least one STRAT file is required";
+  let capital =
+    match !capital with
+    | Some value when Float.is_finite value && value > 0. -> value
+    | _ -> usage_error "run: --capital is required"
+  in
   if !loan_term_months < 0 then
     usage_error "run: --loan-term-months must be 0 or greater";
   let names = List.map strategy_name strategy_files in
@@ -466,7 +471,7 @@ let run argv =
           Engine.run ~dividends
             ~dividend_tax:(!dividend_tax /. 100.)
             engine_assets strategy costs
-            ~profile ~margin:margin_config ~capital:!capital ~fill:!fill
+            ~profile ~margin:margin_config ~capital ~fill:!fill
         in
         (input.name, String.concat "+" labels, result))
       inputs
@@ -496,7 +501,7 @@ let run argv =
              [| (market ^ "/" ^ symbol, bars) |]
              (baseline_strategy (Array.length bars)) [| costs |]
              ~profile ~margin:margin_config
-             ~capital:!capital ~fill:!fill)
+             ~capital ~fill:!fill)
   in
   let columns =
     List.map (fun (name, _, result) -> name, result) runs
@@ -560,12 +565,13 @@ let daytrade argv =
     | Arg.Help message -> let () = print_string message in exit 0 in
   let files = List.rev !strategy_files in
   let () = if files = [] then usage_error "daytrade: at least one STRAT file is required" in
+  let capital =
+    match !capital with
+    | Some value when Float.is_finite value && value > 0. -> value
+    | _ -> usage_error "daytrade: --capital is required"
+  in
   let () = if not (Float.is_finite !leverage) || !leverage <= 0. then
     usage_error "daytrade: --leverage must be a positive finite number" in
-  let () = match !capital with
-    | Some value when not (Float.is_finite value) || value <= 0. ->
-        usage_error "daytrade: --capital must be a positive finite number"
-    | _ -> () in
   let names = List.map strategy_name files in
   let seen = Hashtbl.create (List.length names) in
   let () = List.iter (fun name ->
@@ -641,7 +647,8 @@ let daytrade argv =
     let strategy = Dsl.compile_ast ~extra:["since_open", since_open; "to_close", to_close]
       ast ~params ~assets:[None, bars] in
     let config : Intraday.config =
-      { fill = !fill; leverage = !leverage; costs = costs symbol; capital = !capital } in
+      { fill = !fill; leverage = !leverage; costs = costs symbol;
+        capital } in
     name, "us/" ^ symbol,
     Intraday.run config ~sessions ~bars ~targets:strategy.Engine.targets.(0) ~initial_equity:1.) inputs in
   let baseline_result = Option.map (fun (symbol, asset) ->
@@ -653,7 +660,7 @@ let daytrade argv =
         loan_term_months = None } in
     Engine.run ~dividends:[|asset.Data.dividends|]
       [|"us/" ^ symbol, bars|] (baseline_strategy (Array.length bars)) [|costs symbol|]
-      ~profile ~margin ~capital:!capital ~fill:!fill) baseline_asset in
+      ~profile ~margin ~capital ~fill:!fill) baseline_asset in
   let stem = Report.stem ~names ~out_name:!out_name in
   let () = Report.print_intraday ~columns ~baseline:baseline_result ~fill:!fill in
   let () = Report.write_intraday_outputs ~out_dir:!out_dir ~stem ~columns ~baseline:baseline_result in

@@ -2,7 +2,7 @@ type config = {
   fill : Engine.fill;
   leverage : float;
   costs : Engine.costs;
-  capital : float option;
+  capital : float;
 }
 
 type fill = {
