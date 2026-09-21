@@ -270,7 +270,8 @@ let run argv =
   let capital =
     match !capital with
     | Some value when Float.is_finite value && value > 0. -> value
-    | _ -> usage_error "run: --capital is required"
+    | Some _ -> usage_error "run: --capital must be a positive finite number"
+    | None -> usage_error "run: --capital is required"
   in
   if !loan_term_months < 0 then
     usage_error "run: --loan-term-months must be 0 or greater";
@@ -568,7 +569,8 @@ let daytrade argv =
   let capital =
     match !capital with
     | Some value when Float.is_finite value && value > 0. -> value
-    | _ -> usage_error "daytrade: --capital is required"
+    | Some _ -> usage_error "daytrade: --capital must be a positive finite number"
+    | None -> usage_error "daytrade: --capital is required"
   in
   let () = if not (Float.is_finite !leverage) || !leverage <= 0. then
     usage_error "daytrade: --leverage must be a positive finite number" in

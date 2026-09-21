@@ -250,6 +250,10 @@ let effective_targets ~financing_ratios targets =
 
 let plan_fills ~costs ~capital ~financing_ratios
     ~(state : plan_state) ~prices ~targets ~force =
+  let () =
+    if not (Float.is_finite capital && capital > 0.) then
+      invalid_arg "Engine.plan_fills: capital must be positive and finite"
+  in
   let asset_count = Array.length state.cash_values in
   let iter_assets function_ = iter_indices asset_count function_ in
   let fold_assets function_ initial =
@@ -870,6 +874,10 @@ let run ?dividends ?(dividend_tax = 0.)
     (assets : (string * Data.bar array) array) (strategy : strategy)
     (costs : costs array) ~(profile : market_profile) ~(margin : margin)
     ~capital:(capital : float) ~fill =
+  let () =
+    if not (Float.is_finite capital && capital > 0.) then
+      invalid_arg "Engine.run: capital must be positive and finite"
+  in
   let asset_count = Array.length assets in
   let () =
     if asset_count = 0 then invalid_arg "Engine.run: no assets"

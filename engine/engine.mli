@@ -130,12 +130,14 @@ val taf_dollars : costs -> shares:float -> float
     target month's final day. *)
 val add_months_clamped : string -> int -> string
 
-(** Fill cost as a fraction of pre-fill equity; capital scales dollar fees. *)
+(** Fill cost as a fraction of pre-fill equity; capital scales dollar fees.
+    capital must be finite and strictly positive. *)
 val charge :
   costs array -> float -> int ->
   equity_before:float -> delta:float -> price:float -> float
 
-(** Sell cost in equity units, including capital-scaled dollar fees. *)
+(** Sell cost in equity units, including capital-scaled dollar fees.
+    capital must be finite and strictly positive. *)
 val absolute_sell_cost :
   costs array -> float -> int -> price:float -> float -> float
 
@@ -143,7 +145,8 @@ val absolute_sell_cost :
 val effective_targets :
   financing_ratios:float array -> float array -> float array * bool
 
-(** Return the exact pure per-bar fill plan used by [run]. *)
+(** Return the exact pure per-bar fill plan used by [run]; capital must be
+    finite and strictly positive. *)
 val plan_fills :
   costs:costs array ->
   capital:float ->
@@ -155,7 +158,8 @@ val plan_fills :
   fill_plan
 
 (** Run a synchronized multi-asset backtest. [dividends] defaults to
-    no events. [dividend_tax] is the fraction withheld at creation. *)
+    no events. [dividend_tax] is the fraction withheld at creation.
+    capital must be finite and strictly positive. *)
 val run :
   ?dividends:Data.dividend array array ->
   ?dividend_tax:float ->

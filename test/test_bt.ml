@@ -3780,7 +3780,7 @@ let test_profile_of_market () =
 let test_capital_required () =
   let binary = locate ["_build/default/bin/bt.exe"; "../bin/bt.exe"] in
   List.iter
-    (fun (command, expected) ->
+    (fun (command, args, expected) ->
       let stderr_path = Filename.temp_file "bt-test-capital-" ".txt" in
       Fun.protect
         ~finally:(fun () ->
@@ -3788,19 +3788,24 @@ let test_capital_required () =
         (fun () ->
           let invocation =
             String.concat " "
-              [ Filename.quote binary;
-                command;
-                Filename.quote (buy_hold_strategy_path ());
-                "--no-plot";
-                ">/dev/null";
-                "2>" ^ Filename.quote stderr_path ]
+              ([ Filename.quote binary;
+                 command;
+                 Filename.quote (buy_hold_strategy_path ()) ]
+               @ List.map Filename.quote args
+               @ [ "--no-plot";
+                   ">/dev/null";
+                   "2>" ^ Filename.quote stderr_path ])
           in
           let () = assert (Sys.command invocation = 2) in
           match String.split_on_char '\n' (read_file stderr_path) with
           | first :: _ -> assert (first = expected)
           | [] -> assert false))
-    [ "run", "run: --capital is required";
-      "daytrade", "daytrade: --capital is required" ]
+    [ "run", [], "run: --capital is required";
+      "daytrade", [], "daytrade: --capital is required";
+      "run", ["--capital"; "-1"],
+      "run: --capital must be a positive finite number";
+      "daytrade", ["--capital"; "-1"],
+      "daytrade: --capital must be a positive finite number" ]
 
 let test_mixed_market_rejection () =
   (* Mixed-market runs are rejected regardless of leverage. *)
@@ -5032,7 +5037,8 @@ let test_intraday_session_boundaries () =
 
 let test_engine_fill_planner () =
   let plan ~cash ~cash_value ~margin_value ~loan ~previous target =
-    Engine.plan_fills ~costs:[| zero_costs |] ~capital:1000000.
+    (* State values are TWD, so capital is 1 like broker/live.ml. *)
+    Engine.plan_fills ~costs:[| zero_costs |] ~capital:1.
       ~financing_ratios:[| 0.6 |]
       ~state:
         { Engine.equity = 1000000.; cash;
@@ -5080,6 +5086,26 @@ let test_engine_fill_planner () =
   in
   (* Selling all margin inventory repays the full TWD 1,000,000 loan. *)
   assert_close 1000000. exit.Engine.plan_repayment
+
+let test_engine_capital_guard () =
+  let state : Engine.plan_state =
+    { Engine.equity = 1.; cash = 1.; cash_values = [| 0. |];
+      margin_values = [| 0. |]; loans = [| 0. |]; interests = [| 0. |];
+      tail_interests = [| 0. |]; debt = 0.; receivables = 0.;
+      previous_targets = [| 0. |] }
+  in
+  let rejects capital =
+    match
+      Engine.plan_fills ~costs:[| zero_costs |] ~capital
+        ~financing_ratios:[| 0.6 |] ~state ~prices:[| 1. |]
+        ~targets:[| 0. |] ~force:false
+    with
+    | _ -> false
+    | exception Invalid_argument _ -> true
+  in
+  (* Capital must be finite and strictly positive. *)
+  assert (rejects 0.);
+  assert (rejects Float.nan)
 
 let test_engine_mandatory_capital_cost () =
   let costs = Engine.default_costs ~market:"tw" ~symbol:"2330" in
@@ -5487,7 +5513,8 @@ let test_tw_production_cash () =
 
 let test_tw_live_plan_legs () =
   let plan ~equity ~cash ~cash_value ~margin_value ~loan ~previous target =
-    Engine.plan_fills ~costs:[| zero_costs |] ~capital:equity
+    (* State values are TWD, so capital is 1 like broker/live.ml. *)
+    Engine.plan_fills ~costs:[| zero_costs |] ~capital:1.
       ~financing_ratios:[| 0.6 |]
       ~state:
         { Engine.equity; cash; cash_values = [| cash_value |];
@@ -6429,7 +6456,7 @@ let () =
   test_nested_cache_layout ();
   test_event_transform ();
   test_mixed_market_rejection ();
-  test_capital_required ();
+  let () = test_capital_required () in
   test_us_interest_day_count ();
   test_us_default_costs ();
   test_taf_per_share_charge ();
@@ -6446,6 +6473,7 @@ let () =
   test_cure_shortfall_preserves_liability ();
   test_us_cure_tail_aware ();
   let () = test_engine_fill_planner () in
+  let () = test_engine_capital_guard () in
   let () = test_engine_mandatory_capital_cost () in
   let () = test_shioaji_info_parse () in
   let () = test_shioaji_request_headers () in
