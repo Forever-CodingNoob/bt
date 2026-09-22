@@ -268,7 +268,8 @@ let legs_of_plan ~price (plan : Engine.fill_plan) =
     | _ -> failwith "live trading requires exactly one planned asset"
   in
   let leg action cond value =
-    let lots = int_of_float (Float.floor (value /. price /. 1000.)) in
+    let shares = Engine.shares_of_value ~capital:1. ~price value in
+    let lots = int_of_float (shares /. 1000.) in
     if lots = 0 then None else Some { action; cond; lots }
   in
   [ leg "Sell" "MarginTrading" item.plan_sell_margin;

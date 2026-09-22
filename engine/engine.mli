@@ -145,6 +145,9 @@ val charge :
 val absolute_sell_cost :
   costs array -> float -> int -> price:float -> float -> float
 
+(** Recover the funded whole-share count represented by a value. *)
+val shares_of_value : capital:float -> price:float -> float -> float
+
 (** Clamp invalid targets and rescale a bar's portfolio to its funding cap. *)
 val effective_targets :
   financing_ratios:float array -> float array -> float array * bool

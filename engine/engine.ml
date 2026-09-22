@@ -254,6 +254,30 @@ let effective_targets ~financing_ratios targets =
   in
   effective, scale < 1.
 
+let share_value ~capital ~price shares =
+  shares *. price /. capital
+
+let floor_shares ~capital ~quantum ~price value =
+  let value_at units =
+    share_value ~capital ~price (units *. quantum)
+  in
+  let units = Float.floor (value *. capital /. price /. quantum) in
+  let units =
+    if units > 0. && value_at units > value then units -. 1.
+    else units
+  in
+  let next = units +. 1. in
+  if value_at next <= value then next *. quantum else units *. quantum
+
+let floor_value ~capital ~quantum ~price value =
+  if quantum > 0. then
+    share_value ~capital ~price
+      (floor_shares ~capital ~quantum ~price value)
+  else value
+
+let shares_of_value ~capital ~price value =
+  floor_shares ~capital ~quantum:1. ~price value
+
 let plan_fills ~costs ~capital ~profile ~financing_ratios
     ~(state : plan_state) ~prices ~targets ~force =
   let () =
@@ -277,6 +301,9 @@ let plan_fills ~costs ~capital ~profile ~financing_ratios
   let debt = state.debt in
   let e0 = state.equity in
   let unlevered = sum eff <= 1. in
+  let quantized =
+    profile.cash_share_quantum > 0. || profile.margin_share_quantum > 0.
+  in
   let total_value index =
     cash_values.(index) +. margin_values.(index)
   in
@@ -284,10 +311,7 @@ let plan_fills ~costs ~capital ~profile ~financing_ratios
   let price_at index = prices.(index) in
   let charge = charge costs capital in
   let floor_value ~quantum ~price value =
-    if quantum > 0. then
-      Float.floor (value *. capital /. price /. quantum)
-      *. quantum *. price /. capital
-    else value
+    floor_value ~capital ~quantum ~price value
   in
       let tolerance = 1e-15 *. abs_float e0 in
       let compute_plan buy_scale e1 =
@@ -329,17 +353,32 @@ let plan_fills ~costs ~capital ~profile ~financing_ratios
             in
             if changed.(index) && trade < 0. then
               let amount = -. trade in
-              let sell_margin =
-                Float.min amount margin_values.(index)
+              let desired_sell_margin =
+                if final_value = 0. then margin_values.(index)
+                else Float.min amount margin_values.(index)
+              in
+              let desired_sell_cash =
+                if final_value = 0. then cash_values.(index)
+                else if quantized then
+                  Float.min (amount -. desired_sell_margin)
+                    cash_values.(index)
+                else amount -. desired_sell_margin
               in
               let sell_margin =
                 floor_value ~quantum:profile.margin_share_quantum
-                  ~price:(price_at index) sell_margin
+                  ~price:(price_at index) desired_sell_margin
               in
-              let sell_cash = amount -. sell_margin in
               let sell_cash =
                 floor_value ~quantum:profile.cash_share_quantum
-                  ~price:(price_at index) sell_cash
+                  ~price:(price_at index) desired_sell_cash
+              in
+              let () =
+                if quantized then
+                  let executed = sell_margin +. sell_cash in
+                  let final_value = current -. executed in
+                  let () = trades.(index) <- -. executed in
+                  let () = final_values.(index) <- final_value in
+                  to_es.(index) <- final_value /. equity_basis
               in
               let fraction =
                 if margin_values.(index) > 0. then
@@ -505,26 +544,6 @@ let plan_fills ~costs ~capital ~profile ~financing_ratios
                 in
                 scaled_buys.(index) <- true)
         in
-        let total_cost =
-          fold_assets
-            (fun total_cost index ->
-              if changed.(index) && trades.(index) <> 0. then
-                let current = total_value index in
-                let delta_e =
-                  if scaled_buys.(index) then
-                    to_es.(index) -. current /. equity_basis
-                  else eff.(index) -. current /. equity_basis
-                in
-                let cost =
-                  charge index ~equity_before:equity_basis ~delta:delta_e
-                    ~price:(price_at index)
-                  *. equity_basis
-                in
-                let () = trade_costs.(index) <- cost in
-                total_cost +. cost
-              else total_cost)
-            (sum interest_tails)
-        in
         let minimums = Array.make asset_count 0. in
         let buy_total, minimum_total =
           fold_assets
@@ -647,26 +666,59 @@ let plan_fills ~costs ~capital ~profile ~financing_ratios
             if changed.(index) && trades.(index) > 0. then
               let buy = trades.(index) in
               let ratio = financing_ratios.(index) in
-              let cash_buy =
+              let desired_cash_buy =
                 if unlevered then buy
                 else if ratio <= 0. then buy
                 else Float.min buy (allocations.(index) /. ratio)
               in
+              let desired_margin_buy =
+                if unlevered then 0. else buy -. desired_cash_buy
+              in
               let cash_buy =
                 floor_value ~quantum:profile.cash_share_quantum
-                  ~price:(price_at index) cash_buy
-              in
-              let () = buy_cashes.(index) <- cash_buy in
-              let margin_buy =
-                if unlevered then 0. else buy -. cash_buy
+                  ~price:(price_at index) desired_cash_buy
               in
               let margin_buy =
                 floor_value ~quantum:profile.margin_share_quantum
-                  ~price:(price_at index) margin_buy
+                  ~price:(price_at index) desired_margin_buy
               in
+              let () = buy_cashes.(index) <- cash_buy in
               let () = buy_margins.(index) <- margin_buy in
+              let () =
+                if quantized then
+                  let current = total_value index in
+                  let executed = cash_buy +. margin_buy in
+                  let final_value = current +. executed in
+                  let () = trades.(index) <- executed in
+                  let () = final_values.(index) <- final_value in
+                  to_es.(index) <- final_value /. equity_basis
+              in
               down_payments.(index) <-
-                cash_buy +. (1. -. ratio) *. margin_buy)
+                if quantized then
+                  cash_buy +. (1. -. ratio) *. margin_buy
+                else if unlevered then buy
+                else minimums.(index) +. allocations.(index))
+        in
+        let total_cost =
+          fold_assets
+            (fun total_cost index ->
+              if changed.(index) && trades.(index) <> 0. then
+                let current = total_value index in
+                let delta_e =
+                  if quantized then trades.(index) /. equity_basis
+                  else if scaled_buys.(index) then
+                    to_es.(index) -. current /. equity_basis
+                  else eff.(index) -. current /. equity_basis
+                in
+                let cost =
+                  charge index ~equity_before:equity_basis ~delta:delta_e
+                    ~price:(price_at index)
+                  *. equity_basis
+                in
+                let () = trade_costs.(index) <- cost in
+                total_cost +. cost
+              else total_cost)
+            (sum interest_tails)
         in
         let cash_refinance_values = Array.make asset_count 0. in
         let margin_refinance_values = Array.make asset_count 0. in
@@ -699,27 +751,29 @@ let plan_fills ~costs ~capital ~profile ~financing_ratios
                       floor_value ~quantum:profile.margin_share_quantum
                         ~price:(price_at index) value
                     in
-                    let sell_cost =
-                      charge index ~equity_before:equity_basis
-                        ~delta:(-. value /. equity_basis)
-                        ~price:(price_at index)
-                      *. equity_basis
-                    in
-                    let buy_cost =
-                      charge index ~equity_before:equity_basis
-                        ~delta:(value /. equity_basis)
-                        ~price:(price_at index)
-                      *. equity_basis
-                    in
-                    let () = cash_refinance_values.(index) <- value in
-                    let () =
-                      cash_refinance_sell_costs.(index) <- sell_cost
-                    in
-                    let () =
-                      cash_refinance_buy_costs.(index) <- buy_cost
-                    in
-                    let () = refinance_es.(index) <- refinance_e in
-                    total_cost +. sell_cost +. buy_cost
+                    if value > 0. then
+                      let sell_cost =
+                        charge index ~equity_before:equity_basis
+                          ~delta:(-. value /. equity_basis)
+                          ~price:(price_at index)
+                        *. equity_basis
+                      in
+                      let buy_cost =
+                        charge index ~equity_before:equity_basis
+                          ~delta:(value /. equity_basis)
+                          ~price:(price_at index)
+                        *. equity_basis
+                      in
+                      let () = cash_refinance_values.(index) <- value in
+                      let () =
+                        cash_refinance_sell_costs.(index) <- sell_cost
+                      in
+                      let () =
+                        cash_refinance_buy_costs.(index) <- buy_cost
+                      in
+                      let () = refinance_es.(index) <- refinance_e in
+                      total_cost +. sell_cost +. buy_cost
+                    else total_cost
                   else total_cost
                 in
                 let margin_capacity =
@@ -737,36 +791,40 @@ let plan_fills ~costs ~capital ~profile ~financing_ratios
                     floor_value ~quantum:profile.margin_share_quantum
                       ~price:(price_at index) value
                   in
-                  let fraction = value /. post_margin_values.(index) in
-                  let repayment = post_loans.(index) *. fraction in
-                  let accrued = post_interests.(index) *. fraction in
-                  let tail = post_tails.(index) *. fraction in
-                  let settled = accrued +. tail in
-                  let sell_cost =
-                    charge index ~equity_before:equity_basis
-                      ~delta:(-. value /. equity_basis)
-                      ~price:(price_at index)
-                    *. equity_basis
-                  in
-                  let buy_cost =
-                    charge index ~equity_before:equity_basis
-                      ~delta:(value /. equity_basis)
-                      ~price:(price_at index)
-                    *. equity_basis
-                  in
-                  let () = margin_refinance_values.(index) <- value in
-                  let () =
-                    margin_refinance_repayments.(index) <- repayment
-                  in
-                  let () = margin_refinance_interests.(index) <- settled in
-                  let () =
-                    margin_refinance_sell_costs.(index) <- sell_cost
-                  in
-                  let () =
-                    margin_refinance_buy_costs.(index) <- buy_cost
-                  in
-                  let () = refinance_es.(index) <- refinance_e in
-                  total_cost +. sell_cost +. buy_cost +. tail
+                  if value > 0. then
+                    let fraction = value /. post_margin_values.(index) in
+                    let repayment = post_loans.(index) *. fraction in
+                    let accrued = post_interests.(index) *. fraction in
+                    let tail = post_tails.(index) *. fraction in
+                    let settled = accrued +. tail in
+                    let sell_cost =
+                      charge index ~equity_before:equity_basis
+                        ~delta:(-. value /. equity_basis)
+                        ~price:(price_at index)
+                      *. equity_basis
+                    in
+                    let buy_cost =
+                      charge index ~equity_before:equity_basis
+                        ~delta:(value /. equity_basis)
+                        ~price:(price_at index)
+                      *. equity_basis
+                    in
+                    let () = margin_refinance_values.(index) <- value in
+                    let () =
+                      margin_refinance_repayments.(index) <- repayment
+                    in
+                    let () =
+                      margin_refinance_interests.(index) <- settled
+                    in
+                    let () =
+                      margin_refinance_sell_costs.(index) <- sell_cost
+                    in
+                    let () =
+                      margin_refinance_buy_costs.(index) <- buy_cost
+                    in
+                    let () = refinance_es.(index) <- refinance_e in
+                    total_cost +. sell_cost +. buy_cost +. tail
+                  else total_cost
                 else total_cost)
               total_cost
           else total_cost
@@ -805,7 +863,12 @@ let plan_fills ~costs ~capital ~profile ~financing_ratios
                   plan_refinance_margin_buy_cost =
                     margin_refinance_buy_costs.(index) });
           planned_total_cost = total_cost;
-          planned_refinances = shortage > 0.;
+          planned_refinances =
+            if quantized then
+              Array.exists (fun value -> value > 0.) cash_refinance_values
+              || Array.exists
+                   (fun value -> value > 0.) margin_refinance_values
+            else shortage > 0.;
           planned_funding_clamp = funding_clamp }
       in
       let projected_cash plan =
@@ -813,7 +876,12 @@ let plan_fills ~costs ~capital ~profile ~financing_ratios
           Array.fold_left
             (fun projected item ->
               if item.plan_changed && item.plan_trade < 0. then
-                projected -. item.plan_trade -. item.plan_repayment
+                let proceeds =
+                  if quantized then
+                    item.plan_sell_margin +. item.plan_sell_cash
+                  else -. item.plan_trade
+                in
+                projected +. proceeds -. item.plan_repayment
                 -. item.plan_interest_settled -. item.plan_trade_cost
               else projected)
             cash plan.planned_assets
@@ -839,17 +907,45 @@ let plan_fills ~costs ~capital ~profile ~financing_ratios
           projected
       in
       let solve buy_scale =
-        let rec iterate remaining e1 =
-          if remaining = 0 then e1
-          else
-            let previous = e1 in
-            let plan = compute_plan buy_scale previous in
-            let next = e0 -. plan.planned_total_cost in
-            if next <= 0. then e1
-            else if abs_float (next -. previous) <= tolerance then next
-            else iterate (remaining - 1) next
-        in
-        compute_plan buy_scale (iterate 20 e0)
+        if not quantized then
+          let rec iterate remaining e1 =
+            if remaining = 0 then e1
+            else
+              let previous = e1 in
+              let plan = compute_plan buy_scale previous in
+              let next = e0 -. plan.planned_total_cost in
+              if next <= 0. then e1
+              else if abs_float (next -. previous) <= tolerance then next
+              else iterate (remaining - 1) next
+          in
+          compute_plan buy_scale (iterate 20 e0)
+        else
+          let buy_value plan =
+            Array.fold_left
+              (fun total item ->
+                if item.plan_trade > 0. then total +. item.plan_trade
+                else total)
+              0. plan.planned_assets
+          in
+          let lower_buy left right =
+            if buy_value left <= buy_value right then left else right
+          in
+          let rec iterate remaining earlier e1 =
+            let plan = compute_plan buy_scale e1 in
+            if remaining = 0 then plan
+            else
+              let next = e0 -. plan.planned_total_cost in
+              if next <= 0. then plan
+              else if abs_float (next -. e1) <= tolerance then
+                compute_plan buy_scale next
+              else
+                match earlier with
+                | Some value when next = value ->
+                    lower_buy plan (compute_plan buy_scale next)
+                | None | Some _ ->
+                    iterate (remaining - 1) (Some e1) next
+          in
+          iterate 20 None e0
       in
       let requested_plan = solve 1. in
       let plan =
@@ -914,6 +1010,9 @@ let run ?dividends ?(dividend_tax = 0.)
       invalid_arg "Engine.run: capital must be positive and finite"
   in
   let asset_count = Array.length assets in
+  let quantized =
+    profile.cash_share_quantum > 0. || profile.margin_share_quantum > 0.
+  in
   let () =
     if asset_count = 0 then invalid_arg "Engine.run: no assets"
   in
@@ -1045,6 +1144,22 @@ let run ?dividends ?(dividend_tax = 0.)
         lot.interest <-
           lot.interest +. tail_interest_for_lot index bar_index lot)
       margin_lots.(index)
+  in
+  let add_inventory values index ~price value =
+    if quantized then
+      let current = shares_of_value ~capital ~price values.(index) in
+      let added = shares_of_value ~capital ~price value in
+      values.(index) <-
+        share_value ~capital ~price (current +. added)
+    else values.(index) <- values.(index) +. value
+  in
+  let remove_inventory values index ~price value =
+    if quantized then
+      let current = shares_of_value ~capital ~price values.(index) in
+      let removed = shares_of_value ~capital ~price value in
+      values.(index) <-
+        share_value ~capital ~price (Float.max 0. (current -. removed))
+    else values.(index) <- values.(index) -. value
   in
   let total_value index =
     cash_values.(index) +. margin_values.(index)
@@ -1248,8 +1363,23 @@ let run ?dividends ?(dividend_tax = 0.)
   let sell_inventory ?(settle = true) index ~margin_only ~bar_index
       ~date ~price =
     let total_before = total_value index in
+    let sell_margin =
+      if quantized then
+        floor_value ~capital ~quantum:profile.margin_share_quantum
+          ~price margin_values.(index)
+      else margin_values.(index)
+    in
+    let sell_cash =
+      if margin_only then 0.
+      else if quantized then
+        floor_value ~capital ~quantum:profile.cash_share_quantum
+          ~price cash_values.(index)
+      else cash_values.(index)
+    in
     let amount =
-      if margin_only then margin_values.(index) else total_before
+      if quantized then sell_margin +. sell_cash
+      else if margin_only then margin_values.(index)
+      else total_before
     in
     if amount > 0. then
       let equity_now = equity () in
@@ -1293,7 +1423,7 @@ let run ?dividends ?(dividend_tax = 0.)
         && total_liabilities () = 0.
       in
       let () =
-        if cash_only && equity_now > 0. then
+        if not quantized && cash_only && equity_now > 0. then
           let fraction =
             match cost_fraction with
             | Some value -> value
@@ -1310,7 +1440,12 @@ let run ?dividends ?(dividend_tax = 0.)
           else cash := cash_after
         else
           let () =
-            if margin_only then margin_values.(index) <- 0.
+            if quantized then
+              let () =
+                remove_inventory cash_values index ~price sell_cash
+              in
+              remove_inventory margin_values index ~price sell_margin
+            else if margin_only then margin_values.(index) <- 0.
             else
               let () = cash_values.(index) <- 0. in
               margin_values.(index) <- 0.
@@ -1386,11 +1521,16 @@ let run ?dividends ?(dividend_tax = 0.)
                         (fun total lot -> total +. lot.principal)
                         0. matured
                     in
-                    let value =
+                    let raw_value =
                       if total_loan > 0. then
                         margin_values.(index)
                         *. matured_principal /. total_loan
                       else 0.
+                    in
+                    let value =
+                      floor_value ~capital
+                        ~quantum:profile.margin_share_quantum
+                        ~price:(price_at index) raw_value
                     in
                     let due =
                       List.fold_left
@@ -1424,10 +1564,14 @@ let run ?dividends ?(dividend_tax = 0.)
                   -. sell_costs.(index) -. roll_dues.(index))
                 !cash
             in
+            let rebuy_value index scale =
+              floor_value ~capital ~quantum:profile.margin_share_quantum
+                ~price:(price_at index) (roll_values.(index) *. scale)
+            in
             let rebuy_cash scale =
               fold_assets
                 (fun required index ->
-                  let buy = roll_values.(index) *. scale in
+                  let buy = rebuy_value index scale in
                   if buy > 0. then
                     let buy_cost =
                       charge index ~equity_before:e0
@@ -1466,8 +1610,8 @@ let run ?dividends ?(dividend_tax = 0.)
               iter_assets (fun index ->
                 let value = roll_values.(index) in
                 let () =
-                  margin_values.(index) <-
-                    Float.max 0. (margin_values.(index) -. value)
+                  remove_inventory margin_values index
+                    ~price:(price_at index) value
                 in
                 let () = margin_lots.(index) <- remaining_lots.(index) in
                 if value > 0. then
@@ -1483,7 +1627,7 @@ let run ?dividends ?(dividend_tax = 0.)
             let () =
               if cash_after_sales >= 0. then
                 iter_assets (fun index ->
-                  let buy = roll_values.(index) *. scale in
+                  let buy = rebuy_value index scale in
                   if buy > 0. then
                     let buy_cost =
                       charge index ~equity_before:e0
@@ -1496,8 +1640,8 @@ let run ?dividends ?(dividend_tax = 0.)
                         -. buy_cost
                     in
                     let () =
-                      margin_values.(index) <-
-                        margin_values.(index) +. buy
+                      add_inventory margin_values index
+                        ~price:(price_at index) buy
                     in
                     let () =
                       add_lot index ~bar_index
@@ -1549,13 +1693,21 @@ let run ?dividends ?(dividend_tax = 0.)
   let open_at index t = (snd assets.(index)).(t).Data.o in
   let scale_values now before =
     iter_assets (fun index ->
-      let factor = now index /. before index in
+      let previous_price = before index in
+      let next_price = now index in
+      let factor = next_price /. previous_price in
+      let scale value =
+        if quantized then
+          share_value ~capital ~price:next_price
+            (shares_of_value ~capital ~price:previous_price value)
+        else value *. factor
+      in
       let () =
         if cash_values.(index) <> 0. then
-          cash_values.(index) <- cash_values.(index) *. factor
+          cash_values.(index) <- scale cash_values.(index)
       in
       if margin_values.(index) <> 0. then
-        margin_values.(index) <- margin_values.(index) *. factor)
+        margin_values.(index) <- scale margin_values.(index))
   in
   let accrue_interest ~bar_index ~date ~prev_date =
     let days = day_number date - day_number prev_date in
@@ -1611,15 +1763,15 @@ let run ?dividends ?(dividend_tax = 0.)
                 sell_exposure.(index) +. exposure
             in
             let () =
-              cash_values.(index) <-
-                cash_values.(index) -. item.plan_sell_cash
+              remove_inventory cash_values index ~price:(price_at index)
+                item.plan_sell_cash
             in
             let () =
-              margin_values.(index) <-
-                margin_values.(index) -. item.plan_sell_margin
+              remove_inventory margin_values index ~price:(price_at index)
+                item.plan_sell_margin
             in
             let () =
-              if item.plan_final_value = 0. then
+              if not quantized && item.plan_final_value = 0. then
                 let () = cash_values.(index) <- 0. in
                 margin_values.(index) <- 0.
             in
@@ -1632,9 +1784,14 @@ let run ?dividends ?(dividend_tax = 0.)
                 in
                 scale_lots index remaining
             in
+            let proceeds =
+              if quantized then
+                item.plan_sell_margin +. item.plan_sell_cash
+              else -. item.plan_trade
+            in
             let () =
               cash :=
-                !cash -. item.plan_trade -. item.plan_repayment
+                !cash +. proceeds -. item.plan_repayment
                 -. item.plan_interest_settled -. item.plan_trade_cost
             in
             let () =
@@ -1653,8 +1810,8 @@ let run ?dividends ?(dividend_tax = 0.)
             let () =
               if item.plan_refinance_cash > 0. then
                 let () =
-                  cash_values.(index) <-
-                    cash_values.(index) -. item.plan_refinance_cash
+                  remove_inventory cash_values index ~price:(price_at index)
+                    item.plan_refinance_cash
                 in
                 let () =
                   cash :=
@@ -1667,8 +1824,8 @@ let run ?dividends ?(dividend_tax = 0.)
                     ~to_e:item.plan_refinance_e
                 in
                 let () =
-                  margin_values.(index) <-
-                    margin_values.(index) +. item.plan_refinance_cash
+                  add_inventory margin_values index ~price:(price_at index)
+                    item.plan_refinance_cash
                 in
                 let () =
                   add_lot index ~bar_index
@@ -1687,8 +1844,8 @@ let run ?dividends ?(dividend_tax = 0.)
             in
             if item.plan_refinance_margin > 0. then
               let () =
-                margin_values.(index) <-
-                  margin_values.(index) -. item.plan_refinance_margin
+                remove_inventory margin_values index ~price:(price_at index)
+                  item.plan_refinance_margin
               in
               let () =
                 if item.plan_refinance_margin_repayment > 0. then
@@ -1715,8 +1872,8 @@ let run ?dividends ?(dividend_tax = 0.)
                   ~to_e:item.plan_refinance_e
               in
               let () =
-                margin_values.(index) <-
-                  margin_values.(index) +. item.plan_refinance_margin
+                add_inventory margin_values index ~price:(price_at index)
+                  item.plan_refinance_margin
               in
               let () =
                 add_lot index ~bar_index
@@ -1750,12 +1907,12 @@ let run ?dividends ?(dividend_tax = 0.)
                   buy_exposure.(index) +. exposure
               in
               let () =
-                cash_values.(index) <-
-                  cash_values.(index) +. item.plan_buy_cash
+                add_inventory cash_values index ~price:(price_at index)
+                  item.plan_buy_cash
               in
               let () =
-                margin_values.(index) <-
-                  margin_values.(index) +. item.plan_buy_margin
+                add_inventory margin_values index ~price:(price_at index)
+                  item.plan_buy_margin
               in
               let () =
                 add_lot index ~bar_index
@@ -1864,7 +2021,16 @@ let run ?dividends ?(dividend_tax = 0.)
         let fraction = sell_total /. total_margin in
         let () =
           iter_assets (fun index ->
-            let sell_amount = fraction *. margin_values.(index) in
+            let desired = fraction *. margin_values.(index) in
+            let sell_amount =
+              floor_value ~capital ~quantum:profile.margin_share_quantum
+                ~price:(price_at index) desired
+            in
+            let asset_fraction =
+              if quantized && margin_values.(index) > 0. then
+                sell_amount /. margin_values.(index)
+              else fraction
+            in
             if sell_amount > 0. then
               let equity_now = equity () in
               let total_before = total_value index in
@@ -1892,8 +2058,8 @@ let run ?dividends ?(dividend_tax = 0.)
                   sell_exposure.(index) +. sold_e
               in
               let () =
-                margin_values.(index) <-
-                  margin_values.(index) -. sell_amount
+                remove_inventory margin_values index
+                  ~price:(price_at index) sell_amount
               in
               let () = cash := !cash +. sell_amount -. cost_value in
               (* Settle the cured fraction's share of loans, accrued
@@ -1906,14 +2072,14 @@ let run ?dividends ?(dividend_tax = 0.)
               let total_with_tail = base +. tail in
               let () =
                 if total_with_tail > 0. then
-                  let owed = total_with_tail *. fraction in
+                  let owed = total_with_tail *. asset_fraction in
                   let payment = Float.min !cash owed in
                   let shortfall = owed -. payment in
                   let () =
                     if shortfall > 0. then debt := !debt +. shortfall
                   in
                   let () = cash := !cash -. payment in
-                  scale_lots index (1. -. fraction)
+                  scale_lots index (1. -. asset_fraction)
               in
               let () =
                 if !cash < 0. then

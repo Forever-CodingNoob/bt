@@ -5075,17 +5075,19 @@ let test_engine_fill_planner () =
      floor(229,999.99999999997 / 10 / 1,000) * 1,000 = 22,000
      margin shares, whose 40% down payment is TWD 88,000. *)
   let () =
-    assert
-      (Float.floor (scale_in.Engine.plan_buy_margin /. 10.) = 22000.)
+    assert_close 22000.
+      (Engine.shares_of_value ~capital:1. ~price:10.
+         scale_in.Engine.plan_buy_margin)
   in
   (* The TWD 92,000 raw minimum requests 92,000 / 0.6 of refinancing;
      flooring that value to 1,000-share lots gives 15,000 shares and
      releases TWD 90,000. *)
   let () =
-    assert
-      (Float.floor (scale_in.Engine.plan_refinance_cash /. 10.) = 15000.)
+    assert_close 15000.
+      (Engine.shares_of_value ~capital:1. ~price:10.
+         scale_in.Engine.plan_refinance_cash)
   in
-  assert_close 88000. scale_in.Engine.plan_down_payment;
+  let () = assert_close 88000. scale_in.Engine.plan_down_payment in
   let exit =
     (plan ~cash:0. ~cash_value:(1000000. /. 3.)
        ~margin_value:(5000000. /. 3.) ~loan:1000000.
@@ -5096,9 +5098,9 @@ let test_engine_fill_planner () =
   let () =
     assert_close 166000. (exit.Engine.plan_sell_margin /. 10.)
   in
-  (* The remaining TWD 340,000 cash sale is exactly 34,000 shares. *)
+  (* floor((1/3 * 1,000,000) / 10) = 33,333 cash shares. *)
   let () =
-    assert_close 34000. (exit.Engine.plan_sell_cash /. 10.)
+    assert_close 33333. (exit.Engine.plan_sell_cash /. 10.)
   in
   (* Selling 1,660,000 / (5/3 * 1,000,000) repays TWD 996,000. *)
   assert_close 996000. exit.Engine.plan_repayment
@@ -5130,10 +5132,9 @@ let test_engine_share_quantum () =
   (* floor(1 * 1,000,000 / 11) = 90,909 shares, worth 999,999 / 1,000,000. *)
   let () = assert_close 0.999999 odd.Engine.plan_buy_cash in
   let () =
-    assert
-      (Float.floor
-         (odd.Engine.plan_buy_cash *. 1000000. /. 11.)
-       = 90909.)
+    assert_close 90909.
+      (Engine.shares_of_value ~capital:1000000. ~price:11.
+         odd.Engine.plan_buy_cash)
   in
   let margin =
     plan tw ~price:11. ~cash:0.4 ~cash_value:0. ~margin_value:1. ~loan:0.4
@@ -5143,10 +5144,9 @@ let test_engine_share_quantum () =
      worth 990,000 / 1,000,000. *)
   let () = assert_close 0.99 margin.Engine.plan_buy_margin in
   let () =
-    assert
-      (Float.floor
-         (margin.Engine.plan_buy_margin *. 1000000. /. 11.)
-       = 90000.)
+    assert_close 90000.
+      (Engine.shares_of_value ~capital:1000000. ~price:11.
+         margin.Engine.plan_buy_margin)
   in
   let us = Engine.profile_of_market "us" in
   let us_cash =
@@ -5161,6 +5161,242 @@ let test_engine_share_quantum () =
   in
   (* US quantum 0 preserves the pre-change fractional margin value. *)
   assert_close 1. us_margin.Engine.plan_buy_margin
+
+let test_engine_tw_sell_partition () =
+  let plan =
+    Engine.plan_fills ~costs:[| zero_costs |] ~capital:1.
+      ~profile:(Engine.profile_of_market "tw")
+      ~financing_ratios:[| 0.6 |]
+      ~state:
+        { Engine.equity = 6000.; cash = 0.; cash_values = [| 0. |];
+          margin_values = [| 10000. |]; loans = [| 4000. |];
+          interests = [| 0. |]; tail_interests = [| 0. |]; debt = 0.;
+          receivables = 0.; previous_targets = [| 5. /. 3. |] }
+      ~prices:[| 10. |] ~targets:[| 5. /. 6. |] ~force:false
+  in
+  let item = plan.Engine.planned_assets.(0) in
+  (* The requested 500-share margin reduction is below one 1,000-share
+     lot. With no cash holding, neither inventory can execute a sell. *)
+  let () = assert_close 0. item.Engine.plan_sell_margin in
+  let () = assert_close 0. item.Engine.plan_sell_cash in
+  let () = assert_close 0. item.Engine.plan_trade in
+  assert_close 10000. item.Engine.plan_final_value
+
+let test_engine_tw_run_conservation () =
+  let bars =
+    [| bar "2020-01-01" 11. 11.;
+       bar "2020-01-02" 11. 11.;
+       bar "2020-01-03" 11. 11. |]
+  in
+  let result =
+    Engine.run ~profile:(Engine.profile_of_market "tw")
+      [| ("tw/TEST", bars) |]
+      { Engine.targets = [| [| 1.; 0.5; 0.5 |] |] }
+      [| zero_costs |] ~margin:(no_margin 1) ~capital:1000000.
+      ~fill:Engine.Close_same
+  in
+  (* Flat prices and zero costs conserve TWD 1,000,000 through the
+     whole-share entry, partial sell, and final liquidation. *)
+  assert_float_array [| 1.; 1.; 1. |]
+    (Array.of_list (List.map snd result.Engine.equity_curve))
+
+let test_engine_tw_full_exit () =
+  let price = 0.43708333333333332 in
+  let bars =
+    [| bar "2020-01-01" price price;
+       bar "2020-01-02" price price;
+       bar "2020-01-03" price price;
+       bar "2020-01-06" price price |]
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.; maintenance_override = Some 0.;
+      ratios = [| 0.6 |]; loan_term_months = None }
+  in
+  let result =
+    Engine.run ~profile:(Engine.profile_of_market "tw")
+      [| ("tw/TEST", bars) |]
+      { Engine.targets = [| [| 2.5; 2.5; 0.; 0. |] |] }
+      [| zero_costs |] ~margin ~capital:1000000.
+      ~fill:Engine.Close_same
+  in
+  (* A flat-price full exit sells the complete lot-aligned holding and
+     repays its complete loan, so every equity observation stays 1. *)
+  assert_float_array [| 1.; 1.; 1.; 1. |]
+    (Array.of_list (List.map snd result.Engine.equity_curve))
+
+let test_engine_tw_margin_call_quantum () =
+  let bars =
+    [| bar "2020-01-01" 10. 10.;
+       bar "2020-01-02" 7.5 7.5;
+       bar "2020-01-03" 7.5 7.5 |]
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.; maintenance_override = Some 1.3;
+      ratios = [| 0.6 |]; loan_term_months = None }
+  in
+  let result =
+    Engine.run ~profile:(Engine.profile_of_market "tw")
+      [| ("tw/TEST", bars) |]
+      { Engine.targets = [| [| 2.5; 2.5; 2.5 |] |] }
+      [| zero_costs |] ~margin ~capital:1000000.
+      ~fill:Engine.Close_same
+  in
+  (* The 250,000-share margin entry falls from TWD 2.5m to TWD 1.875m.
+     Its 125% maintenance triggers a complete 250-lot liquidation, leaving
+     equity 1.875 - 1.5 = 0.375 without an orphan loan. *)
+  let () =
+    assert_float_array [| 1.; 0.375; 0.375 |]
+      (Array.of_list (List.map snd result.Engine.equity_curve))
+  in
+  assert (result.Engine.margin_stats.margin_call_dates = ["2020-01-02"])
+
+let test_engine_tw_rollover_quantum () =
+  let bars =
+    [| bar "2020-08-31" 10. 10.;
+       bar "2020-09-01" 10. 10.;
+       bar "2020-09-02" 10. 10.;
+       bar "2022-02-25" 10. 10.;
+       bar "2022-02-28" 10. 10.;
+       bar "2022-03-01" 10. 10. |]
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.; maintenance_override = Some 0.;
+      ratios = [| 0.6 |]; loan_term_months = Some 18 }
+  in
+  let result =
+    Engine.run ~profile:(Engine.profile_of_market "tw")
+      [| ("tw/TEST", bars) |]
+      { Engine.targets = [| Array.make (Array.length bars) 2. |] }
+      [| zero_costs |] ~margin ~capital:1000000.
+      ~fill:Engine.Close_same
+  in
+  (* The 166,000-share margin inventory rolls as 166 lots and the final
+     forced liquidation closes the replacement lot. Flat prices and zero
+     costs conserve equity throughout both forced paths. *)
+  let () =
+    assert_float_array [| 1.; 1.; 1.; 1.; 1.; 1. |]
+      (Array.of_list (List.map snd result.Engine.equity_curve))
+  in
+  assert (result.Engine.margin_stats.refinances = 1)
+
+let test_engine_tw_laddered_rollover () =
+  let dates =
+    [| "2020-01-02"; "2020-01-09"; "2020-01-16"; "2020-01-23";
+       "2020-01-30"; "2020-02-06"; "2020-02-13"; "2020-02-20";
+       "2020-02-27"; "2020-03-05"; "2020-03-12"; "2020-03-19";
+       "2020-03-26"; "2020-04-02"; "2020-04-09"; "2020-04-16";
+       "2020-04-23"; "2020-04-30" |]
+  in
+  let bars =
+    Array.mapi
+      (fun index date ->
+        let price = 13.35 +. 0.07 *. float_of_int index in
+        bar date price price)
+      dates
+  in
+  let targets =
+    Array.init (Array.length bars)
+      (fun index -> 1.4 +. 0.03 *. float_of_int index)
+  in
+  let margin : Engine.margin =
+    { financing_rate = 0.0635; maintenance_override = Some 0.;
+      ratios = [| 0.6 |]; loan_term_months = Some 1 }
+  in
+  let result =
+    Engine.run ~profile:(Engine.profile_of_market "tw")
+      [| ("tw/TEST", bars) |] { Engine.targets = [| targets |] }
+      [| zero_costs |] ~margin ~capital:1000000.
+      ~fill:Engine.Close_same
+  in
+  (* The no-term control has 8 ordinary refinances. Clearing every matured
+     tranche, including cash-only sub-lot settlements, produces 24 total
+     events; retaining past-due remainders produces only 21 and an
+     ever-growing matured backlog. *)
+  let () = assert (result.Engine.margin_stats.refinances = 24) in
+  (* Independent execution of the fully settled ladder gives this final
+     equity after all scheduled financing interest. *)
+  assert_close ~tolerance:1e-12 1.1352285734684793
+    (final_equity result)
+
+
+
+let test_engine_tw_plan_live_quantity () =
+  let price = 43.27 in
+  let value = 7000. *. price in
+  let plan =
+    Engine.plan_fills ~costs:[| zero_costs |] ~capital:1.
+      ~profile:(Engine.profile_of_market "tw")
+      ~financing_ratios:[| 0.6 |]
+      ~state:
+        { Engine.equity = value; cash = 0.; cash_values = [| 0. |];
+          margin_values = [| value |]; loans = [| 0. |];
+          interests = [| 0. |]; tail_interests = [| 0. |]; debt = 0.;
+          receivables = 0.; previous_targets = [| 1. |] }
+      ~prices:[| price |] ~targets:[| 0. |] ~force:false
+  in
+  let item = plan.Engine.planned_assets.(0) in
+  (* The engine and executor must preserve the same seven 1,000-share lots
+     across the value boundary at TWD 43.27. *)
+  let () = assert_close value item.Engine.plan_sell_margin in
+  (* TWD 3.03 cannot fund three shares when the represented value of
+     three shares at TWD 1.01 is 3.0300000000000002. *)
+  let () =
+    assert_close 2.
+      (Engine.shares_of_value ~capital:1. ~price:1.01 3.03)
+  in
+  assert
+    (Live.legs_of_plan ~price plan
+     = [{ Live.action = "Sell"; cond = "MarginTrading"; lots = 7 }])
+
+let test_engine_tw_executed_cost () =
+  let costs = Engine.default_costs ~market:"tw" ~symbol:"00685L" in
+  let plan ~equity =
+    Engine.plan_fills ~costs:[| costs |] ~capital:1000000.
+      ~profile:(Engine.profile_of_market "tw")
+      ~financing_ratios:[| 0.6 |]
+      ~state:
+        { Engine.equity; cash = equity; cash_values = [| 0. |];
+          margin_values = [| 0. |]; loans = [| 0. |];
+          interests = [| 0. |]; tail_interests = [| 0. |]; debt = 0.;
+          receivables = 0.; previous_targets = [| 0. |] }
+      ~prices:[| 11. |] ~targets:[| 1. |] ~force:false
+    |> fun result -> result.Engine.planned_assets.(0)
+  in
+  let item = plan ~equity:1. in
+  (* The executed cash value is above the TWD 20 minimum, so commission
+     is exactly 3.99 bps of that rounded value. *)
+  let () =
+    assert_close ~tolerance:1e-15
+      (item.Engine.plan_buy_cash *. 3.99 /. 10000.)
+      item.Engine.plan_trade_cost
+  in
+  let tiny = plan ~equity:0.000001 in
+  (* TWD 1 cannot buy a whole share at TWD 11, so no trade and no fee. *)
+  let () = assert_close 0. tiny.Engine.plan_trade in
+  let () = assert_close 0. tiny.Engine.plan_buy_cash in
+  assert_close 0. tiny.Engine.plan_trade_cost
+
+
+
+let test_engine_tw_fee_cycle () =
+  let costs = { zero_costs with Engine.fee_bps = 3.99 } in
+  let plan =
+    Engine.plan_fills ~costs:[| costs |] ~capital:1000000.
+      ~profile:(Engine.profile_of_market "tw")
+      ~financing_ratios:[| 0.6 |]
+      ~state:
+        { Engine.equity = 1.; cash = 1.; cash_values = [| 0. |];
+          margin_values = [| 0. |]; loans = [| 0. |];
+          interests = [| 0. |]; tail_interests = [| 0. |]; debt = 0.;
+          receivables = 0.; previous_targets = [| 0. |] }
+      ~prices:[| 17.89 |] ~targets:[| 0.5 |] ~force:false
+  in
+  let item = plan.Engine.planned_assets.(0) in
+  let post_equity = 1. -. plan.Engine.planned_total_cost in
+  (* The fee fixed point alternates between 27,942 and 27,943 shares.
+     The conservative 27,942-share plan must not exceed 50% of its own
+     post-fee equity. *)
+  assert (item.Engine.plan_final_value <= 0.5 *. post_equity)
 
 let test_engine_capital_guard () =
   let state : Engine.plan_state =
@@ -5204,9 +5440,9 @@ let test_engine_mandatory_capital_cost () =
   (* 3.99 bps of TWD 1,000,000 is TWD 399, above the TWD 20 minimum. *)
   let () = assert_close 399. raw_cost in
   let entry = plan.Engine.planned_assets.(0) in
-  (* The planner's fixed-point equity solve gives 399 / (1 + 0.000399)
-     = 398.84086249586414. *)
-  assert_close 398.84086249586414 entry.Engine.plan_trade_cost
+  (* The fixed-point value floors to TWD 999,600, whose 3.99 bps
+     commission is TWD 398.8404. *)
+  assert_close 398.8404 entry.Engine.plan_trade_cost
 
 
 let shioaji_fixture name =
@@ -5637,13 +5873,13 @@ let test_tw_live_plan_legs () =
     plan ~equity:1000000. ~cash:0. ~cash_value:(1000000. /. 3.)
       ~margin_value:(5000000. /. 3.) ~loan:1000000. ~previous:2. 0.
   in
-  (* The margin sale floors to 166 lots, leaving TWD 340,000 for the
-     cash sale, which is exactly 34 lots at TWD 10. *)
+  (* The margin sale floors to 166 lots and the independently derived
+     cash sale floors to 33 lots at TWD 10. *)
   let () =
     assert
       (Live.legs_of_plan ~price:10. exit
        = [{ Live.action = "Sell"; cond = "MarginTrading"; lots = 166 };
-          { Live.action = "Sell"; cond = "Cash"; lots = 34 }])
+          { Live.action = "Sell"; cond = "Cash"; lots = 33 }])
   in
   let sub_lot =
     plan ~equity:9990. ~cash:9990. ~cash_value:0. ~margin_value:0.
@@ -6541,9 +6777,18 @@ let () =
   test_tw_maintenance_override_none ();
   test_us_cure_interest_single_charge ();
   test_cure_shortfall_preserves_liability ();
+  let () = test_engine_tw_margin_call_quantum () in
+  let () = test_engine_tw_rollover_quantum () in
+  let () = test_engine_tw_laddered_rollover () in
   test_us_cure_tail_aware ();
   let () = test_engine_fill_planner () in
   let () = test_engine_share_quantum () in
+  let () = test_engine_tw_sell_partition () in
+  let () = test_engine_tw_run_conservation () in
+  let () = test_engine_tw_full_exit () in
+  let () = test_engine_tw_fee_cycle () in
+  let () = test_engine_tw_plan_live_quantity () in
+  let () = test_engine_tw_executed_cost () in
   let () = test_engine_capital_guard () in
   let () = test_engine_mandatory_capital_cost () in
   let () = test_shioaji_info_parse () in
