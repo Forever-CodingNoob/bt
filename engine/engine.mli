@@ -108,13 +108,17 @@ type maintenance_model =
   | Collateral_over_loan
   | Equity_over_required
 
-(** Per-market simulation constants. *)
+(** Per-market simulation constants and tradable share quanta. *)
 type market_profile = {
   interest_day_count : float;
   settlement_lag : int;
   maintenance : maintenance_model;
   default_financing_rate : float;
   default_financing_ratio : float;
+  cash_share_quantum : float;
+  (** Minimum cash share increment; zero preserves fractional shares. *)
+  margin_share_quantum : float;
+  (** Minimum margin share increment; zero preserves fractional shares. *)
 }
 
 (** Return the market profile. Fails on unknown markets. *)
@@ -150,6 +154,7 @@ val effective_targets :
 val plan_fills :
   costs:costs array ->
   capital:float ->
+  profile:market_profile ->
   financing_ratios:float array ->
   state:plan_state ->
   prices:float array ->

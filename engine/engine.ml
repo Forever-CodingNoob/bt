@@ -113,6 +113,8 @@ type market_profile = {
   maintenance : maintenance_model;
   default_financing_rate : float;
   default_financing_ratio : float;
+  cash_share_quantum : float;
+  margin_share_quantum : float;
 }
 
 let profile_of_market = function
@@ -121,13 +123,17 @@ let profile_of_market = function
         settlement_lag = 2;
         maintenance = Collateral_over_loan;
         default_financing_rate = 6.35;
-        default_financing_ratio = 0.6 }
+        default_financing_ratio = 0.6;
+        cash_share_quantum = 1.;
+        margin_share_quantum = 1000. }
   | "us" ->
       { interest_day_count = 360.;
         settlement_lag = 1;
         maintenance = Equity_over_required;
         default_financing_rate = 6.25;
-        default_financing_ratio = 0.5 }
+        default_financing_ratio = 0.5;
+        cash_share_quantum = 0.;
+        margin_share_quantum = 0. }
   | market ->
       invalid_arg
         (Printf.sprintf "Engine.profile_of_market: unknown market %S" market)
@@ -248,7 +254,7 @@ let effective_targets ~financing_ratios targets =
   in
   effective, scale < 1.
 
-let plan_fills ~costs ~capital ~financing_ratios
+let plan_fills ~costs ~capital ~profile ~financing_ratios
     ~(state : plan_state) ~prices ~targets ~force =
   let () =
     if not (Float.is_finite capital && capital > 0.) then
@@ -277,6 +283,12 @@ let plan_fills ~costs ~capital ~financing_ratios
   let total_receivables () = state.receivables in
   let price_at index = prices.(index) in
   let charge = charge costs capital in
+  let floor_value ~quantum ~price value =
+    if quantum > 0. then
+      Float.floor (value *. capital /. price /. quantum)
+      *. quantum *. price /. capital
+    else value
+  in
       let tolerance = 1e-15 *. abs_float e0 in
       let compute_plan buy_scale e1 =
         let equity_basis = abs_float e1 in
@@ -320,7 +332,15 @@ let plan_fills ~costs ~capital ~financing_ratios
               let sell_margin =
                 Float.min amount margin_values.(index)
               in
+              let sell_margin =
+                floor_value ~quantum:profile.margin_share_quantum
+                  ~price:(price_at index) sell_margin
+              in
               let sell_cash = amount -. sell_margin in
+              let sell_cash =
+                floor_value ~quantum:profile.cash_share_quantum
+                  ~price:(price_at index) sell_cash
+              in
               let fraction =
                 if margin_values.(index) > 0. then
                   sell_margin /. margin_values.(index)
@@ -632,14 +652,21 @@ let plan_fills ~costs ~capital ~financing_ratios
                 else if ratio <= 0. then buy
                 else Float.min buy (allocations.(index) /. ratio)
               in
-              let () = buy_cashes.(index) <- cash_buy in
-              let () =
-                buy_margins.(index) <-
-                  if unlevered then 0. else buy -. cash_buy
+              let cash_buy =
+                floor_value ~quantum:profile.cash_share_quantum
+                  ~price:(price_at index) cash_buy
               in
+              let () = buy_cashes.(index) <- cash_buy in
+              let margin_buy =
+                if unlevered then 0. else buy -. cash_buy
+              in
+              let margin_buy =
+                floor_value ~quantum:profile.margin_share_quantum
+                  ~price:(price_at index) margin_buy
+              in
+              let () = buy_margins.(index) <- margin_buy in
               down_payments.(index) <-
-                if unlevered then buy
-                else minimums.(index) +. allocations.(index))
+                cash_buy +. (1. -. ratio) *. margin_buy)
         in
         let cash_refinance_values = Array.make asset_count 0. in
         let margin_refinance_values = Array.make asset_count 0. in
@@ -667,6 +694,10 @@ let plan_fills ~costs ~capital ~financing_ratios
                     in
                     let value =
                       Float.min post_cash_values.(index) (allocated /. ratio)
+                    in
+                    let value =
+                      floor_value ~quantum:profile.margin_share_quantum
+                        ~price:(price_at index) value
                     in
                     let sell_cost =
                       charge index ~equity_before:equity_basis
@@ -701,6 +732,10 @@ let plan_fills ~costs ~capital ~financing_ratios
                   let value =
                     Float.min post_margin_values.(index)
                       (allocated /. margin_refinance_rates.(index))
+                  in
+                  let value =
+                    floor_value ~quantum:profile.margin_share_quantum
+                      ~price:(price_at index) value
                   in
                   let fraction = value /. post_margin_values.(index) in
                   let repayment = post_loans.(index) *. fraction in
@@ -1154,7 +1189,7 @@ let run ?dividends ?(dividend_tax = 0.)
   in
   let charge = charge costs capital in
   let plan_fills =
-    plan_fills ~costs ~capital ~financing_ratios:margin.ratios
+    plan_fills ~costs ~capital ~profile ~financing_ratios:margin.ratios
   in
   let absolute_sell_cost = absolute_sell_cost costs capital in
   let record_fill index ~date ~price ~from_e ~to_e =

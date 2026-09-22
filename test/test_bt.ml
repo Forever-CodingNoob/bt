@@ -226,7 +226,10 @@ let no_margin count : Engine.margin =
   { financing_rate = 0.; maintenance_override = Some 0.;
     ratios = Array.make count 1.; loan_term_months = None }
 
-let tw_profile = Engine.profile_of_market "tw"
+(* Generic engine tests use normalized values and isolate non-quantity behavior. *)
+let tw_profile =
+  { (Engine.profile_of_market "tw") with
+    cash_share_quantum = 0.; margin_share_quantum = 0. }
 let us_profile = Engine.profile_of_market "us"
 
 
@@ -770,7 +773,12 @@ let dividend ex_date cash_per_share pay_date : Data.dividend =
 
 let run_with_dividends ~stock bars target costs margin dividends dividend_tax =
   let market = String.sub stock 0 (String.index stock '/') in
-  let profile = Engine.profile_of_market market in
+  let profile =
+    match market with
+    | "tw" -> tw_profile
+    | "us" -> us_profile
+    | _ -> assert false
+  in
   Engine.run ~dividends:[| dividends |] ~dividend_tax ~profile
     [| (stock, bars) |] { Engine.targets = [| target |] }
     [| costs |] ~margin ~capital:1. ~fill:Engine.Close_same
@@ -1902,7 +1910,7 @@ let test_dividend_tax_cli () =
             "run";
             Filename.quote strategy_path;
             "--capital";
-            "1";
+            "1000000";
             "--data-dir";
             Filename.quote root;
             "--out-dir";
@@ -1996,7 +2004,7 @@ let test_multi_stock_cli () =
             "run";
             Filename.quote strategy_path;
             "--capital";
-            "1";
+            "9000000";
             "--data-dir";
             Filename.quote root;
             "--out-dir";
@@ -2038,10 +2046,12 @@ let test_multi_stock_cli () =
            begin
              match String.split_on_char ',' last with
              | ["2020-01-03"; equity] ->
-                 (* Entry gross 1.5 has cash 0 and loan 0.5. Day 2
-                    assets are 1.1 + 0.55, so equity is 1.15. Day 3
-                    assets are 1.21 + 0.66, so equity is 1.37. *)
-                 assert_close ~tolerance:1e-9 1.37 (float_of_string equity)
+                 (* The cash buys floor from 40,000 to 39,999 shares each,
+                    retaining TWD 150. The missing AA share would gain 21
+                    and the missing BB share 16, so final equity is
+                    1.37 - (21 + 16) / 9,000,000. *)
+                 assert_close ~tolerance:1e-9 1.369995888888889
+                   (float_of_string equity)
              | _ -> assert false
            end
        | _ -> assert false);
@@ -2104,7 +2114,7 @@ let test_margin_cli () =
             "run";
             Filename.quote strategy_path;
             "--capital";
-            "1";
+            "1000000";
             "--data-dir";
             Filename.quote root;
             "--out-dir";
@@ -5039,7 +5049,7 @@ let test_engine_fill_planner () =
   let plan ~cash ~cash_value ~margin_value ~loan ~previous target =
     (* State values are TWD, so capital is 1 like broker/live.ml. *)
     Engine.plan_fills ~costs:[| zero_costs |] ~capital:1.
-      ~financing_ratios:[| 0.6 |]
+      ~profile:(Engine.profile_of_market "tw") ~financing_ratios:[| 0.6 |]
       ~state:
         { Engine.equity = 1000000.; cash;
           cash_values = [| cash_value |];
@@ -5061,31 +5071,96 @@ let test_engine_fill_planner () =
     (plan ~cash:0. ~cash_value:1000000. ~margin_value:0.
        ~loan:0. ~previous:1. 2.).Engine.planned_assets.(0)
   in
-  (* The 2x target adds TWD 1,000,000 / TWD 10 = 100,000 margin shares. *)
+  (* The solver's largest fundable raw trade is just below TWD 230,000.
+     floor(229,999.99999999997 / 10 / 1,000) * 1,000 = 22,000
+     margin shares, whose 40% down payment is TWD 88,000. *)
   let () =
-    assert_close 100000. (scale_in.Engine.plan_buy_margin /. 10.)
+    assert
+      (Float.floor (scale_in.Engine.plan_buy_margin /. 10.) = 22000.)
   in
-  (* The 60% financing ratio borrows 0.6 * TWD 1,000,000 = TWD 600,000. *)
+  (* The TWD 92,000 raw minimum requests 92,000 / 0.6 of refinancing;
+     flooring that value to 1,000-share lots gives 15,000 shares and
+     releases TWD 90,000. *)
   let () =
-    assert_close 600000. (0.6 *. scale_in.Engine.plan_buy_margin)
+    assert
+      (Float.floor (scale_in.Engine.plan_refinance_cash /. 10.) = 15000.)
   in
-  (* The down payment is 0.4 * TWD 1,000,000 = TWD 400,000. *)
-  let () = assert_close 400000. scale_in.Engine.plan_down_payment in
+  assert_close 88000. scale_in.Engine.plan_down_payment;
   let exit =
     (plan ~cash:0. ~cash_value:(1000000. /. 3.)
        ~margin_value:(5000000. /. 3.) ~loan:1000000.
        ~previous:2. 0.).Engine.planned_assets.(0)
   in
-  (* TWD 5/3m margin inventory / TWD 10 = 500,000/3 shares. *)
+  (* floor((5/3 * 1,000,000) / 10 / 1,000) * 1,000 = 166,000
+     margin shares. *)
   let () =
-    assert_close (500000. /. 3.) (exit.Engine.plan_sell_margin /. 10.)
+    assert_close 166000. (exit.Engine.plan_sell_margin /. 10.)
   in
-  (* TWD 1/3m cash inventory / TWD 10 = 100,000/3 shares. *)
+  (* The remaining TWD 340,000 cash sale is exactly 34,000 shares. *)
   let () =
-    assert_close (100000. /. 3.) (exit.Engine.plan_sell_cash /. 10.)
+    assert_close 34000. (exit.Engine.plan_sell_cash /. 10.)
   in
-  (* Selling all margin inventory repays the full TWD 1,000,000 loan. *)
-  assert_close 1000000. exit.Engine.plan_repayment
+  (* Selling 1,660,000 / (5/3 * 1,000,000) repays TWD 996,000. *)
+  assert_close 996000. exit.Engine.plan_repayment
+
+let test_engine_share_quantum () =
+  let plan profile ~price ~cash ~cash_value ~margin_value ~loan
+      ~previous target =
+    Engine.plan_fills ~costs:[| zero_costs |] ~capital:1000000. ~profile
+      ~financing_ratios:[| 0.6 |]
+      ~state:
+        { Engine.equity = 1.; cash; cash_values = [| cash_value |];
+          margin_values = [| margin_value |]; loans = [| loan |];
+          interests = [| 0. |]; tail_interests = [| 0. |]; debt = 0.;
+          receivables = 0.; previous_targets = [| previous |] }
+      ~prices:[| price |] ~targets:[| target |] ~force:false
+    |> fun result -> result.Engine.planned_assets.(0)
+  in
+  let tw = Engine.profile_of_market "tw" in
+  let exact =
+    plan tw ~price:10. ~cash:1. ~cash_value:0. ~margin_value:0. ~loan:0.
+      ~previous:0. 1.
+  in
+  (* floor(1 * 1,000,000 / 10) = 100,000 shares, so the value stays 1. *)
+  let () = assert_close 1. exact.Engine.plan_buy_cash in
+  let odd =
+    plan tw ~price:11. ~cash:1. ~cash_value:0. ~margin_value:0. ~loan:0.
+      ~previous:0. 1.
+  in
+  (* floor(1 * 1,000,000 / 11) = 90,909 shares, worth 999,999 / 1,000,000. *)
+  let () = assert_close 0.999999 odd.Engine.plan_buy_cash in
+  let () =
+    assert
+      (Float.floor
+         (odd.Engine.plan_buy_cash *. 1000000. /. 11.)
+       = 90909.)
+  in
+  let margin =
+    plan tw ~price:11. ~cash:0.4 ~cash_value:0. ~margin_value:1. ~loan:0.4
+      ~previous:1. 2.
+  in
+  (* floor(1 * 1,000,000 / 11 / 1,000) * 1,000 = 90,000 shares,
+     worth 990,000 / 1,000,000. *)
+  let () = assert_close 0.99 margin.Engine.plan_buy_margin in
+  let () =
+    assert
+      (Float.floor
+         (margin.Engine.plan_buy_margin *. 1000000. /. 11.)
+       = 90000.)
+  in
+  let us = Engine.profile_of_market "us" in
+  let us_cash =
+    plan us ~price:11. ~cash:1. ~cash_value:0. ~margin_value:0. ~loan:0.
+      ~previous:0. 1.
+  in
+  (* US quantum 0 preserves the pre-change fractional value. *)
+  let () = assert_close 1. us_cash.Engine.plan_buy_cash in
+  let us_margin =
+    plan us ~price:11. ~cash:0.4 ~cash_value:0. ~margin_value:1. ~loan:0.4
+      ~previous:1. 2.
+  in
+  (* US quantum 0 preserves the pre-change fractional margin value. *)
+  assert_close 1. us_margin.Engine.plan_buy_margin
 
 let test_engine_capital_guard () =
   let state : Engine.plan_state =
@@ -5097,6 +5172,7 @@ let test_engine_capital_guard () =
   let rejects capital =
     match
       Engine.plan_fills ~costs:[| zero_costs |] ~capital
+        ~profile:(Engine.profile_of_market "us")
         ~financing_ratios:[| 0.6 |] ~state ~prices:[| 1. |]
         ~targets:[| 0. |] ~force:false
     with
@@ -5111,6 +5187,7 @@ let test_engine_mandatory_capital_cost () =
   let costs = Engine.default_costs ~market:"tw" ~symbol:"2330" in
   let plan =
     Engine.plan_fills ~costs:[| costs |] ~capital:1.
+      ~profile:(Engine.profile_of_market "tw")
       ~financing_ratios:[| 0.6 |]
       ~state:
         { Engine.equity = 1000000.; cash = 1000000.;
@@ -5515,7 +5592,7 @@ let test_tw_live_plan_legs () =
   let plan ~equity ~cash ~cash_value ~margin_value ~loan ~previous target =
     (* State values are TWD, so capital is 1 like broker/live.ml. *)
     Engine.plan_fills ~costs:[| zero_costs |] ~capital:1.
-      ~financing_ratios:[| 0.6 |]
+      ~profile:(Engine.profile_of_market "tw") ~financing_ratios:[| 0.6 |]
       ~state:
         { Engine.equity; cash; cash_values = [| cash_value |];
           margin_values = [| margin_value |]; loans = [| loan |];
@@ -5537,43 +5614,36 @@ let test_tw_live_plan_legs () =
     plan ~equity:1000000. ~cash:0. ~cash_value:1000000.
       ~margin_value:0. ~loan:0. ~previous:1. 2.
   in
-  (* Refinancing TWD 2/3m floors to 66 lots; the TWD 1m margin buy is
-     exactly 100 lots at TWD 10 per share. *)
+  (* The fixed-point solve floors refinancing to 15 lots and the funded
+     margin buy to 22 lots. *)
   let () =
     assert
       (Live.legs_of_plan ~price:10. refinance
-       = [{ Live.action = "Sell"; cond = "Cash"; lots = 66 };
-          { Live.action = "Buy"; cond = "MarginTrading"; lots = 66 };
-          { Live.action = "Buy"; cond = "MarginTrading"; lots = 100 }])
+       = [{ Live.action = "Sell"; cond = "Cash"; lots = 15 };
+          { Live.action = "Buy"; cond = "MarginTrading"; lots = 15 };
+          { Live.action = "Buy"; cond = "MarginTrading"; lots = 22 }])
   in
   let mixed_refinance =
     plan ~equity:3000000. ~cash:0. ~cash_value:(2000000. /. 3.)
       ~margin_value:(10000000. /. 3.) ~loan:1000000.
       ~previous:2. 1.8
   in
-  (* TWD 4/15m / 10 / 1,000 floors to 26 cash-refinance lots,
-     TWD 4/3m floors to 133 margin-refinance lots, and TWD 1.4m
-     buys 140 margin lots. *)
+  (* The fixed-point solve reaches a raw TWD 10,000 trade from below, so
+     every 1,000-share margin and refinance value floors to zero. *)
   let () =
-    assert
-      (Live.legs_of_plan ~price:10. mixed_refinance
-       = [{ Live.action = "Sell"; cond = "Cash"; lots = 26 };
-          { Live.action = "Buy"; cond = "MarginTrading"; lots = 26 };
-          { Live.action = "Sell"; cond = "MarginTrading"; lots = 133 };
-          { Live.action = "Buy"; cond = "MarginTrading"; lots = 133 };
-          { Live.action = "Buy"; cond = "MarginTrading"; lots = 140 }])
+    assert (Live.legs_of_plan ~price:10. mixed_refinance = [])
   in
   let exit =
     plan ~equity:1000000. ~cash:0. ~cash_value:(1000000. /. 3.)
       ~margin_value:(5000000. /. 3.) ~loan:1000000. ~previous:2. 0.
   in
-  (* TWD 5/3m and TWD 1/3m at TWD 10 floor to 166 margin lots and
-     33 cash lots, respectively. *)
+  (* The margin sale floors to 166 lots, leaving TWD 340,000 for the
+     cash sale, which is exactly 34 lots at TWD 10. *)
   let () =
     assert
       (Live.legs_of_plan ~price:10. exit
        = [{ Live.action = "Sell"; cond = "MarginTrading"; lots = 166 };
-          { Live.action = "Sell"; cond = "Cash"; lots = 33 }])
+          { Live.action = "Sell"; cond = "Cash"; lots = 34 }])
   in
   let sub_lot =
     plan ~equity:9990. ~cash:9990. ~cash_value:0. ~margin_value:0.
@@ -6473,6 +6543,7 @@ let () =
   test_cure_shortfall_preserves_liability ();
   test_us_cure_tail_aware ();
   let () = test_engine_fill_planner () in
+  let () = test_engine_share_quantum () in
   let () = test_engine_capital_guard () in
   let () = test_engine_mandatory_capital_cost () in
   let () = test_shioaji_info_parse () in

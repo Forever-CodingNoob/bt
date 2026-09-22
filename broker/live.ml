@@ -740,6 +740,7 @@ let decide ?provisional_close ?previous_session ?equity ?tw_balance
       let costs = Engine.default_costs ~market:"tw" ~symbol in
       let plan =
         Engine.plan_fills ~costs:[| costs |] ~capital:1.
+          ~profile:(Engine.profile_of_market "tw")
           ~financing_ratios:[| financing_ratio |]
           ~state:
             { Engine.equity; cash; cash_values = [| cash_value |];
