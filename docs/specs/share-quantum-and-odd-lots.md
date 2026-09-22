@@ -37,7 +37,7 @@ Close the gap between target exposure and real exposure in both live markets, an
 
 - Taiwan: no fractional shares. Regular session trades 1000-share lots. Intraday odd lots (1 to 999 shares) trade 09:00 to 13:30 in a separate book with its own prices; the Shioaji server exposes no odd-lot quote, so odd-lot orders are priced from the lot quote and their fills may differ. Odd lots are cash only and cannot be day traded. Sell tax 0.3% on both books.
 - SinoPac fees: 0.1425% list rate; electronic-trading promotion 20% of list (0.0285%) with TWD 1 minimum per order on the first TWD 1,000,000 per month, refunded on the 15th of the following month. The full list rate is debited at settlement, so the daemon's pending-settlement cash is conservative and needs no change.
-- Alpaca: fractional quantities on `market` and `limit` orders with `time_in_force: day` only; minimum notional USD 1; no fractional MOC.
+- Alpaca: fractional quantities on `market` and `limit` orders with `time_in_force: day` only; all buy orders must have a minimum market value of USD 1, while sell orders have no minimum validation, so any open position can be closed. [Alpaca broker API FAQ](https://docs.alpaca.markets/us/docs/broker-api-faq.md#what-is-the-minimum-order-value); no fractional MOC.
 
 ## Engine: share quantum
 
@@ -73,7 +73,7 @@ Executor rules:
 
 ## US live: fractional shares
 
-- `desired_shares` returns a float. The order quantity is the fractional difference between desired and held, formatted to Alpaca's precision. The existing USD 1 minimum-notional skip stays.
+- `desired_shares` returns a float. The order quantity is the fractional difference between desired and held, formatted to Alpaca's precision. Buy deltas below USD 1 notional are skipped. Sells of any positive quantity are submitted, so a sub-USD-1 position can always be closed.
 - Order: `type: market`, `time_in_force: day`, submitted at the existing decision time about 15 minutes before the close. The deterministic `client_order_id` and the query-before-submit dedup are unchanged.
 - Whole-share truncation (`desired_shares`, `order_delta`) is removed. The US backtester never rounded, so its outputs are unchanged.
 
@@ -89,7 +89,7 @@ Hand-derived behavioral tests:
 - CLI: `bt run` and `bt daytrade` without `--capital` fail with a usage error naming the flag.
 - TW live translation: 86,580 shares -> `Common` 86 + `IntradayOdd` 580; 999 -> odd only; 1000 -> lot only; margin 86,580 -> `Common` 86 with 580 retained.
 - TW executor: lot order fails but the odd order proceeds; odd order skipped in simulation; same-day opposite-direction odd guard; `unit: Share` position totals include a 1-share holding.
-- US live: fractional delta; USD 1 minimum-notional skip; market day order body.
+- US live: fractional delta; buy deltas below USD 1 notional are skipped; sells of any positive quantity are submitted, so a sub-USD-1 position can always be closed; market day order body.
 - Costs: TWD 1 minimum on a TWD 1,000 odd order; two minimums on a split leg.
 
 Gates:
