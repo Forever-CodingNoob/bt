@@ -33,6 +33,10 @@ type account = {
 }
 
 let run (config : config) ~sessions ~(bars : Data.bar array) ~targets ~initial_equity =
+  let () =
+    if not (Float.is_finite config.capital && config.capital > 0.) then
+      invalid_arg "Intraday.run: capital must be positive and finite"
+  in
   let normalize target =
     if Float.is_nan target then 0.
     else if target < 0. then failwith "short targets are reserved"

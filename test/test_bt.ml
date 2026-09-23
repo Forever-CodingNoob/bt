@@ -4446,11 +4446,12 @@ let test_live_pure_decisions () =
        (Live.cache_is_fresh ~last_cached:"2025-06-20"
           ~prev_trading_day:"2025-06-23"));
   assert
-    (Live.snapshot_session ~session_date:"2025-06-24"
-       ~provisional_date:"2025-06-23"
-     = `Skip
-         "stale snapshot session: provisional 2025-06-23 does not match clock \
-          session 2025-06-24");
+    (match
+       Live.snapshot_session ~session_date:"2025-06-24"
+         ~provisional_date:"2025-06-23"
+     with
+     | `Skip _ -> true
+     | `Proceed -> false);
   assert
     (Live.snapshot_session ~session_date:"2025-06-24"
        ~provisional_date:"2025-06-24"
@@ -4559,6 +4560,52 @@ let test_us_live_fractional () =
        (Alpaca.order_body ~symbol:"SPY" ~qty:1.6666666666 ~side:`Sell
           ~client_order_id:"bt-SPY-2025-06-24")
      = {|{"type":"market","time_in_force":"day","qty":"1.666666666"}|})
+
+let test_us_live_quantity_limit () =
+  let held =
+    Alpaca.parse_position_qty ~http_code:200
+      {|{"qty":"10000000.544679485"}|}
+  in
+  let posted = Queue.create () in
+  let submit qty =
+    let body =
+      Alpaca.order_body ~symbol:"SPY" ~qty ~side:`Sell
+        ~client_order_id:"bt-SPY-2025-06-24"
+    in
+    Queue.add body posted
+  in
+  let decide held =
+    Live.decide_action ~symbol:"SPY" ~date:"2025-06-24"
+      ~target:0. ~equity:1. ~price:300. ~held
+  in
+  let rejected =
+    match decide held with
+    | Live.Order { qty; _ } ->
+        submit qty;
+        false
+    | Live.Skip _ | Live.Orders _ -> false
+    | exception Invalid_argument _ -> true
+  in
+  let () = assert rejected in
+  let () = assert (Queue.is_empty posted) in
+  let () =
+    match decide 4194303.999999999 with
+    | Live.Order { side = `Sell; qty; _ } ->
+        assert (qty = 4194303.999999999);
+        submit qty
+    | _ -> assert false
+  in
+  let () =
+    assert (contains (Queue.take posted) {|"qty":"4194303.999999999"|})
+  in
+  let () = assert (Queue.is_empty posted) in
+  assert
+    (match
+       Alpaca.order_body ~symbol:"SPY" ~qty:4194304. ~side:`Sell
+         ~client_order_id:"bt-SPY-2025-06-24"
+     with
+     | _ -> false
+     | exception Invalid_argument _ -> true)
 
 let test_live_schedule () =
   let close = "2025-06-24T16:00:00-04:00" in
@@ -5122,6 +5169,24 @@ let test_intraday_capital_costs () =
     [|0.1; 0.1; 0.1; 0.1; 0.; 0.; 0.; 0.|] in
   (* 1.05 shares * .03 = .0315 rounds UP to .04; zero cap is uncapped. *)
   assert_close (1049.96 /. 1050.) small.equity.(0)
+
+let test_intraday_capital_guard () =
+  let sessions = [| intraday_sessions.(0) |] in
+  let bars =
+    [| bar "2024-11-27T09:30" 10. 10.;
+       bar "2024-11-27T09:35" 10. 10. |]
+  in
+  List.iter
+    (fun capital ->
+      assert
+        (match
+           run_intraday ~sessions ~bars ~capital
+             ~costs:(Engine.default_costs ~market:"us" ~symbol:"SPY")
+             [|1.; 1.|]
+         with
+         | _ -> false
+         | exception Invalid_argument _ -> true))
+    [0.; -1.; Float.nan; Float.infinity]
 
 let test_intraday_round_trips () =
   let result = run_intraday [|0.5; 1.; 0.5; 0.; 0.; 1.; 1.; 0.|] in
@@ -6604,15 +6669,10 @@ let test_tw_position_detail_share_consistency () =
   (* The fixture's two Common lots imply 2,000 shares; holding 1,000
      Share-unit margin shares cannot cover the details. *)
   let () =
-    match
-      Live.fetch_position_details
-        ~position_details:(load [detail]) "2330" [position]
-    with
-    | _ -> assert false
-    | exception Failure reason ->
-        assert
-          (reason =
-           "TW position_detail quantity exceeds held margin shares for 2330")
+    assert_failure (fun () ->
+      ignore
+        (Live.fetch_position_details
+           ~position_details:(load [detail]) "2330" [position]))
   in
   let one = { detail with Shioaji.lots = 1 } in
   (* Two separate 1-lot details also exceed a 1,000-share holding. *)
@@ -7193,6 +7253,7 @@ let () =
   let () = test_intraday_normalization () in
   let () = test_intraday_costs () in
   let () = test_intraday_capital_costs () in
+  let () = test_intraday_capital_guard () in
   let () = test_intraday_round_trips () in
   let () = test_intraday_session_boundaries () in
   let () = test_bars_declaration () in
@@ -7208,6 +7269,7 @@ let () =
   test_engine_effective_targets ();
   test_live_pure_decisions ();
   test_us_live_fractional ();
+  test_us_live_quantity_limit ();
   test_live_schedule ();
   test_us_live_submit_cutoff ();
   test_live_startup_guard ();

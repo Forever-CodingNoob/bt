@@ -256,6 +256,8 @@ let rec trim_zeros text =
   | _ -> text
 
 let qty_string qty =
+  if not (Float.is_finite qty) || qty >= 4194304. then
+    invalid_arg "Alpaca.qty_string: qty must be finite and below 2^22 shares";
   let nanos = Float.round (qty *. 1e9) in
   let nanos = int_of_float (if nanos /. 1e9 > qty then nanos -. 1. else nanos) in
   trim_zeros

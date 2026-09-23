@@ -68,8 +68,9 @@ val snapshot : string -> snapshot_t
 
 (** Format a non-negative share quantity for Alpaca: truncated toward zero at
     Alpaca's 9-decimal qty precision, trailing zeros trimmed. A float that is
-    the nearest double to a 9-decimal value formats as that value. Both
-    guarantees hold only below 2^22 shares. *)
+    the nearest double to a 9-decimal value formats as that value. Reject
+    non-finite quantities and quantities at or above 2^22 shares, where these
+    guarantees do not hold. *)
 val qty_string : float -> string
 
 (** Build the JSON body of a fractional market day order; [qty] is sent as
