@@ -6227,6 +6227,36 @@ let test_tw_maturity_rollover_legs () =
           date = "2024-11-26"; lots = 2 }]
      = [])
 
+let tw_trade id (leg : Live.leg) status deal_quantity : Shioaji.trade =
+  { order_id = id; code = "2330"; action = leg.action; cond = leg.cond;
+    lot = leg.lot; status; order_quantity = leg.quantity; deal_quantity;
+    deal_price = if deal_quantity = 0 then None else Some 10.;
+    order_datetime = "2026-05-22T13:20:00+08:00" }
+
+let execute_tw_test ?(mode = Live.Live) ?(bid = 10.) ?(ask = 10.)
+    ?(price = 10.) ?(log_odd = fun _ -> ())
+    ?(now = fun () -> "2026-05-22T13:20:00+08:00")
+    ?(sleep = fun _ -> ())
+    ?(place_order = fun _ ->
+      { Shioaji.order_id = "1"; status = "PendingSubmit" })
+    ?(orders_today = fun ~code:_ ~today:_ -> [])
+    ?(costs = zero_costs) ~cash ~positions legs =
+  Live.execute_tw_legs ~mode ~bid ~ask ~log_odd ~now ~sleep ~place_order
+    ~orders_today ~exchange:"TSE" ~code:"2330" ~date:"2026-05-22"
+    ~price ~financing_ratio:0.6 ~costs ~cash ~positions legs
+
+let scripted_placements entries =
+  let entries = Queue.of_seq (List.to_seq entries) in
+  fun (request : Shioaji.order_request) ->
+    match Queue.take_opt entries with
+    | None -> failwith "unexpected TW test order"
+    | Some (order_id, (expected : Live.leg)) ->
+        let () = assert (request.action = expected.action) in
+        let () = assert (request.cond = expected.cond) in
+        let () = assert (request.lot = expected.lot) in
+        let () = assert (request.quantity = expected.quantity) in
+        { Shioaji.order_id = order_id; status = "PendingSubmit" }
+
 let test_tw_live_decide_override () =
   with_temp_market "tw" (fun data_dir tw_dir ->
     let symbol_dir = Filename.concat tw_dir "2330" in
@@ -6341,14 +6371,54 @@ let test_tw_live_decide_override () =
               ~session_date:"2026-05-26" ~strat_path:minimum_strat_path
               ~data_dir)
       in
-      (* TWD 10,002 cannot fund 1,000 shares plus 2.85 commission, but
-         it can fund 999 shares at TWD 10 plus the 2.84715 fee. *)
+      (* At the 14.25 bps settlement-debit rate, TWD 10,002 cannot fund
+         999 shares at TWD 10 plus the 14.236 fee (10,004.24), but it can
+         fund 998 shares plus the 14.2215 fee (9,994.22). *)
       let () =
         assert
           (minimum_commission.Live.action
            = Live.Orders
                [{ action = "Buy"; cond = "Cash";
-                  lot = Shioaji.IntradayOdd; quantity = 999 }])
+                  lot = Shioaji.IntradayOdd; quantity = 998 }])
+      in
+
+      let cash_bound =
+        with_temp_strategy
+          "stock \"tw/2330\"\ntarget num(close < 1000.0)\n"
+          (fun cash_bound_strat_path ->
+            Live.decide ~provisional_close:100.
+              ~previous_session:"2026-05-22" ~equity:1000500.
+              ~tw_positions:[] ~tw_position_details:[] Live.Paper
+              ~session_date:"2026-05-26" ~strat_path:cash_bound_strat_path
+              ~data_dir)
+      in
+      let legs =
+        match cash_bound.Live.action with
+        | Live.Orders legs -> legs
+        | Live.Skip _ | Live.Order _ -> assert false
+      in
+      let ids = List.mapi (fun index leg -> string_of_int (index + 1), leg) legs in
+      let execution =
+        execute_tw_test ~bid:100. ~ask:100. ~price:100.
+          ~place_order:(scripted_placements ids)
+          ~orders_today:(fun ~code:_ ~today:_ ->
+            List.map
+              (fun (id, (leg : Live.leg)) ->
+                { (tw_trade id leg "Filled" leg.quantity) with
+                  deal_price = Some 100. })
+              ids)
+          ~costs:{ (Engine.default_costs ~market:"tw" ~symbol:"2330") with
+                   Engine.fee_bps = 14.25 }
+          ~cash:1000500. ~positions:[] legs
+      in
+      (* Planning at the 14.25 bps settlement-debit rate the executor funds
+         at leaves no Common lot capped: 9 lots plus an odd remainder. *)
+      let () = assert (execution.Live.stop_reason = None) in
+      let () = assert (execution.Live.remaining = []) in
+      let () =
+        assert
+          (List.exists (fun (leg : Live.leg) -> leg.lot = Shioaji.IntradayOdd)
+             legs)
       in
 
       let decision =
@@ -6557,36 +6627,6 @@ let test_tw_position_detail_share_consistency () =
     (Live.fetch_position_details
        ~position_details:(load [one]) "2330" [position]
      = [one])
-
-let tw_trade id (leg : Live.leg) status deal_quantity : Shioaji.trade =
-  { order_id = id; code = "2330"; action = leg.action; cond = leg.cond;
-    lot = leg.lot; status; order_quantity = leg.quantity; deal_quantity;
-    deal_price = if deal_quantity = 0 then None else Some 10.;
-    order_datetime = "2026-05-22T13:20:00+08:00" }
-
-let execute_tw_test ?(mode = Live.Live) ?(bid = 10.) ?(ask = 10.)
-    ?(price = 10.) ?(log_odd = fun _ -> ())
-    ?(now = fun () -> "2026-05-22T13:20:00+08:00")
-    ?(sleep = fun _ -> ())
-    ?(place_order = fun _ ->
-      { Shioaji.order_id = "1"; status = "PendingSubmit" })
-    ?(orders_today = fun ~code:_ ~today:_ -> [])
-    ?(costs = zero_costs) ~cash ~positions legs =
-  Live.execute_tw_legs ~mode ~bid ~ask ~log_odd ~now ~sleep ~place_order
-    ~orders_today ~exchange:"TSE" ~code:"2330" ~date:"2026-05-22"
-    ~price ~financing_ratio:0.6 ~costs ~cash ~positions legs
-
-let scripted_placements entries =
-  let entries = Queue.of_seq (List.to_seq entries) in
-  fun (request : Shioaji.order_request) ->
-    match Queue.take_opt entries with
-    | None -> failwith "unexpected TW test order"
-    | Some (order_id, (expected : Live.leg)) ->
-        let () = assert (request.action = expected.action) in
-        let () = assert (request.cond = expected.cond) in
-        let () = assert (request.lot = expected.lot) in
-        let () = assert (request.quantity = expected.quantity) in
-        { Shioaji.order_id = order_id; status = "PendingSubmit" }
 
 let test_tw_default_sell_has_no_per_share_fee () =
   let sell : Live.leg = { action = "Sell"; cond = "Cash"; lot = Shioaji.Common; quantity = 1 } in

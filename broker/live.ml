@@ -559,6 +559,10 @@ let fetch_position_details ?(position_details = Shioaji.position_details)
       else [])
     positions
 
+(* SinoPac rebates the promotional discount later; settlement debits 14.25 bps. *)
+let tw_live_debit_costs symbol =
+  { (Engine.default_costs ~market:"tw" ~symbol) with fee_bps = 14.25 }
+
 let decide ?provisional_close ?previous_session ?equity ?tw_balance
     ?tw_settlements ?tw_positions ?tw_position_details ?tw_snapshot mode
     ~session_date ~strat_path ~data_dir =
@@ -766,7 +770,7 @@ let decide ?provisional_close ?previous_session ?equity ?tw_balance
         if not (Float.is_finite cash) then
           failwith "TW inferred cash balance is not finite"
       in
-      let costs = Engine.default_costs ~market:"tw" ~symbol in
+      let costs = tw_live_debit_costs symbol in
       let plan =
         Engine.plan_fills ~costs:[| costs |] ~capital:1.
           ~profile:(Engine.profile_of_market "tw")
@@ -813,6 +817,10 @@ let sleep_until timestamp =
 
 let timestamp_date = date_prefix
 
+let lot_name = function
+  | Shioaji.Common -> "Common"
+  | Shioaji.IntradayOdd -> "IntradayOdd"
+
 let order_description = function
   | Skip reason -> Printf.sprintf "skip:%s" reason
   | Order { side; qty; id } ->
@@ -827,8 +835,7 @@ let order_description = function
       |> List.map
            (fun (leg : leg) ->
              Printf.sprintf "%s:%s:%s:%d" leg.action leg.cond
-               (match leg.lot with Shioaji.Common -> "Common" | Shioaji.IntradayOdd -> "IntradayOdd")
-               leg.quantity)
+               (lot_name leg.lot) leg.quantity)
       |> String.concat ","
 
 let log_decision (decision : decision) =
@@ -1066,10 +1073,10 @@ let log_tw_trade date (trade : Shioaji.trade) =
     | None -> "-"
   in
   log
-    "date=%s order-id=%s action=%s cond=%s fill-status=%s deal-quantity=%d \
-     fill-price=%s"
-    date trade.order_id trade.action trade.cond trade.status
-    trade.deal_quantity price
+    "date=%s order-id=%s action=%s cond=%s lot=%s fill-status=%s \
+     deal-quantity=%d fill-price=%s"
+    date trade.order_id trade.action trade.cond (lot_name trade.lot)
+    trade.status trade.deal_quantity price
 
 let tw_order_cost (costs : Engine.costs) ~action ~price ~shares =
   let value = float_of_int shares *. price in
@@ -1086,10 +1093,6 @@ let tw_order_cost (costs : Engine.costs) ~action ~price ~shares =
   +. (if action = "Sell" && costs.per_share_sell_fee > 0. then
         Engine.taf_dollars costs ~shares:(float_of_int shares)
       else 0.)
-
-(* SinoPac rebates the promotional discount later; settlement debits 14.25 bps. *)
-let tw_live_debit_costs symbol =
-  { (Engine.default_costs ~market:"tw" ~symbol) with fee_bps = 14.25 }
 
 let execute_tw_legs ?(log_odd = fun message -> log "%s" message)
     ~mode ~bid ~ask ~now ~sleep ~place_order ~orders_today ~exchange ~code
