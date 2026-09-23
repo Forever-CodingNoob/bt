@@ -155,10 +155,10 @@ let default_costs ~market ~symbol =
         else if is_etf || starts_with_zero '2' then 10.
         else 30.
       in
-      { fee_bps = 3.99;
+      { fee_bps = 2.85;
         tax_bps;
         slip_bps = 0.;
-        min_fee = 20.;
+        min_fee = 1.;
         per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   | _ -> invalid_arg "Engine.default_costs: market must be tw or us"
 

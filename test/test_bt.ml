@@ -77,9 +77,22 @@ let zero_costs : Engine.costs =
     per_share_sell_fee = 0.; per_share_sell_cap = 0. }
 
 let test_default_costs () =
+  let costs = Engine.default_costs ~market:"tw" ~symbol:"2330" in
   let tax_bps symbol =
     (Engine.default_costs ~market:"tw" ~symbol).tax_bps
   in
+  (* The SinoPac electronic-trading promotion is 20% of the 14.25 bps
+     list rate, or 2.85 bps, with a TWD 1 minimum per order. *)
+  let () = assert (costs.Engine.fee_bps = 2.85) in
+  let () = assert (costs.Engine.min_fee = 1.) in
+  let buy_charge amount =
+    Engine.charge [| costs |] 1. 0 ~equity_before:amount
+      ~delta:1. ~price:1. *. amount
+  in
+  (* 2.85 bps of TWD 1,000 is TWD 0.285, below the TWD 1 minimum. *)
+  let () = assert_close 1. (buy_charge 1000.) in
+  (* 2.85 bps of TWD 100,000 is TWD 28.5, above the TWD 1 minimum. *)
+  let () = assert_close 28.5 (buy_charge 100000.) in
   (* The ordinary bond-ETF exemption runs from 2017-01-01 through 2026-12-31. *)
   assert (tax_bps "00679B" = 0.);
   assert (tax_bps "020000" = 10.);
@@ -657,7 +670,7 @@ let test_engine_insolvent_min_fee () =
        bar "2020-01-02" 50. 50. |]
   in
   let costs : Engine.costs =
-    { fee_bps = 3.99; tax_bps = 0.; slip_bps = 0.; min_fee = 20.;
+    { fee_bps = 2.85; tax_bps = 0.; slip_bps = 0.; min_fee = 1.;
       per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let margin : Engine.margin =
@@ -667,21 +680,22 @@ let test_engine_insolvent_min_fee () =
   let result =
     Engine.run ~profile:tw_profile [| ("tw/TEST", bars) |]
       { Engine.targets = [| [| 2.; 0. |] |] }
-      [| costs |] ~margin ~capital:10000. ~fill:Engine.Close_same
+      [| costs |] ~margin ~capital:1000. ~fill:Engine.Close_same
   in
-  (* Entry fee 0.002 gives E1 = 0.998. The 2x split is cv = E1/3,
+  (* The TWD 1 minimum is 0.001 of TWD 1,000 and exceeds 2.85 bps
+     of the 2x entry, so E1 = 0.999. The split is cv = E1/3,
      mv = 5*E1/3, loan = E1, cash = 0. At 50, total value and loan
      both equal E1, so equity is 0 and maintenance is (5*E1/6)/E1
-     = 5/6. Liquidation costs another 0.002; proceeds pay all but
-     0.002 of the loan, leaving that residual liability and cash 0. *)
-  let entry_fee = 20. /. 10000. in
+     = 5/6. Liquidation costs another 0.001 and leaves that amount
+     as a residual liability. *)
+  let entry_fee = 1. /. 1000. in
   let entry_e1 = 1. -. entry_fee in
   let entry_value = 2. *. entry_e1 in
   let loan = entry_e1 in
   let exit_value = entry_value /. 2. in
   let exit_margin = 5. *. entry_e1 /. 6. in
   let exit_fee =
-    Float.max (exit_value *. 3.99 /. 10000.) (20. /. 10000.)
+    Float.max (exit_value *. 2.85 /. 10000.) (1. /. 1000.)
   in
   let residual_loan = loan -. (exit_value -. exit_fee) in
   let last = final_equity result in
@@ -701,7 +715,7 @@ let test_engine_exit_fee_bankruptcy () =
        bar "2020-01-03" 50.05 50.05 |]
   in
   let costs : Engine.costs =
-    { fee_bps = 3.99; tax_bps = 0.; slip_bps = 0.; min_fee = 20.;
+    { fee_bps = 2.85; tax_bps = 0.; slip_bps = 0.; min_fee = 1.;
       per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let margin : Engine.margin =
@@ -711,19 +725,20 @@ let test_engine_exit_fee_bankruptcy () =
   let result =
     Engine.run ~profile:tw_profile [| ("tw/TEST", bars) |]
       { Engine.targets = [| [| 2.; 0.; 1. |] |] }
-      [| costs |] ~margin ~capital:10000. ~fill:Engine.Close_same
+      [| costs |] ~margin ~capital:1000. ~fill:Engine.Close_same
   in
-  (* Entry E1 = 0.998 gives cv = E1/3, mv = 5*E1/3, loan = E1,
-     and cash = 0. At 50.05, total value is 2*E1*0.5005 and pre-fill
-     equity is 0.000998. The 0.002 exit fee exceeds all remaining
-     equity by 0.001002; cash stays 0, account debt carries the
-     deficit, and the next target is never sized. *)
-  let entry_fee = 20. /. 10000. in
+  (* The TWD 1 minimum is 0.001 of TWD 1,000, so E1 = 0.999 and
+     cv = E1/3, mv = 5*E1/3, loan = E1, cash = 0. At 50.05, total
+     value is 2*E1*0.5005 and pre-fill equity is 0.000999. The
+     0.001 exit minimum exceeds that equity by 0.000001; cash stays
+     zero, account debt carries the deficit, and the next target is
+     never sized. *)
+  let entry_fee = 1. /. 1000. in
   let entry_e1 = 1. -. entry_fee in
   let loan = entry_e1 in
   let exit_value = 2. *. entry_e1 *. 0.5005 in
   let exit_fee =
-    Float.max (exit_value *. 3.99 /. 10000.) (20. /. 10000.)
+    Float.max (exit_value *. 2.85 /. 10000.) (1. /. 1000.)
   in
   let residual_debt = loan -. (exit_value -. exit_fee) in
   assert_close ~tolerance:1e-12
@@ -1039,7 +1054,7 @@ let test_unlevered_dividend_refill_cash_clamp () =
        bar "2020-01-04" pay_price pay_price |]
   in
   let costs : Engine.costs =
-    { fee_bps = 3.99; tax_bps = 0.; slip_bps = 0.; min_fee = 0.;
+    { fee_bps = 2.85; tax_bps = 0.; slip_bps = 0.; min_fee = 0.;
       per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let margin : Engine.margin =
@@ -1051,7 +1066,7 @@ let test_unlevered_dividend_refill_cash_clamp () =
       [| 1.; 1.; 1.; 1. |] costs margin
       [| dividend "2020-01-02" cash_per_share "2020-01-03" |] 0.
   in
-  let fee = 3.99 /. 10000. in
+  let fee = 2.85 /. 10000. in
   let entry = 1. /. (1. +. fee) in
   let dividend_cash = entry /. 100. *. cash_per_share in
   let inventory = entry /. 100. *. pay_price in
@@ -1222,24 +1237,24 @@ let test_engine_close_costs () =
 let test_engine_min_fee () =
   let target = [| 0.; 1.; 1.; 0.; 0. |] in
   let costs : Engine.costs =
-    { fee_bps = 3.99; tax_bps = 0.; slip_bps = 0.; min_fee = 20.;
+    { fee_bps = 2.85; tax_bps = 0.; slip_bps = 0.; min_fee = 1.;
       per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let result =
     run_single fill_bars target costs
-      ~capital:10000. ~fill:Engine.Close_same
+      ~capital:1000. ~fill:Engine.Close_same
   in
-  (* The 0.002 minimum fee dominates on both sides. Entry therefore
-     solves E1 = E0 - 0.002 in one pass; the exit subtracts another
-     fixed 0.002 from the drifted value. *)
+  (* The TWD 1 minimum is 0.001 of TWD 1,000 and dominates on both
+     sides. Entry therefore solves E1 = E0 - 0.001 in one pass; the
+     exit subtracts another fixed 0.001 from the drifted value. *)
   let entry_e0 = 1. in
-  let entry_fee = 20. /. 10000. in
+  let entry_fee = 1. /. 1000. in
   let entry_e1 = entry_e0 -. entry_fee in
   let entry_value = entry_e1 in
   let entry_cash = entry_e1 -. entry_value in
   let exit_value = entry_value *. (112. /. 104.) in
   let exit_fee =
-    Float.max (exit_value *. 3.99 /. 10000.) (20. /. 10000.)
+    Float.max (exit_value *. 2.85 /. 10000.) (1. /. 1000.)
   in
   let expected = entry_cash +. exit_value -. exit_fee in
   assert_close ~tolerance:1e-12 expected (final_equity result)
@@ -1440,7 +1455,7 @@ let test_engine_portfolio_min_fee () =
        bar "2020-01-02" 50. 50. |]
   in
   let costs : Engine.costs =
-    { fee_bps = 3.99; tax_bps = 0.; slip_bps = 0.; min_fee = 20.;
+    { fee_bps = 2.85; tax_bps = 0.; slip_bps = 0.; min_fee = 1.;
       per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let result =
@@ -1448,12 +1463,12 @@ let test_engine_portfolio_min_fee () =
       { Engine.targets =
           [| [| 0.5; 0. |]; [| 0.5; 0. |] |] }
       [| costs; costs |] ~margin:(no_margin 2)
-      ~capital:10000. ~fill:Engine.Close_same
+      ~capital:1000. ~fill:Engine.Close_same
   in
-  (* Two fixed 0.002 entry fees give E1 = 1 - 0.004. Each target is
-     0.5 * E1, so cash is zero. Two fixed exit fees give final
-     equity E1 - 0.004. *)
-  let fee = 20. /. 10000. in
+  (* Two TWD 1 entry minimums are 0.001 each at TWD 1,000, so
+     E1 = 1 - 0.002. Each target is 0.5 * E1, leaving zero cash.
+     Two fixed 0.001 exit fees give final equity E1 - 0.002. *)
+  let fee = 1. /. 1000. in
   let entry_e0 = 1. in
   let entry_e1 = entry_e0 -. fee -. fee in
   let a_value = 0.5 *. entry_e1 in
@@ -3152,11 +3167,11 @@ let test_sell_only_fee_does_not_refinance () =
   in
   let falling =
     [| bar "2020-01-01" 100. 100.;
-       bar "2020-01-02" 0.1 0.1;
-       bar "2020-01-03" 0.1 0.1 |]
+       bar "2020-01-02" 0.01 0.01;
+       bar "2020-01-03" 0.01 0.01 |]
   in
   let costs : Engine.costs =
-    { fee_bps = 0.; tax_bps = 0.; slip_bps = 0.; min_fee = 20.;
+    { fee_bps = 0.; tax_bps = 0.; slip_bps = 0.; min_fee = 1.;
       per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let margin : Engine.margin =
@@ -3170,14 +3185,25 @@ let test_sell_only_fee_does_not_refinance () =
       [| costs; costs |] ~margin ~capital:10000.
       ~fill:Engine.Close_same
   in
-  (* Two 0.5 targets pay 0.002 each on entry, leaving E1 = 0.996
-     and cash inventories of 0.498 apiece. B falls to 0.1% of entry,
-     so pre-fill equity is 0.498 + 0.000498 = 0.498498. Its 0.002
-     exit fee leaves debt 0.001502 and equity 0.496498. A's target
-     never changes, so no buy exists and its inventory stays untouched.
-     There are only two entries, B's exit, and A's final close. That
-     close costs 0.002, leaving 0.494498. *)
-  assert_close ~tolerance:1e-12 0.494498 (final_equity result);
+  (* Two 0.5 targets pay 0.0001 each on entry, leaving E1 = 0.9998
+     and cash inventories of 0.4999 apiece. B falls to 0.01% of entry,
+     so pre-sale equity is 0.4999 + 0.00004999 = 0.49994999. Its
+     0.0001 exit fee exceeds proceeds by 0.00005001, creating account
+     debt and leaving post-sale equity 0.4999 - 0.00005001 = 0.49984999.
+     A's target never changes, so there is no buy and no refinance.
+     Engine.result exposes bar equity, so debt after the sell is A's
+     0.4999 value minus bar-1 equity. A's final close costs another
+     0.0001, leaving final equity 0.49974999. *)
+  let debt_after_sell =
+    0.4999 -. List.assoc "2020-01-02" result.equity_curve
+  in
+  let () = assert (debt_after_sell > 0.) in
+  let () =
+    assert_close ~tolerance:1e-12 0.00005001 debt_after_sell
+  in
+  let () =
+    assert_close ~tolerance:1e-12 0.49974999 (final_equity result)
+  in
   assert (result.margin_stats.Engine.refinances = 0);
   assert (result.margin_stats.Engine.clamps = 0);
   assert (List.length result.fills = 4)
@@ -3185,8 +3211,8 @@ let test_sell_only_fee_does_not_refinance () =
 let test_residual_debt_does_not_force_refinance () =
   let fee_asset =
     [| bar "2020-01-01" 100. 100.;
-       bar "2020-01-02" 0.1 0.1;
-       bar "2020-01-03" 0.1 0.1 |]
+       bar "2020-01-02" 0.01 0.01;
+       bar "2020-01-03" 0.01 0.01 |]
   in
   let flat =
     [| bar "2020-01-01" 100. 100.;
@@ -3194,7 +3220,7 @@ let test_residual_debt_does_not_force_refinance () =
        bar "2020-01-03" 100. 100. |]
   in
   let fee_costs : Engine.costs =
-    { fee_bps = 0.; tax_bps = 0.; slip_bps = 0.; min_fee = 20.;
+    { fee_bps = 0.; tax_bps = 0.; slip_bps = 0.; min_fee = 1.;
       per_share_sell_fee = 0.; per_share_sell_cap = 0. }
   in
   let margin : Engine.margin =
@@ -3206,24 +3232,24 @@ let test_residual_debt_does_not_force_refinance () =
       [| ("tw/A", fee_asset); ("tw/B", flat); ("tw/C", flat) |]
       { Engine.targets =
           [| [| 0.5; 0.; 0. |];
-             [| 0.5; 0.5; 0.459 /. 0.497499 |];
-             [| 0.; 0.; 0.1 /. 0.497499 |] |] }
+             [| 0.5; 0.5; 0.45995 /. 0.499899995 |];
+             [| 0.; 0.; 0.1 /. 0.499899995 |] |] }
       [| fee_costs; zero_costs; zero_costs |] ~margin
       ~capital:10000. ~fill:Engine.Close_same
   in
-  (* A's 0.002 entry fee gives E1 = 0.998 and cash inventories
-     A = B = 0.499. A then falls to 0.000499 and exits for 0.000499
-     less another 0.002 fee, leaving debt 0.001501 while B keeps the
-     account solvent at equity 0.497499. On bar 2 B sells 0.04 to
-     0.459 and C buys 0.1 with minimum down payment 0.04. Available
-     cash is 0.497499 - 0.459 + 0.001501 debt = 0.04, exactly enough.
-     Thus no refinance or clamp is needed. The seven fills are two
-     entries, A's exit, B's sale, C's buy, and the two final closes;
-     final equity remains 0.497499. *)
+  (* A's 0.0001 entry minimum gives E1 = 0.9999 and cash inventories
+     A = B = 0.49995. A then falls to 0.000049995 and exits less
+     another 0.0001 fee, leaving debt 0.000050005 while B keeps the
+     account solvent at equity 0.499899995. On bar 2 B sells 0.04 to
+     0.45995 and C buys 0.1 with minimum down payment 0.04. Available
+     cash is 0.499899995 - 0.45995 + 0.000050005 debt = 0.04, exactly
+     enough. Thus no refinance or clamp is needed. The seven fills are
+     two entries, A's exit, B's sale, C's buy, and the two final closes;
+     final equity remains 0.499899995. *)
   assert (result.margin_stats.Engine.refinances = 0);
   assert (result.margin_stats.Engine.clamps = 0);
   assert (List.length result.fills = 7);
-  assert_close ~tolerance:1e-12 0.497499 (final_equity result)
+  assert_close ~tolerance:1e-12 0.499899995 (final_equity result)
 
 let test_refinance_scale_in () =
   let bars =
@@ -5363,11 +5389,12 @@ let test_engine_tw_executed_cost () =
     |> fun result -> result.Engine.planned_assets.(0)
   in
   let item = plan ~equity:1. in
-  (* The executed cash value is above the TWD 20 minimum, so commission
-     is exactly 3.99 bps of that rounded value. *)
+  (* The planner's fixed-point solve floors the buy to 90,883 shares,
+     or TWD 999,713 at TWD 11. This is above the TWD 1 minimum, so
+     commission is 999,713 * 2.85 / 10,000 = TWD 284.918205. *)
   let () =
     assert_close ~tolerance:1e-15
-      (item.Engine.plan_buy_cash *. 3.99 /. 10000.)
+      (item.Engine.plan_buy_cash *. 2.85 /. 10000.)
       item.Engine.plan_trade_cost
   in
   let tiny = plan ~equity:0.000001 in
@@ -5379,7 +5406,7 @@ let test_engine_tw_executed_cost () =
 
 
 let test_engine_tw_fee_cycle () =
-  let costs = { zero_costs with Engine.fee_bps = 3.99 } in
+  let costs = { zero_costs with Engine.fee_bps = 2.85 } in
   let plan =
     Engine.plan_fills ~costs:[| costs |] ~capital:1000000.
       ~profile:(Engine.profile_of_market "tw")
@@ -5393,9 +5420,9 @@ let test_engine_tw_fee_cycle () =
   in
   let item = plan.Engine.planned_assets.(0) in
   let post_equity = 1. -. plan.Engine.planned_total_cost in
-  (* The fee fixed point alternates between 27,942 and 27,943 shares.
-     The conservative 27,942-share plan must not exceed 50% of its own
-     post-fee equity. *)
+  (* The 2.85 bps fixed point is TWD 499,928.7601516784, or
+     27,944.59251826039 shares at TWD 17.89. The 27,944-share plan
+     is fundable while 27,945 shares exceed 50% of post-fee equity. *)
   assert (item.Engine.plan_final_value <= 0.5 *. post_equity)
 
 let test_engine_capital_guard () =
@@ -5437,12 +5464,13 @@ let test_engine_mandatory_capital_cost () =
     Engine.charge [| costs |] 1. 0 ~equity_before:1000000.
       ~delta:1. ~price:10. *. 1000000.
   in
-  (* 3.99 bps of TWD 1,000,000 is TWD 399, above the TWD 20 minimum. *)
-  let () = assert_close 399. raw_cost in
+  (* 2.85 bps of TWD 1,000,000 is TWD 285, above the TWD 1 minimum. *)
+  let () = assert_close 285. raw_cost in
   let entry = plan.Engine.planned_assets.(0) in
-  (* The fixed-point value floors to TWD 999,600, whose 3.99 bps
-     commission is TWD 398.8404. *)
-  assert_close 398.8404 entry.Engine.plan_trade_cost
+  (* The planner's fixed-point solve floors the buy to TWD 999,710,
+     below the raw TWD 1,000,000 charge. Its 2.85 bps commission is
+     TWD 284.91735. *)
+  assert_close 284.91735 entry.Engine.plan_trade_cost
 
 
 let shioaji_fixture name =
@@ -6077,13 +6105,13 @@ let test_tw_live_decide_override () =
           "stock \"tw/2330\"\ntarget num(close < 1000.0)\n"
           (fun minimum_strat_path ->
             Live.decide ~provisional_close:10.
-              ~previous_session:"2026-05-22" ~equity:10015.
+              ~previous_session:"2026-05-22" ~equity:10002.
               ~tw_positions:[] ~tw_position_details:[] Live.Paper
               ~session_date:"2026-05-26" ~strat_path:minimum_strat_path
               ~data_dir)
       in
-      (* The target rises from zero to one. TWD 10,015 cash cannot buy a
-         1,000-share lot at TWD 10 after the TWD 20 minimum commission. *)
+      (* The target rises from zero to one. TWD 10,002 cash cannot buy a
+         1,000-share lot at TWD 10 because its 2.85 bps fee is TWD 2.85. *)
       let () =
         assert (minimum_commission.Live.action = Live.Orders [])
       in
@@ -6292,12 +6320,12 @@ let test_tw_default_sell_has_no_per_share_fee () =
       ~orders_today:(fun ~code:_ ~today:_ ->
         [tw_trade "1" sell "Filled" 1; tw_trade "2" buy "Filled" 1])
       ~costs:(Engine.default_costs ~market:"tw" ~symbol:"2330")
-      ~cash:70. ~positions:[tw_position "Cash" 1] [sell; buy]
+      ~cash:35.7 ~positions:[tw_position "Cash" 1] [sell; buy]
   in
   (* Both scripted legs fill, so the execution records two trades. *)
   let () = assert (List.length result.Live.trades = 2) in
-  (* TWD 70 + 10,000 sale - 20 commission - 30 tax exactly funds
-     the TWD 10,000 repurchase plus its TWD 20 commission. *)
+  (* TWD 35.70 + 10,000 sale - 2.85 commission - 30 tax exactly funds
+     the TWD 10,000 repurchase plus its TWD 2.85 commission. *)
   let () = assert (result.Live.remaining = []) in
   (* Exact funding leaves no stop reason. *)
   assert (result.Live.stop_reason = None)
