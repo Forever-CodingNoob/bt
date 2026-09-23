@@ -7,6 +7,7 @@ This document describes how the bt engine simulates trades, computes equity, and
 - [Core engine](#core-engine)
   - [Targets and drift](#targets-and-drift)
   - [Fill planner](#fill-planner)
+  - [Share quantum](#share-quantum)
   - [Equity accounting](#equity-accounting)
   - [End-of-data close](#end-of-data-close)
 - [Daily market behavior](#daily-market-behavior)
@@ -49,6 +50,17 @@ A buy uses available cash first. When required down payments exceed available ca
 
 Sells execute margin inventory before cash inventory.
 
+### Share quantum
+
+Each market profile sets a share quantum for each inventory. The planner converts every planned value to shares at the fill price and the `--capital` scale, floors the count to a multiple of the quantum, and converts it back to value. The floored remainder stays in cash.
+
+| Market | Cash inventory | Margin inventory |
+|---|---|---|
+| US | Fractional (quantum 0) | Fractional (quantum 0) |
+| Taiwan | Whole shares (quantum 1) | 1000-share lots (quantum 1000) |
+
+Cash buys and cash sells use the cash quantum. Margin buys, margin sells, both sides of every refinance, maturity rollovers, and margin-call sales use the margin quantum. Other forced sales use the quantum of the inventory they sell. With a positive quantum, the engine also carries each inventory as a share count between bars. A quantum of 0 skips the floor.
+
 ### Equity accounting
 
 The engine tracks account cash and separate cash and margin inventories for every asset.
@@ -90,7 +102,7 @@ Sell-side regulatory fees:
 | SEC fee | 0.206 bps ($20.60 per $1,000,000) | 2026-04-04 | SEC fiscal-year schedule |
 | FINRA TAF | $0.000195 per share, $0.01 floor, $9.79 cap | 2026-01-01 | FINRA fee schedule |
 
-The SEC fee applies as the default `tax_bps` for US sells. The TAF applies only when `--capital` supplies a dollar scale. Without `--capital`, per-share dollar amounts are inactive.
+The SEC fee applies as the default `tax_bps` for US sells. The TAF is charged in dollars at the `--capital` scale.
 
 Override with `--fee-bps`, `--tax-bps`, `--slip-bps`, `--per-share-fee`, and `--per-share-cap`.
 
@@ -124,7 +136,7 @@ US dividends become cash on their ex-date with no receivable period. When divide
 
 #### Live trading fidelity
 
-The live daemon implements the close-fill assumption by evaluating a provisional bar 15 minutes before the close and submitting a market-on-close order.
+The live daemon evaluates a provisional bar 15 minutes before the close and submits a fractional `market` order with `time_in_force: day` before the 10-minute cutoff. The order fills near the decision price, not at the official close. `--slip-bps` models that gap in the backtest. Live and backtest quantities are both fractional.
 
 #### Gaps between simulation and the real market
 
@@ -146,7 +158,7 @@ If the FinMind cash-dividend table returns errors, the fetcher derives missing c
 
 #### Costs and taxes
 
-A TW trade pays the online commission of 0.0399% on each side, with a 20 TWD minimum per order when `--capital` is given.
+A TW trade pays SinoPac's electronic-trading promotion commission of 0.0285% on each side, 20% of the 0.1425% list rate, with a TWD 1 minimum per asset trade.
 
 Sell-tax classes:
 
@@ -189,17 +201,19 @@ Stock-dividend and share-count factors restate per-share cash amounts and volume
 The TW daemon is a Shioaji simulation and production execution path around the unchanged daily engine planner.
 
 - At 13:05 Taipei it validates a same-session Shioaji snapshot, queries FinMind's independent `TaiwanStockTradingDate` calendar for the previous session, refreshes prices only through that date, refreshes dividend and corporate-action data through the current session, and rejects any price cache that does not end exactly at the previous session.
-- At 13:20 it validates a fresh per-decision snapshot, builds today's provisional OHLCV bar, and runs the same strategy compiler, target normalization, costs, financing ratio, and fill planner used by the daily backtest. The planner compares the final effective target with the previous bar's effective target, so an unchanged target preserves drift instead of rebalancing it. Live account values are already absolute TWD, so planner capital is 1 and the 20 TWD minimum commission remains 20 TWD.
+- At 13:20 it validates a fresh per-decision snapshot, builds today's provisional OHLCV bar, and runs the same strategy compiler, target normalization, financing ratio, share quantum, and fill planner used by the daily backtest, with the 14.25 bps settlement-debit commission in place of the backtest's 2.85 bps default. The planner compares the final effective target with the previous bar's effective target, so an unchanged target preserves drift instead of rebalancing it. Live account values are already absolute TWD, so planner capital is 1 and the TWD 1 minimum commission remains TWD 1.
 - Simulation requires `--equity TWD` as total account equity. With the supported one-stock account shape, cash is inferred as equity minus cash and margin inventory value plus loan principal and interest. A nonzero holding in another symbol is rejected.
-- Production requires exactly one broker settlement row for each of T+0, T+1, and T+2 and rejects missing, duplicate, or other T-day rows. Spendable cash is `acc_balance + T+1 + T+2`; T+0 is already reflected in `acc_balance`, so it is validated and logged but excluded from the sum. Equity adds Common-lot positions at broker `last_price` and subtracts loans and interest. Pending T+1 and T+2 settlements alter the cash budget but do not skip the session.
-- The client reads each margin position's dated Shioaji `position_detail`. A lot due under the engine's 18-calendar-month, month-end-clamped TW rule adds a margin sell/rebuy pair before ordinary planner legs. The executor floors every leg to `Common` lots of 1000 shares and retains the remainder.
-- Orders use `MKT` + `IOC` during continuous trading. The executor rechecks the Taipei session and the fresh per-order cutoff before every submission and every status poll; nothing is submitted at or after 13:25.
-- Every successor waits for a unique, matching, completely filled predecessor with a finite positive weighted fill price. A partial, ambiguous, missing, mismatched, rejected, failed, inactive, cancelled, timed-out, cutoff, or uncertain submission stops the remaining legs and logs the observed exposure.
+- Production requires exactly one broker settlement row for each of T+0, T+1, and T+2 and rejects missing, duplicate, or other T-day rows. Spendable cash is `acc_balance + T+1 + T+2`; T+0 is already reflected in `acc_balance`, so it is validated and logged but excluded from the sum. Equity adds positions, read in shares with `unit: Share`, at broker `last_price` and subtracts loans and interest. Pending T+1 and T+2 settlements alter the cash budget but do not skip the session.
+- The client reads each margin position's dated Shioaji `position_detail`. A lot due under the engine's 18-calendar-month, month-end-clamped TW rule adds a margin sell/rebuy pair before ordinary planner legs.
+- The planner already floors cash quantities to whole shares and margin quantities to 1000-share lots. Each cash leg becomes one `Common` order for the whole lots plus one `IntradayOdd` order for the 1 to 999 remaining shares. Margin, refinance, and rollover legs are `Common` orders only.
+- `Common` orders use `MKT` + `IOC` during continuous trading. `IntradayOdd` orders are limit `ROD` at the snapshot ask for a buy and the snapshot bid for a sell, the only order form TWSE accepts for intraday odd lots. The simulation server does not support odd lots, so simulation skips them. The executor rechecks the Taipei session and the fresh per-order cutoff before every submission and every status poll; nothing is submitted at or after 13:25.
+- A `Common` successor waits for a unique, matching, completely filled predecessor with a finite positive weighted fill price. An `IntradayOdd` order is not polled: a buy reserves its full cost at once and a sale adds no cash in the same session. A `Common` order rejected with no fill lets later independent legs run but blocks its dependent rebuy. A partial, ambiguous, missing, mismatched, timed-out, cutoff, or uncertain result stops the remaining legs and logs the observed exposure.
 - Refinance sells and rebuys are sequential. A rebuy requires a full sell fill and enough cash for the original lot count. An unfunded rebuy or capped ordinary buy stops later legs.
+- Live planning and execution both use the settlement-debit list rate of 14.25 bps with a TWD 1 minimum per order, because SinoPac debits the list rate at settlement and rebates the discount later. Execution funds buys and carries cash at that rate. Backtests use the 2.85 bps default.
 - Querying today's orders before planning reduces duplicate submissions, but does not guarantee exactly-once execution across concurrent daemons or every crash timing.
 
 > [!WARNING]
-> Daily backtests fill fractional shares at recorded closes and make proceeds immediately available. TW daemon simulation floors to 1000-share Common lots, uses a 13:20 snapshot and actual IOC fill reports, may stop after a partial plan, and applies a confirmed-cash budget between orders. Results can therefore diverge even though both paths use the same planner.
+> Daily backtests fill at recorded closes and make proceeds immediately available. The TW daemon uses a 13:20 snapshot and actual IOC fill reports for lot orders, fills odd-lot ROD orders in the separate odd-lot book at its own prices or not at all, may stop after a partial plan, and applies a confirmed-cash budget between orders. Simulation skips odd-lot orders. Results can therefore diverge even though both paths use the same planner.
 
 Production startup logs every cash-formula input and the derived cash and equity. The 2026-09-16 through 2026-09-18 real-account observation verified that `acc_balance` is debited when the payable reaches T+0, so the logged T+0 amount is audit-only.
 
@@ -209,11 +223,13 @@ Production startup logs every cash-formula input and the derived cash and equity
 - Limit-down locks on forced sales (margin calls, solvency guard) can make a sale unexecutable on that day. The engine fills at the recorded price regardless.
 - A real TW margin call gives two business days to restore the ratio to its initial value. The engine liquidates at the next open without a grace period.
 - The engine assumes every Taiwan symbol is marginable at the standard TWSE or TPEX ratio. Leveraged ETFs such as 00685L have historically been excluded from margin financing or assigned reduced ratios.
-- Board lots (1000 shares for ordinary stocks, 1 share for ETFs) and tick sizes are not modeled. The engine trades fractional shares.
+- Tick sizes are not modeled.
 - Dividend cash timing uses a one-month fallback when the pay date is missing. Real pay dates vary.
 - T+2 cash settlement is not modeled by the daily backtest. The production daemon includes signed broker T+1 and T+2 amounts in spendable cash and requires the T+0 row for validation and audit.
 - Day-trade tax reduction (half sell tax for same-day round trips) is not modeled.
-- Odd-lot trades (below the board-lot size) are not modeled.
+- Backtest fills of 1 to 999 shares use the same recorded price as lot fills. Live odd-lot orders trade in a separate book whose prices can differ from the regular book, and a limit order can stay unfilled.
+- The backtest charges one minimum commission per asset trade. Live execution charges one per order, so a cash leg split into a `Common` order and an `IntradayOdd` order pays two.
+- The promotion's monthly TWD 1,000,000 ceiling and its delayed rebate are not modeled.
 
 ## Intraday engine
 
@@ -229,7 +245,7 @@ Production startup logs every cash-formula input and the derived cash and equity
 | Last bar | Its decision is ignored; any position closes at that bar's close under either fill mode. |
 | Overnight | Cash carries forward, with no positions, financing, dividends, settlement, or maintenance. |
 | Costs | Shared US commission, tax, slippage, and per-share sell costs apply to every fill, including forced liquidation. |
-| Sizing | Fractional exposure units in both modes; capital enables dollar-based costs, not whole-share rounding. |
+| Sizing | Fractional exposure units in both modes; capital scales dollar-based costs. |
 | Statistics | One closing equity point per session; trades are flat-to-flat round trips, wins require positive net cash profit after costs, and flat-forced counts liquidated sessions. |
 
 ### Leverage cap

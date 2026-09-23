@@ -77,7 +77,7 @@ bt run STRAT... [--baseline M/SYM] [--from D] [--to D]
        [--per-share-fee F] [--per-share-cap F]
        [--financing-rate PCT] [--maintenance-ratio PCT] [--financing-ratio PCT]
        [--loan-term-months N] [--dividend-tax PCT]
-       --capital TWD [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]
+       --capital AMOUNT [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]
 ```
 
 See [docs/cli.md](./docs/cli.md) for the complete reference.
@@ -91,7 +91,7 @@ See [docs/cli.md](./docs/cli.md) for the complete reference.
 - The default curve stem joins strategy basenames with `_vs_`. `--out-name NAME` replaces this stem. The curve files are `<stem>.csv` and `<stem>.png`.
 - Each strategy gets a separate `<name>.trades.csv` fill log. `--out-name` does not change these log names.
 - `--no-plot` skips `scripts/plot.py` and prevents updates to `<stem>.png`.
-- `--fee-bps`, `--tax-bps`, and `--slip-bps` take basis points. 100 basis points are 1%. `--capital` and `--min-fee` take TWD.
+- `--fee-bps`, `--tax-bps`, and `--slip-bps` take basis points. 100 basis points are 1%. `--capital` is required; it and `--min-fee` take the market's currency, TWD for `tw` and USD for `us`.
 - `--dividend-tax` takes a percentage. It defaults to 0 and reduces each dividend before the engine books it.
 
 ## Strategy language (DSL)

@@ -6,16 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-23
+
 ### Added
 
-- `bt target` supports TW strategies through Shioaji simulation with required `--equity TWD`, independent FinMind calendar freshness, and Common-lot cash, margin, and refinance plans.
+- `bt target` supports TW strategies through Shioaji simulation with required `--equity TWD`, independent FinMind calendar freshness, and cash, margin, and refinance plans.
 - `bt live` adds a TW simulation daemon with 18-month margin-lot rollovers and sequential `MKT` + `IOC` fill confirmation.
 - TW `--live` production sizing requires exactly one T+0, T+1, and T+2 row and uses `acc_balance + T+1 + T+2` for spendable cash, while logging T+0 for audit. A 2026-09-16 through 2026-09-18 real-account observation verified the rule: the TWD -107 payable moved from T+2 to T+1 with `acc_balance` at TWD 100,000, then reached T+0 when `acc_balance` fell to TWD 99,893.
+
+### Changed
+
+- `bt run` and `bt daytrade` require `--capital`; a missing value is a usage error (`run: --capital is required`, `daytrade: --capital is required`). The minimum fee and per-share fees always apply.
+- TW quantities are floored to whole shares for cash inventory and 1000-share lots for margin inventory, in the backtest and in live planning. US quantities stay fractional.
+- TW default commission is 0.0285% (SinoPac electronic-trading promotion rate) with a TWD 1 minimum per order, replacing 0.0399% with a TWD 20 minimum.
+- TW live submits `Common` lots plus one `IntradayOdd` remainder per cash leg. Odd-lot orders are limit `ROD` at the snapshot ask or bid, are not polled, and are skipped on the simulation server. Positions are read in shares, and live planning and execution both use the 14.25 bps settlement-debit list rate.
+- TW live lets later independent legs run after a `Common` order is rejected with no fill; a rejected sell still blocks its dependent rebuy.
+- US live submits fractional `market` orders with `time_in_force: day` instead of whole-share market-on-close orders. Buys below USD 1 are skipped; sells of any positive quantity proceed.
 
 ### Fixed
 
 - TW Shioaji snapshots with 1 to 9 fractional-second digits are accepted and truncated to whole seconds for session-time checks.
-- TW live planning now preserves drift when the effective target is unchanged, trades only when it changes, and applies the 20 TWD minimum commission without rescaling absolute broker values.
+- TW live planning now preserves drift when the effective target is unchanged, trades only when it changes, and applies the minimum commission without rescaling absolute broker values.
 
 ## [0.9.0] - 2026-09-06
 
@@ -186,7 +197,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Return-based engine with daily close-to-close signal prices.
 - TW dividend back-adjustment via FinMind factors.
 
-[Unreleased]: https://github.com/Forever-CodingNoob/bt/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/Forever-CodingNoob/bt/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/Forever-CodingNoob/bt/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/Forever-CodingNoob/bt/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/Forever-CodingNoob/bt/compare/v0.7.5...v0.8.0
 [0.7.5]: https://github.com/Forever-CodingNoob/bt/compare/v0.7.0...v0.7.5

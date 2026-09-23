@@ -1,5 +1,7 @@
 # Share Quantum and Odd Lots Implementation Plan
 
+Status: implemented
+
 > **For agentic workers:** Implementers use superpowers:executing-plans ONLY, one task per dispatch. Implementers never dispatch subagents of any kind; the coordinator owns every review. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Execute docs/specs/share-quantum-and-odd-lots.md: make `--capital` mandatory, round TW backtest and live quantities to whole shares (cash) and whole lots (margin) through one profile-driven rule in the engine, submit TW cash legs as `Common` plus `IntradayOdd` orders, and move US live to fractional market day orders.

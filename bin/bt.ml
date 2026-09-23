@@ -9,7 +9,7 @@ let usage =
    \         [--per-share-fee F] [--per-share-cap F]\n\
    \         [--dividend-tax PCT] [--financing-rate PCT] [--maintenance-ratio PCT] [--financing-ratio PCT]\n\
    \         [--loan-term-months N]\n\
-   \         --capital TWD [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]\n\
+   \         --capital AMOUNT [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]\n\
    \  bt daytrade STRAT... [--baseline us/SYM] [--fill open|close] [--leverage N]\n\
    \              [--from D] [--to D] [-p name=value] --capital USD\n\
    \              [--fee-bps F] [--tax-bps F] [--slip-bps F] [--per-share-fee F] [--per-share-cap F]\n\
@@ -220,13 +220,13 @@ let run argv =
        "fill mode: open or close (default close)");
       ("--capital",
        Arg.Float (fun value -> capital := Some value),
-       "portfolio starting value in TWD; enables the per-order minimum fee");
+       "required starting portfolio value in the market's currency");
       ("-p", Arg.String (parse_parameter parameters), "parameter override name=value");
       ("--fee-bps", Arg.Float (fun value -> fee_bps := Some value), "fee basis points");
       ("--tax-bps", Arg.Float (fun value -> tax_bps := Some value), "tax basis points");
       ("--slip-bps", Arg.Float (fun value -> slip_bps := Some value), "slippage basis points");
       ("--min-fee", Arg.Float (fun value -> min_fee := Some value),
-       "minimum fee per order in TWD");
+       "minimum fee per order in the market's currency");
       ("--per-share-fee",
        Arg.Float (fun value -> per_share_fee := Some value),
        "FINRA TAF per-share sell fee in dollars");

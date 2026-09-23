@@ -61,10 +61,11 @@ bt fetch us/SYM --bars 1m [--data-dir DIR]
 bt run STRAT... [--baseline M/SYM] [--from D] [--to D]
        [-p name=value ...] [--fill open|close]
        [--fee-bps F] [--tax-bps F] [--slip-bps F] [--min-fee F]
+       [--per-share-fee F] [--per-share-cap F]
        [--financing-rate PERCENT] [--maintenance-ratio PERCENT]
        [--financing-ratio PERCENT] [--loan-term-months N] [--dividend-tax PERCENT]
-       [--capital TWD] [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]
-bt daytrade STRAT... [--baseline us/SYM] [--fill open|close] [--leverage N] [--from YYYY-MM-DD] [--to YYYY-MM-DD] [-p name=value] [--capital USD] [--fee-bps F] [--tax-bps F] [--slip-bps F] [--per-share-fee F] [--per-share-cap F] [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]
+       --capital AMOUNT [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]
+bt daytrade STRAT... [--baseline us/SYM] [--fill open|close] [--leverage N] [--from YYYY-MM-DD] [--to YYYY-MM-DD] [-p name=value] --capital USD [--fee-bps F] [--tax-bps F] [--slip-bps F] [--per-share-fee F] [--per-share-cap F] [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]
 bt target STRAT [--live] [--equity TWD] [--data-dir DIR] [--provisional-close PRICE]
 bt live STRAT [--live] [--equity TWD] [--data-dir DIR]
 ```
@@ -156,11 +157,11 @@ Runs one or more single-stock US strategies on cached regular-session minute bar
 | `--leverage N` | `1.0` | Positive finite previous-close buying-power multiplier. |
 | `--from D`, `--to D` | all cached dates | Inclusive date bounds. |
 | `-p name=value` | strategy defaults | Override a declared parameter. |
-| `--capital USD` | none | Positive starting dollar value for dollar-based costs; sizing remains fractional exposure units. |
+| `--capital USD` | required | Set the positive finite starting dollar value. It scales the per-share sell fee and its cap; sizing stays in fractional exposure units. |
 | `--fee-bps F` | `0` | Commission on each side. |
 | `--tax-bps F` | `0.206` | Sell-side SEC fee in basis points. |
 | `--slip-bps F` | `0` | Slippage on each side. |
-| `--per-share-fee F` | `0.000195` | Dollar sell fee per share when capital is supplied. |
+| `--per-share-fee F` | `0.000195` | Dollar sell fee per share. |
 | `--per-share-cap F` | `9.79` | Dollar cap per sell order. |
 | `--data-dir DIR` | `data/` | Minute, calendar, and optional daily baseline cache root. |
 | `--out-dir DIR` | `out/` | Output directory. |
@@ -173,7 +174,7 @@ Runs one or more single-stock US strategies on cached regular-session minute bar
 ```sh
 bt fetch us/SPY --bars 1m --data-dir data
 bt fetch us/SPY --data-dir data
-bt daytrade examples/daytrade_orb.strat --baseline us/SPY --data-dir data --from 2026-01-01
+bt daytrade examples/daytrade_orb.strat --baseline us/SPY --capital 100000 --data-dir data --from 2026-01-01
 ```
 
 Minute fetches require `APCA_API_KEY_ID` and `APCA_API_SECRET_KEY`; daily US fetches require `TIINGO_TOKEN`. Minute fetch refreshes the calendar from 2016 through today, requests SIP history through now minus 16 minutes, paginates in year ranges, and resumes from the last cached minute (2016 for an empty cache). Failed requests retain cached data. Timestamps are ET left edges with DST conversion; only calendar regular hours are retained.
@@ -265,6 +266,8 @@ The Alpaca key variables must contain credentials for the selected account.
 
 The command fetches Tiingo history through Alpaca's previous daily bar, appends Alpaca's current snapshot as a provisional bar, and evaluates the strategy through the same DSL compiler used by `bt run`.
 
+Desired shares are `target x equity / provisional close`, a fractional quantity. The order quantity is the difference from the held position, rounded down to at most 9 decimal places. A buy below USD 1 notional is skipped with the reason `below $1 minimum order value`. A sell of any positive quantity, capped at the held position, becomes an order, so a position worth less than USD 1 can always be closed.
+
 #### Output
 
 The US arm adds these fields to the shared output.
@@ -273,7 +276,7 @@ The US arm adds these fields to the shared output.
 |---|---|
 | `action` | Report `order` or `skip`. |
 | `side` | Report `buy` or `sell` for an order. |
-| `quantity` | Report the whole-share quantity for an order. |
+| `quantity` | Report the fractional share quantity for an order, with at most 9 decimal places. |
 | `client-order-id` | Report the deterministic order identifier. |
 | `reason` | Explain a skipped action. |
 
@@ -304,7 +307,7 @@ SJ_PRODUCTION=false
 
 #### Options
 
-TW production sizes from broker balance, signed T+1 and T+2 settlements, and Common-lot positions. T+0 is required for settlement-window validation and startup audit but is already reflected in the balance.
+TW production sizes from broker balance, signed T+1 and T+2 settlements, and positions read with `unit: Share`. T+0 is required for settlement-window validation and startup audit but is already reflected in the balance.
 
 | Option | Default | Description |
 |---|---|---|
@@ -333,9 +336,15 @@ The TW target reads account and snapshot data from Shioaji and historical data f
 
 On TW, `--provisional-close PRICE` replaces only the snapshot price: the command still checks Shioaji server mode, queries the independent FinMind trading calendar, fetches history, and requires the cache to end on the verified previous session.
 
-The resulting plan preserves cash and margin inventories. It can contain cash sells, margin sells, cash buys, margin buys, and paired sell/rebuy refinancing legs. Dated `MarginTrading` position details that reach the engine's 18-calendar-month, month-end-clamped maturity produce sell/rebuy pairs before ordinary target legs. Every share quantity is floored to a `Common` lot of 1000 shares; the remainder is retained rather than rounded up or sent as an odd-lot order.
+The resulting plan preserves cash and margin inventories. It can contain cash sells, margin sells, cash buys, margin buys, and paired sell/rebuy refinancing legs. Dated `MarginTrading` position details that reach the engine's 18-calendar-month, month-end-clamped maturity produce sell/rebuy pairs before ordinary target legs. The engine floors cash quantities to whole shares and margin and refinance quantities to 1000-share lots, as in `bt run`. The plan prices commission at SinoPac's settlement-debit list rate of 14.25 bps, the same rate the `bt live` daemon funds with, so printed buy quantities can be slightly lower than a `bt run` backtest's at the 2.85 bps default. The design is in [Design: share quantum and odd lots](./specs/share-quantum-and-odd-lots.md).
 
-Production requires exactly one settlement row for each of T+0, T+1, and T+2 and rejects missing, duplicate, or other T-day rows. Spendable cash is `acc_balance + T+1 + T+2` using each signed amount; T+0 is already reflected in `acc_balance`, so it is validated and logged but not added again. Equity adds all Common-lot positions at broker `last_price`, then subtracts margin loan principal and interest. A real-account probe tracked a TWD -107 purchase payable at T+2 on 2026-09-16 and T+1 on 2026-09-17 while `acc_balance` remained TWD 100,000, then at T+0 on 2026-09-18 when `acc_balance` fell to TWD 99,893. Pending T+1 and T+2 settlements change the daily cash budget without skipping the session.
+| Leg | Orders |
+|---|---|
+| Cash buy or sell of N shares | One `Common` order for N / 1000 lots when that is positive, then one `IntradayOdd` order for the N mod 1000 remaining shares when that is positive. |
+| Margin buy or sell | One `Common` order. N is already a multiple of 1000. |
+| Refinance or rollover sell and rebuy | One `Common` order per side. |
+
+Production requires exactly one settlement row for each of T+0, T+1, and T+2 and rejects missing, duplicate, or other T-day rows. Spendable cash is `acc_balance + T+1 + T+2` using each signed amount; T+0 is already reflected in `acc_balance`, so it is validated and logged but not added again. Equity adds all positions, counted in shares, at broker `last_price`, then subtracts margin loan principal and interest. A real-account probe tracked a TWD -107 purchase payable at T+2 on 2026-09-16 and T+1 on 2026-09-17 while `acc_balance` remained TWD 100,000, then at T+0 on 2026-09-18 when `acc_balance` fell to TWD 99,893. Pending T+1 and T+2 settlements change the daily cash budget without skipping the session.
 
 #### Output
 
@@ -344,11 +353,18 @@ The TW arm adds these fields to the shared output.
 | Field | Meaning |
 |---|---|
 | `action` | Report `orders`. |
-| `leg` | Report each leg as `ACTION CONDITION COMMON_LOTS`. |
+| `leg` | Report each leg as `ACTION CONDITION LOT QUANTITY`. `LOT` is `Common`, with QUANTITY in 1000-share lots, or `IntradayOdd`, with QUANTITY in shares. |
+
+A cash buy of 86,580 shares prints two legs:
+
+```text
+leg: Buy Cash Common 86
+leg: Buy Cash IntradayOdd 580
+```
 
 #### Failure handling
 
-The mode mismatch guard refuses simulation commands against a production server and refuses `--live` against a simulation server.
+The mode mismatch guard refuses simulation commands against a production server and refuses `--live` against a simulation server. The decision fails when the dated `position_detail` quantities of a margin position, counted in 1000-share lots, exceed its held margin shares.
 
 > [!WARNING]
 > `--equity` is user-supplied simulation total equity, not broker cash or an `account_balance` result. With the supported one-stock account shape, `bt` infers simulation cash from equity, the selected symbol's cash and margin inventory values, loan principal, and interest. It rejects a nonzero holding in another symbol.
@@ -379,7 +395,7 @@ The strategy must declare exactly one US stock. The selected Alpaca account must
 
 | Option | Default | Description |
 |---|---|---|
-| `--live` | paper | Select the live Alpaca endpoint and permit real-money market-on-close orders. |
+| `--live` | paper | Select the live Alpaca endpoint and permit real-money orders. |
 
 `--equity` is rejected for US strategies.
 
@@ -400,9 +416,11 @@ The daemon derives every phase from Alpaca's `next_close`.
 | Phase | Timing | Action |
 |---|---|---|
 | Evaluate | 15 minutes before the close | Refresh Tiingo history and evaluate the provisional daily bar. |
-| Submit | By 10 minutes before the close | Query today's deterministic client order ID, then submit a whole-share market-on-close order when needed. |
-| Reconcile | After the close | Log the fill. |
+| Submit | Before 10 minutes before the close | Query today's deterministic client order ID, then submit a fractional `market` order with `time_in_force: day` when needed. |
+| Reconcile | After the close | Poll the order every 15 seconds until it reaches a terminal status or 5 minutes pass after the close, then log the fill. |
 | Sleep | After reconciliation | Sleep until the next open. |
+
+The Submit phase ends 10 minutes before the close because Alpaca queues a day order sent after the close for the next session. At or after that cutoff, the daemon logs `error=submit cutoff passed order=skip` and submits nothing. The desired-share, fractional-quantity, and USD 1 buy-minimum rules match `bt target`.
 
 #### Output and logs
 
@@ -413,10 +431,10 @@ The US log records held shares, the deterministic order or skip reason, and the 
 An inactive or trading-blocked account is refused at startup. A stale cache, fetch or snapshot error, evaluation error, or order failure logs one error line and stops the US action for the day.
 
 > [!CAUTION]
-> `bt live --live` submits real-money market-on-close orders. Confirm the credentials, account, and strategy before starting it.
+> `bt live --live` submits real-money fractional market orders. Confirm the credentials, account, and strategy before starting it.
 
 > [!WARNING]
-> The free Alpaca IEX feed can produce a provisional price that differs from the consolidated tape. Alpaca paper accounts also do not simulate dividends, so paper cash and equity can diverge from a live account.
+> The free Alpaca IEX feed can produce a provisional price that differs from the consolidated tape. The market order fills near the decision time, about 15 minutes before the close, not at the official close; model that gap in `bt run` with `--slip-bps`. Alpaca paper accounts also do not simulate dividends, so paper cash and equity can diverge from a live account.
 
 > [!IMPORTANT]
 > The US path recomputes desired shares from the account and stops after a failed prerequisite or order.
@@ -455,30 +473,51 @@ The Shioaji server may still need its own keys to log in. `bt` never fails becau
 | Phase | Taipei timing | Implemented TW action |
 |---|---|---|
 | Prepare | 13:05 | Check that a snapshot is dated today, query FinMind's independent trading calendar for the previous session, fetch prices through that session, refresh adjustment datasets through today, and require an exact price-cache end date. |
-| Decide | 13:20 | Request a fresh snapshot, validate its session and OHLCV values, append the provisional bar, evaluate the final and previous effective targets, read Common-lot aggregate positions and dated margin details, derive simulation or production cash and equity, prepend due 18-month rollover pairs, and plan ordinary cash, margin, and refinancing legs in absolute TWD. An unchanged effective target preserves drift; a changed target trades from current inventory. |
-| Execute | Before 13:25 | Floor shares to 1000-share Common lots and submit `MKT` + `IOC` legs sequentially. Recheck the date and cutoff immediately before every order and during every status poll. |
-| Reconcile | After 13:30 | Query and log today's resulting trades, including fill status, deal lots, and weighted deal price. |
+| Decide | 13:20 | Request a fresh snapshot, validate its session and OHLCV values, append the provisional bar, evaluate the final and previous effective targets, read aggregate positions in shares and dated margin details, derive simulation or production cash and equity, prepend due 18-month rollover pairs, and plan ordinary cash, margin, and refinancing legs in absolute TWD. An unchanged effective target preserves drift; a changed target trades from current inventory. |
+| Execute | Before 13:25 | Split legs into `Common` and `IntradayOdd` orders as in `bt target` and submit them sequentially. Recheck the date and cutoff immediately before every order and during every status poll. |
+| Reconcile | After 13:30 | Query and log today's resulting trades, including fill status, deal quantity, and weighted deal price. |
 
-Every successor leg requires the previous order to be uniquely identified and completely filled at a finite positive weighted price. A refinance sell and rebuy are sequential dependent orders, not an atomic broker operation. The rebuy runs only after the full sell is confirmed and only when its complete original lot count is funded. An ordinary buy may be floored to the confirmed cash budget; if capped, its remainder and every later leg stay unsubmitted.
+| Order | Request | Confirmation |
+|---|---|---|
+| `Common` | `MKT` + `IOC`, quantity in lots. | Poll today's trades up to five times, one second apart, for one matching `Filled` record with the full quantity and a finite positive weighted price. |
+| `IntradayOdd` | Limit `ROD`, quantity 1 to 999 shares, priced at the snapshot ask for a buy and the snapshot bid for a sell. | None. The executor logs `submitted=intraday-odd-rod-pending quantity=N` and moves on. |
+
+TWSE intraday odd-lot trading accepts only limit `ROD` orders of 1 to 999 shares and no margin or securities-lending sales ([TWSE intraday odd-lot rules](https://www.twse.com.tw/downloads/zh/trading/introduce/introduce4-1.pdf)). The Shioaji server exposes no odd-lot quote, so the limit comes from the regular-book snapshot. An accepted odd-lot buy reserves its full cost from the cash budget at once. An odd-lot sale never adds proceeds to the same session's cash.
+
+| Odd-lot case | Behavior |
+|---|---|
+| Simulation server | Skip the order, log `submitted=skip:odd-lot-unsupported-in-simulation`, and continue with later legs. |
+| Snapshot ask or bid missing | Skip the order, log `submitted=skip:odd-lot-quote-unavailable`, and continue. |
+| Broker rejects the placement | Log `submitted=skip:odd-lot-rejected` and continue. |
+| Today's trades hold an opposite-direction `IntradayOdd` fill for the symbol | Stop with `opposite-direction odd-lot fill today`; nothing else is submitted. |
+| Today's trades cannot be read | Stop with `odd-lot trade history unavailable: REASON`. |
+
+The opposite-direction guard prevents a same-day odd-lot round trip. The daemon skips a session that already has orders, and a plan never holds an odd-lot sell and an odd-lot buy together, so the guard is a backstop.
+
+A refinance or rollover sell and its rebuy are sequential dependent orders, not an atomic broker operation. The rebuy runs only after the full sell is confirmed and only when its complete original lot count is funded. An ordinary buy may be floored to the confirmed cash budget; if capped, its remainder and every later leg stay unsubmitted.
+
+Live planning and execution both use SinoPac's settlement-debit list rate of 14.25 bps with a TWD 1 minimum per order, because the broker debits the list rate at settlement and rebates the discount later. Execution funds each buy and carries cash after each fill at that rate. Backtests use the 2.85 bps default commission. A cash leg split into a `Common` order and an `IntradayOdd` order pays two minimums.
 
 #### Output and logs
 
-The TW log records held Common lots, planned cash, margin, and refinance legs, retained board-lot remainders, every observed fill, and resulting exposure. Production startup also records `acc_balance`, T+0, T+1, T+2, spendable cash, and equity. Reconciliation includes fill status, deal lots, and weighted deal price.
+Each decision line records `cash-shares`, `margin-shares`, `loan`, `planned-legs` as `ACTION:CONDITION:LOT:QUANTITY` entries, and `submitted` as `complete`, `stop:REASON remaining:LEGS`, `skip:no-order-legs`, or `skip:existing-orders`. Odd-lot orders add their own `submitted=` lines. Trade lines record `order-id`, `action`, `cond`, `lot`, `fill-status`, `deal-quantity` in the trade's lot unit, and `fill-price`. Production startup also records `acc_balance`, T+0, T+1, T+2, spendable cash, and equity.
 
 #### Failure handling
 
-The mode mismatch guard requires simulation commands to see `info.simulation = true` and `--live` to see `info.simulation = false`. The daemon re-reads server info at the start of each unsubmitted daily Decide phase; if the server mode changed after startup, it logs the mismatch and skips the day's action before any order can be submitted. Partial, missing, ambiguous, mismatched, failed, inactive, rejected, cancelled, timed-out, cutoff, or uncertain POST results stop all later legs.
+The mode mismatch guard requires simulation commands to see `info.simulation = true` and `--live` to see `info.simulation = false`. The daemon re-reads server info at the start of each unsubmitted daily Decide phase; if the server mode changed after startup, it logs the mismatch and skips the day's action before any order can be submitted. The day also stops when the dated `position_detail` quantities of a margin position, counted in 1000-share lots, exceed its held margin shares.
+
+A `Common` order that ends `Failed`, `Inactive`, `Cancelled`, or `Rejected` with no fill lets later independent legs run. A sell that ends this way blocks its dependent rebuy and every leg after it. A partial, missing, ambiguous, mismatched, timed-out, cutoff, or uncertain result stops all later legs.
 
 No execution path guarantees exactly once across concurrent daemon processes or every crash timing; the pre-submit query only reduces duplicate risk.
 
 > [!WARNING]
-> Simulation equity is a user-supplied sizing input. Board-lot flooring, real MKT fills, the spread, partial or cancelled IOC quantities, broker margin rules, settlements, and concurrent processes can make TW daemon execution differ from a daily close-fill backtest.
+> Simulation equity is a user-supplied sizing input, and simulation skips every odd-lot order. Real MKT fills, odd-lot limit fills in the separate odd-lot book, unfilled ROD orders, the spread, partial or cancelled IOC quantities, broker margin rules, settlements, and concurrent processes can make TW daemon execution differ from a daily close-fill backtest.
 
 > [!IMPORTANT]
-> A stale cache, fetch or snapshot error, evaluation error, or order failure logs one error line and stops the TW action for the day. TW never submits a successor after an unconfirmed predecessor.
+> A stale cache, fetch or snapshot error, or evaluation error logs one error line and stops the TW action for the day. TW never submits a leg after a `Common` order whose result is unconfirmed, and it records that stop as `submitted=stop:REASON remaining:LEGS`.
 
 > [!NOTE]
-> The TW path queries today's orders before planning and carries only confirmed fills between legs. This reduces duplicate risk but is not an exactly-once guarantee for concurrent processes.
+> The TW path queries today's orders before planning and carries only confirmed `Common` fills and pending odd-lot buy costs between legs. This reduces duplicate risk but is not an exactly-once guarantee for concurrent processes.
 
 Pending T+1 and T+2 settlements never suppress a production session; their signed amounts alter the available cash passed to the unchanged planner and executor. T+0 remains required and logged but is already reflected in `acc_balance`.
 
@@ -499,16 +538,16 @@ Loads one or more strategy files and their cached prices. Each strategy file sel
 | `--to YYYY-MM-DD` | last cached common date | Set the last date to load. |
 | `-p name=value` | - | Override each matching strategy `param` with a float value. Repeat for more parameters. The command rejects a name that no strategy declares. |
 | `--fill open\|close` | `close` | Select the fill mode. |
-| `--capital TWD` | - | Set the portfolio starting value in TWD. Enables the per-order minimum fee. |
+| `--capital AMOUNT` | required | Set the positive finite portfolio starting value in the market's currency: TWD for Taiwan, USD for US. The engine converts exposure to share counts at this scale and charges the minimum fee and per-share fees in money terms. |
 | `--fee-bps F` | per market | Override the fee in basis points for all strategies and the baseline. |
 | `--tax-bps F` | per symbol class | Override the sell tax in basis points for all strategies and the baseline. |
 | `--slip-bps F` | `0` | Override slippage in basis points for all strategies and the baseline. |
-| `--min-fee F` | `20` (with `--capital`) | Override the minimum commission per order in TWD. Applies only with `--capital`. |
+| `--min-fee F` | TW 1, US 0 | Override the minimum commission per order in the market's currency. |
 | `--dividend-tax PERCENT` | `0` | Reduce every TW receivable and US cash dividend at creation. Represents dividend income tax and the NHI supplementary premium. |
 | `--financing-rate PERCENT` | TW 6.35, US 6.25 | Set the annual financing rate. |
 | `--maintenance-ratio PERCENT` | TW 130 (collateral/loan), US tiered | Set a flat maintenance threshold for either market. When unset, TW uses 130% collateral over loan and US uses the tiered table (100% below $2.50, 50% $2.50-$6, 30% above $6). |
-| `--per-share-fee F` | US 0.000195, TW 0 | Override the per-share sell fee in dollars. Applies only with `--capital`. |
-| `--per-share-cap F` | US 9.79, TW 0 | Override the per-share sell fee cap in dollars per order. Use 0 for uncapped. Applies only with `--capital`. |
+| `--per-share-fee F` | US 0.000195, TW 0 | Override the per-share sell fee in dollars. |
+| `--per-share-cap F` | US 9.79, TW 0 | Override the per-share sell fee cap in dollars per order. Use 0 for uncapped. |
 | `--financing-ratio PERCENT` | TW 60, US 50 | Set the fresh-loan financing ratio for every asset. TW defaults from cached stockinfo (TWSE/TPEX 60%). US defaults to the Reg T initial-margin ratio of 50%. |
 | `--loan-term-months N` | `18` | Set the TW margin-loan term in calendar months. Use 0 for open-ended TW loans. US loans are always open-ended. |
 | `--data-dir DIR` | `data/` | Set the cache directory. |
@@ -521,6 +560,8 @@ Loads one or more strategy files and their cached prices. Each strategy file sel
 > The four margin options and `--dividend-tax` apply to every strategy and the baseline. US assets ignore `--loan-term-months`.
 
 For the full margin and dividend engine guide, see [engine.md](./engine.md).
+
+Taiwan cash quantities are floored to whole shares and Taiwan margin quantities to 1000-share lots; the floored remainder stays in cash. US quantities stay fractional. See [Share quantum](./engine.md#share-quantum).
 
 The command applies `--from` and `--to` to every input. It then uses the exact intersection of trading dates across all strategies and the optional baseline. This rule gives every report column the same dates. The command stops if fewer than two common dates remain.
 
@@ -536,13 +577,13 @@ One basis point is 0.01%. One hundred basis points are 1%.
 | Market and symbol | Fee | Minimum fee | Sell tax | Per-share sell fee | Slippage |
 |---|---|---|---|---|---|
 | US | 0 bps (0%) | - | 0.206 bps (SEC fee, effective 2026-04-04) | $0.000195/share, $0.01 floor, $9.79 cap (TAF, effective 2026-01-01) | 0 bps (0%) |
-| Taiwan ordinary bond ETF (`00...B`) | 3.99 bps (0.0399%) | 20 TWD per order | 0 bps (0%) through 2026-12-31 | - | 0 bps (0%) |
-| Other Taiwan `00` or `02` ETN | 3.99 bps (0.0399%) | 20 TWD per order | 10 bps (0.10%) | - | 0 bps (0%) |
-| Other Taiwan symbol | 3.99 bps (0.0399%) | 20 TWD per order | 30 bps (0.30%) | - | 0 bps (0%) |
+| Taiwan ordinary bond ETF (`00...B`) | 2.85 bps (0.0285%) | 1 TWD per order | 0 bps (0%) through 2026-12-31 | - | 0 bps (0%) |
+| Other Taiwan `00` or `02` ETN | 2.85 bps (0.0285%) | 1 TWD per order | 10 bps (0.10%) | - | 0 bps (0%) |
+| Other Taiwan symbol | 2.85 bps (0.0285%) | 1 TWD per order | 30 bps (0.30%) | - | 0 bps (0%) |
 
-Leveraged and inverse bond ETFs end in `L` or `R`, not `B`, so they use the 10 bps ETF rate.
+Leveraged and inverse bond ETFs end in `L` or `R`, not `B`, so they use the 10 bps ETF rate. The Taiwan fee is SinoPac's electronic-trading promotion rate, 20% of the 0.1425% list rate.
 
-An exposure increase pays the commission and slippage. An exposure decrease pays the commission, sell tax, and slippage. Commission is proportional to the absolute exposure change. When `--capital` is given, each order pays the greater of that proportional commission and the minimum fee. Without `--capital`, the minimum is ignored. Sell tax and slippage remain proportional. The four cost options override the applicable defaults for every strategy and the baseline; `--min-fee 0` disables the minimum.
+An exposure increase pays the commission and slippage. An exposure decrease pays the commission, sell tax, and slippage. Commission is proportional to the absolute exposure change, and each asset trade pays the greater of that proportional commission and the minimum fee. Sell tax and slippage remain proportional. The cost options override the applicable defaults for every strategy and the baseline; `--min-fee 0` disables the minimum.
 
 ### Fill modes
 
