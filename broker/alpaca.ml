@@ -248,25 +248,38 @@ let snapshot symbol =
     ~path:("/v2/stocks/" ^ url_encode symbol ^ "/snapshot?feed=iex")
   |> expect_ok "snapshot" parse_snapshot
 
+let rec trim_zeros text =
+  let last = String.length text - 1 in
+  match text.[last] with
+  | '0' -> trim_zeros (String.sub text 0 last)
+  | '.' -> String.sub text 0 last
+  | _ -> text
+
+let qty_string qty =
+  let nanos = Float.round (qty *. 1e9) in
+  let nanos = int_of_float (if nanos /. 1e9 > qty then nanos -. 1. else nanos) in
+  trim_zeros
+    (Printf.sprintf "%d.%09d" (nanos / 1_000_000_000) (nanos mod 1_000_000_000))
+
 let order_body ~symbol ~qty ~side ~client_order_id =
   let side = match side with `Buy -> "buy" | `Sell -> "sell" in
   match
     run_capture "/usr/bin/jq"
       ["-nc";
        "--arg"; "symbol"; symbol;
-       "--argjson"; "qty"; string_of_int qty;
+       "--arg"; "qty"; qty_string qty;
        "--arg"; "side"; side;
        "--arg"; "client_order_id"; client_order_id;
-       "{symbol:$symbol,qty:$qty,side:$side,type:\"market\",time_in_force:\"cls\",client_order_id:$client_order_id}"]
+       "{symbol:$symbol,qty:$qty,side:$side,type:\"market\",time_in_force:\"day\",client_order_id:$client_order_id}"]
   with
   | status, body when process_ok status -> body
   | _ -> failwith "jq failed while building Alpaca order"
 
-let submit_moc mode ~symbol ~qty ~side ~client_order_id =
+let submit_market mode ~symbol ~qty ~side ~client_order_id =
   let () =
-    match qty > 0 with
+    match qty > 0. with
     | true -> ()
-    | false -> invalid_arg "Alpaca.submit_moc: qty must be positive"
+    | false -> invalid_arg "Alpaca.submit_market: qty must be positive"
   in
   let body = order_body ~symbol ~qty ~side ~client_order_id in
   request ~method_:"POST" ~body mode ~path:"/v2/orders"

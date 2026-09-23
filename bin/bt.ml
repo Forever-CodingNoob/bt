@@ -694,7 +694,7 @@ let print_decision provisional_close (decision : Live.decision) =
       in
       Printf.printf "action: order\n";
       Printf.printf "side: %s\n" side;
-      Printf.printf "quantity: %d\n" qty;
+      Printf.printf "quantity: %s\n" (Alpaca.qty_string qty);
       Printf.printf "client-order-id: %s\n" id
   | Live.Skip reason ->
       Printf.printf "action: skip\n";

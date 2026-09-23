@@ -10,11 +10,11 @@ type leg = {
 }
 
 
-(** A whole-share order or the reason no order is needed. *)
+(** A fractional-share order or the reason no order is needed. *)
 type action =
   | Order of {
       side : [`Buy | `Sell];
-      qty : int;
+      qty : float;
       id : string;
     }
   | Skip of string
@@ -57,19 +57,21 @@ val snapshot_session :
   provisional_date:string ->
   [`Proceed | `Skip of string]
 
-(** Convert target exposure to whole shares, truncating toward zero. *)
-val desired_shares : target:float -> equity:float -> price:float -> int
+(** Convert target exposure to fractional shares. *)
+val desired_shares : target:float -> equity:float -> price:float -> float
 
-(** Difference between desired shares and the rounded held quantity. *)
-val order_delta : desired:int -> held:float -> int
+(** Difference between desired and held shares. *)
+val order_delta : desired:float -> held:float -> float
 
-(** Whether an order's absolute notional is below one dollar. *)
-val below_threshold : delta:int -> price:float -> bool
+(** Whether a buy's absolute notional is below one dollar; sells never are. *)
+val below_threshold :
+  side:[`Buy | `Sell] -> delta:float -> price:float -> bool
 
 (** Build the deterministic daily Alpaca client order identifier. *)
 val client_order_id : symbol:string -> date:string -> string
 
-(** Size a decision and return its order or minimum-value skip. *)
+(** Size a decision and return its order or minimum-value skip. Quantities are
+    truncated to Alpaca's 9 decimals; sells never exceed [held]. *)
 val decide_action :
   symbol:string ->
   date:string ->
@@ -140,10 +142,24 @@ val execute_tw_legs :
 val next_actions :
   now:string ->
   next_close:string ->
-  [`Sleep_until of string | `Decide | `Submit_window | `Post_close]
+  [`Sleep_until of string | `Decide | `Cutoff_passed | `Post_close]
 
-(** Whether an MOC may still be submitted for this session. *)
-val can_submit_moc : now:string -> next_close:string -> bool
+(** Log a US decision and, unless today's client order ID already exists,
+    submit its market order only while the market is open and before the
+    submit cutoff 10 minutes before [next_close]; otherwise log
+    [error=submit cutoff passed order=skip]. The broker calls default to
+    [Alpaca]. *)
+val execute_decision :
+  ?order_by_client_id:(mode -> string -> Alpaca.order_t option) ->
+  ?clock:(mode -> Alpaca.clock_t) ->
+  ?submit_market:
+    (mode ->
+     symbol:string ->
+     qty:float ->
+     side:[`Buy | `Sell] ->
+     client_order_id:string ->
+     Alpaca.order_t) ->
+  mode -> string -> string -> decision -> unit
 
 (** Extract the calendar date prefix from an RFC3339 timestamp. *)
 val timestamp_date : string -> string

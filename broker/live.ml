@@ -11,7 +11,7 @@ type leg = {
 type action =
   | Order of {
       side : [`Buy | `Sell];
-      qty : int;
+      qty : float;
       id : string;
     }
   | Skip of string
@@ -64,27 +64,29 @@ let snapshot_session ~session_date ~provisional_date =
          provisional_date session_date)
 
 let desired_shares ~target ~equity ~price =
-  int_of_float (target *. equity /. price)
+  target *. equity /. price
 
 let order_delta ~desired ~held =
-  desired - int_of_float (Float.round held)
+  desired -. held
 
-let below_threshold ~delta ~price =
-  abs_float (float_of_int delta *. price) < 1.
+let below_threshold ~side ~delta ~price =
+  match side with
+  | `Buy -> abs_float (delta *. price) < 1.
+  | `Sell -> false
 
 let client_order_id ~symbol ~date =
   Printf.sprintf "bt-%s-%s" symbol date
 
 let decide_action ~symbol ~date ~target ~equity ~price ~held =
-  let desired = desired_shares ~target ~equity ~price in
-  let delta = order_delta ~desired ~held in
-  if below_threshold ~delta ~price then
+  let delta = order_delta ~desired:(desired_shares ~target ~equity ~price) ~held in
+  let side, shares =
+    if delta > 0. then (`Buy, delta) else (`Sell, Float.min (-. delta) held)
+  in
+  let qty = float_of_string (Alpaca.qty_string shares) in
+  if qty = 0. || below_threshold ~side ~delta:qty ~price then
     Skip "below $1 minimum order value"
   else
-    Order
-      { side = (if delta > 0 then `Buy else `Sell);
-        qty = abs delta;
-        id = client_order_id ~symbol ~date }
+    Order { side; qty; id = client_order_id ~symbol ~date }
 
 let int_field value offset length =
   int_of_string (String.sub value offset length)
@@ -319,14 +321,9 @@ let next_actions ~now ~next_close =
   else if now < submit_at then
     `Decide
   else if now < close then
-    `Submit_window
+    `Cutoff_passed
   else
     `Post_close
-
-let can_submit_moc ~now ~next_close =
-  match next_actions ~now ~next_close with
-  | `Decide -> true
-  | `Sleep_until _ | `Submit_window | `Post_close -> false
 
 let startup_ok (account : Alpaca.account_t) =
   match account.status, account.trading_blocked with
@@ -824,7 +821,7 @@ let order_description = function
         | `Buy -> "buy"
         | `Sell -> "sell"
       in
-      Printf.sprintf "%s:%d:%s" side qty id
+      Printf.sprintf "%s:%s:%s" side (Alpaca.qty_string qty) id
   | Orders legs ->
       legs
       |> List.map
@@ -882,24 +879,24 @@ let finish_order mode next_close date client_order_id
       (float_of_int (rfc3339_seconds next_close + (5 * 60)))
   end
 
-let execute_decision mode symbol next_close decision =
+let execute_decision ?(order_by_client_id = Alpaca.order_by_client_id)
+    ?(clock = Alpaca.clock) ?(submit_market = Alpaca.submit_market) mode
+    symbol next_close decision =
   log_decision decision;
   match decision.action with
   | Skip _ -> ()
   | Order { side; qty; id } ->
       let order =
-        match Alpaca.order_by_client_id mode id with
+        match order_by_client_id mode id with
         | Some order -> Some order
         | None ->
-            let clock = Alpaca.clock mode in
+            let clock = clock mode in
             if clock.is_open
-               && can_submit_moc ~now:clock.timestamp ~next_close
+               && next_actions ~now:clock.timestamp ~next_close = `Decide
             then
-              Some
-                (Alpaca.submit_moc mode ~symbol ~qty ~side
-                   ~client_order_id:id)
+              Some (submit_market mode ~symbol ~qty ~side ~client_order_id:id)
             else begin
-              log "date=%s error=missed MOC submission cutoff order=skip"
+              log "date=%s error=submit cutoff passed order=skip"
                 decision.provisional.date;
               None
             end
@@ -957,7 +954,7 @@ let run_us mode ~strat_path ~data_dir =
           | `Post_close ->
               sleep_until clock.next_open;
               cycle ()
-          | (`Decide | `Submit_window as phase) ->
+          | (`Decide | `Cutoff_passed as phase) ->
               let date = timestamp_date clock.timestamp in
               let id = client_order_id ~symbol ~date in
               (match
@@ -969,32 +966,28 @@ let run_us mode ~strat_path ~data_dir =
                      log "date=%s order=existing:%s fill=pending" date id;
                      finish_order mode clock.next_close date id order;
                      sleep_until clock.next_open
+                 | None when phase = `Cutoff_passed ->
+                     log "date=%s error=submit cutoff passed order=skip" date;
+                     sleep_until clock.next_open
                  | None ->
-                     (match phase with
-                      | `Submit_window ->
-                          log
-                            "date=%s error=missed MOC submission cutoff order=skip"
-                            date;
-                          sleep_until clock.next_open
-                      | `Decide ->
+                     (match
+                        decide mode ~session_date:date ~strat_path ~data_dir
+                      with
+                      | decision ->
                           (match
-                             decide mode ~session_date:date ~strat_path ~data_dir
+                             execute_decision mode symbol clock.next_close
+                               decision
                            with
-                           | decision ->
-                               (match
-                                  execute_decision mode symbol
-                                    clock.next_close decision
-                                with
-                                | () -> sleep_until clock.next_open
-                                | exception error ->
-                                    log "date=%s error=%s order=skip"
-                                      decision.provisional.date
-                                      (Printexc.to_string error);
-                                    sleep_until clock.next_open)
+                           | () -> sleep_until clock.next_open
                            | exception error ->
-                               log "date=%s error=%s order=skip" date
+                               log "date=%s error=%s order=skip"
+                                 decision.provisional.date
                                  (Printexc.to_string error);
-                               sleep_until clock.next_open))
+                               sleep_until clock.next_open)
+                      | exception error ->
+                          log "date=%s error=%s order=skip" date
+                            (Printexc.to_string error);
+                          sleep_until clock.next_open)
                with
                | () -> ()
                | exception error ->

@@ -66,11 +66,26 @@ val position_qty : mode -> string -> float
 (** Fetch an IEX stock snapshot. *)
 val snapshot : string -> snapshot_t
 
-(** Submit a whole-share market-on-close order. *)
-val submit_moc :
+(** Format a non-negative share quantity for Alpaca: truncated toward zero at
+    Alpaca's 9-decimal qty precision, trailing zeros trimmed. A float that is
+    the nearest double to a 9-decimal value formats as that value. Both
+    guarantees hold only below 2^22 shares. *)
+val qty_string : float -> string
+
+(** Build the JSON body of a fractional market day order; [qty] is sent as
+    [qty_string qty]. *)
+val order_body :
+  symbol:string ->
+  qty:float ->
+  side:[`Buy | `Sell] ->
+  client_order_id:string ->
+  string
+
+(** Submit a fractional market order with [time_in_force: day]. *)
+val submit_market :
   mode ->
   symbol:string ->
-  qty:int ->
+  qty:float ->
   side:[`Buy | `Sell] ->
   client_order_id:string ->
   order_t

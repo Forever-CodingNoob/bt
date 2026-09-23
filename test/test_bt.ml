@@ -4433,17 +4433,6 @@ let test_engine_effective_targets () =
   assert_close 1.994 (effective 1.994)
 
 let test_live_pure_decisions () =
-  (* 1.994 * 10000 / 500 = 39.88, truncated toward zero to 39;
-     the negative case truncates -39.88 toward zero to -39. *)
-  assert (Live.desired_shares ~target:1.994 ~equity:10000. ~price:500. = 39);
-  assert (Live.desired_shares ~target:(-1.994) ~equity:10000. ~price:500. = -39);
-  (* Round 5.4 to 5 and 5.6 to 6 before subtracting from 39. *)
-  assert (Live.order_delta ~desired:39 ~held:5.4 = 34);
-  assert (Live.order_delta ~desired:39 ~held:5.6 = 33);
-  (* One share at $0.99 is below $1 for either side; at $1 it is not. *)
-  assert (Live.below_threshold ~delta:1 ~price:0.99);
-  assert (Live.below_threshold ~delta:(-1) ~price:0.99);
-  assert (not (Live.below_threshold ~delta:1 ~price:1.));
   (* The identifier is the fixed prefix, symbol, and session date. *)
   assert
     (Live.client_order_id ~symbol:"SPY" ~date:"2025-06-24"
@@ -4502,25 +4491,77 @@ let test_live_pure_decisions () =
   assert
     (Live.snapshot_session ~session_date:"2025-06-24"
        ~provisional_date:override.day_date
-     = `Proceed);
-  (* 1.0 * $100000 / $650 = 153.846..., truncated to 153 shares. *)
+     = `Proceed)
+
+let test_us_live_fractional () =
+  let order_fields body =
+    let input =
+      Unix.open_process_args_in "/usr/bin/jq"
+        [| "jq"; "-nc"; "--argjson"; "body"; body;
+           "$body | {type, time_in_force, qty}" |]
+    in
+    let line = input_line input in
+    let () = assert (Unix.close_process_in input = Unix.WEXITED 0) in
+    line
+  in
+  let order ~target ~equity ~held =
+    Live.decide_action ~symbol:"SPY" ~date:"2025-06-24" ~target ~equity
+      ~price:300. ~held
+  in
+  let sell qty = Live.Order { side = `Sell; qty; id = "bt-SPY-2025-06-24" } in
+  (* 0.5 * 1,000 / 300 = 500 / 300 = 1.6666666667 shares, not truncated. *)
+  let () =
+    assert_close 1.6666666667
+      (Live.desired_shares ~target:0.5 ~equity:1000. ~price:300.)
+  in
+  (* Held 0: the whole 1.66666666666... delta is bought, truncated toward
+     zero at Alpaca's 9 decimals. *)
+  let () =
+    assert
+      (order ~target:0.5 ~equity:1000. ~held:0.
+       = Live.Order { side = `Buy; qty = 1.666666666; id = "bt-SPY-2025-06-24" })
+  in
+  (* Held 1, desired 300.6 / 300 = 1.002: the 0.002-share buy is USD 0.60. *)
+  let () =
+    assert
+      (order ~target:1. ~equity:300.6 ~held:1.
+       = Live.Skip "below $1 minimum order value")
+  in
+  let () = assert (Live.below_threshold ~side:`Buy ~delta:0.002 ~price:300.) in
+  let () =
+    assert (not (Live.below_threshold ~side:`Sell ~delta:0.002 ~price:300.))
+  in
+  (* Holding 0.002 shares at 300 is USD 0.60; target 0 still sells all of it. *)
+  let () = assert (order ~target:0. ~equity:1000. ~held:0.002 = sell 0.002) in
+  (* 1.6666666666 rounds to 1.666666667 at 9 decimals, above the holding;
+     truncation sells 1.666666666. *)
+  let () =
+    assert (order ~target:0. ~equity:1000. ~held:1.6666666666 = sell 1.666666666)
+  in
+  (* 1.000285084 *. 1e9 truncates to 1000285083; the whole 9-decimal holding
+     must still close. *)
+  let () =
+    assert (order ~target:0. ~equity:1000. ~held:1.000285084 = sell 1.000285084)
+  in
+  (* -1 * 1,000 / 300 = -3.333... desired; delta -3.333... - 1 = -4.333...;
+     the sell is capped at the 1 held share. *)
+  let () = assert (order ~target:(-1.) ~equity:1000. ~held:1. = sell 1.) in
+  let () =
+    assert
+      (order_fields
+         (Alpaca.order_body ~symbol:"SPY" ~qty:1.666666666 ~side:`Buy
+            ~client_order_id:"bt-SPY-2025-06-24")
+       = {|{"type":"market","time_in_force":"day","qty":"1.666666666"}|})
+  in
+  (* The raw 10-decimal holding is truncated at the broker boundary too. *)
   assert
-    (Live.decide_action ~symbol:"SPY" ~date:override.day_date
-       ~target:1. ~equity:100000. ~price:override.latest ~held:0.
-     = Live.Order
-         { side = `Buy;
-           qty = 153;
-           id = "bt-SPY-2025-06-24" })
+    (order_fields
+       (Alpaca.order_body ~symbol:"SPY" ~qty:1.6666666666 ~side:`Sell
+          ~client_order_id:"bt-SPY-2025-06-24")
+     = {|{"type":"market","time_in_force":"day","qty":"1.666666666"}|})
 
 let test_live_schedule () =
   let close = "2025-06-24T16:00:00-04:00" in
-  assert
-    (Live.can_submit_moc ~now:"2025-06-24T15:49:59-04:00"
-       ~next_close:close);
-  assert
-    (not
-       (Live.can_submit_moc ~now:"2025-06-24T15:50:00-04:00"
-          ~next_close:close));
   assert
     (Live.next_actions ~now:"2025-06-24T15:44:59-04:00" ~next_close:close
      = `Sleep_until "2025-06-24T15:45:00-04:00");
@@ -4532,7 +4573,10 @@ let test_live_schedule () =
      = `Decide);
   assert
     (Live.next_actions ~now:"2025-06-24T15:50:00-04:00" ~next_close:close
-     = `Submit_window);
+     = `Cutoff_passed);
+  assert
+    (Live.next_actions ~now:"2025-06-24T15:59:59-04:00" ~next_close:close
+     = `Cutoff_passed);
   assert
     (Live.next_actions ~now:"2025-06-24T16:00:00-04:00" ~next_close:close
      = `Post_close);
@@ -4544,7 +4588,42 @@ let test_live_schedule () =
   assert
     (Live.next_actions ~now:"2025-11-28T12:50:00-05:00"
        ~next_close:early_close
-     = `Submit_window)
+     = `Cutoff_passed)
+
+let test_us_live_submit_cutoff () =
+  let close = "2025-06-24T16:00:00-04:00" in
+  let decision : Live.decision =
+    { fetched_through = "2025-06-23";
+      provisional =
+        { date = "2025-06-24"; o = 300.; h = 300.; l = 300.; c = 300.; v = 0. };
+      target = 0.5;
+      equity = 1000.;
+      held = 0.;
+      action =
+        Live.Order { side = `Buy; qty = 1.666666666; id = "bt-SPY-2025-06-24" } }
+  in
+  let posted = Queue.create () in
+  let execute now =
+    Live.execute_decision
+      ~order_by_client_id:(fun _ _ -> None)
+      ~clock:(fun _ ->
+        { Alpaca.timestamp = now; is_open = true;
+          next_open = "2025-06-25T09:30:00-04:00"; next_close = close })
+      ~submit_market:(fun _ ~symbol ~qty ~side:_ ~client_order_id ->
+        let () = Queue.add (symbol, qty, client_order_id) posted in
+        { Alpaca.id = "order-id"; status = "filled";
+          filled_avg_price = Some 300.; filled_qty = qty })
+      Live.Paper "SPY" close decision
+  in
+  (* 15:50:00 is the cutoff, 10 minutes before the 16:00 close: no POST. *)
+  let () = execute "2025-06-24T15:50:00-04:00" in
+  let () = assert (Queue.is_empty posted) in
+  (* One second earlier the order is posted; filled is terminal, so no
+     fill polling follows. *)
+  let () = execute "2025-06-24T15:49:59-04:00" in
+  assert
+    (List.of_seq (Queue.to_seq posted)
+     = [ ("SPY", 1.666666666, "bt-SPY-2025-06-24") ])
 
 let test_live_startup_guard () =
   let account : Alpaca.account_t =
@@ -7088,7 +7167,9 @@ let () =
   test_alpaca_snapshot_parse ();
   test_engine_effective_targets ();
   test_live_pure_decisions ();
+  test_us_live_fractional ();
   test_live_schedule ();
+  test_us_live_submit_cutoff ();
   test_live_startup_guard ();
   test_live_commands_reject_tw ();
   let () = test_tw_live_rejects_production_equity () in
