@@ -1,0 +1,17 @@
+[
+  {
+    "id": 0,
+    "code": "2330",
+    "direction": "Buy",
+    "quantity": 1,
+    "price": 10.0,
+    "last_price": 10.0,
+    "pnl": 0.0,
+    "yd_quantity": 1,
+    "cond": "Cash",
+    "margin_purchase_amount": 0,
+    "collateral": 0,
+    "short_sale_margin": 0,
+    "interest": 0
+  }
+]

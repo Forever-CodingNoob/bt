@@ -16,13 +16,13 @@ type snapshot = {
   total_volume : float;
 }
 
-(** One Common-lot stock inventory entry. *)
+(** One stock inventory entry; quantities are shares from [unit:"Share"]. *)
 type position = {
   id : int;
   code : string;
   cond : string;
-  lots : int;
-  yd_lots : int;
+  shares : int;
+  yd_shares : int;
   avg_price : float;
   last_price : float;
   loan_amount : float;
@@ -37,12 +37,18 @@ type position_detail = {
   lots : int;
 }
 
-(** Fields supplied for a Common-lot market order. *)
+(** TW trading book and its quantity unit: lots for [Common], shares for
+    [IntradayOdd]. *)
+type lot = Common | IntradayOdd
+
+(** Fields supplied for a Common market IOC or intraday-odd limit ROD order. *)
 type order_request = {
   exchange : string;
   code : string;
   action : string;
-  lots : int;
+  lot : lot;
+  quantity : int;
+  price : float;
   cond : string;
   custom_field : string;
 }
@@ -53,15 +59,17 @@ type placed = {
   status : string;
 }
 
-(** Order and fill fields used for deduplication and fill reporting. *)
+(** Order and fill fields used for deduplication and fill reporting;
+    quantities use the trade's [lot] unit. *)
 type trade = {
   order_id : string;
   code : string;
   action : string;
   cond : string;
+  lot : lot;
   status : string;
-  order_lots : int;
-  deal_lots : int;
+  order_quantity : int;
+  deal_quantity : int;
   deal_price : float option;
   order_datetime : string;
 }
@@ -87,7 +95,7 @@ val parse_info : string -> info
 (** Parse a one-element stock snapshot response. *)
 val parse_snapshot : string -> snapshot
 
-(** Parse Common-lot stock positions. *)
+(** Parse stock positions whose requested unit is [Share]. *)
 val parse_positions : string -> position list
 
 (** Parse dated Common-lot stock position details. *)
@@ -111,7 +119,7 @@ val info : unit -> info
 (** Fetch one stock snapshot. *)
 val snapshot : exchange:string -> code:string -> snapshot
 
-(** Fetch Common-lot stock positions from the default account. *)
+(** Fetch share-unit stock positions from the default account. *)
 val positions : unit -> position list
 
 (** Fetch dated details for one stock position id from the default account. *)
@@ -123,7 +131,10 @@ val balance : unit -> float
 (** Fetch dated settlements from the default stock account. *)
 val settlements : unit -> settlement list
 
-(** Submit a Common-lot market order through the default stock account. *)
+(** Build a stock order body without submitting it. *)
+val order_body : order_request -> string
+
+(** Submit the requested lot-book or intraday-odd order. *)
 val place_order : order_request -> placed
 
 (** Fetch trades and retain today's entries for one stock code. *)

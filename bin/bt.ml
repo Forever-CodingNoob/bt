@@ -703,7 +703,13 @@ let print_decision provisional_close (decision : Live.decision) =
       let () = Printf.printf "action: orders\n" in
       List.iter
         (fun (leg : Live.leg) ->
-          Printf.printf "leg: %s %s %d\n" leg.action leg.cond leg.lots)
+          let lot =
+            match leg.lot with
+            | Shioaji.Common -> "Common"
+            | Shioaji.IntradayOdd -> "IntradayOdd"
+          in
+          Printf.printf "leg: %s %s %s %d\n" leg.action leg.cond lot
+            leg.quantity)
         legs
 
 let live_command_args command extra_options argv =

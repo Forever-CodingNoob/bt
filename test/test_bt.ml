@@ -5372,7 +5372,7 @@ let test_engine_tw_plan_live_quantity () =
   in
   assert
     (Live.legs_of_plan ~price plan
-     = [{ Live.action = "Sell"; cond = "MarginTrading"; lots = 7 }])
+     = [{ Live.action = "Sell"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 7 }])
 
 let test_engine_tw_executed_cost () =
   let costs = Engine.default_costs ~market:"tw" ~symbol:"00685L" in
@@ -5534,18 +5534,28 @@ let test_shioaji_snapshot_parse () =
 
 let test_shioaji_positions_parse () =
   let actual = Shioaji.parse_positions (shioaji_fixture "positions.json") in
-  (* The first two rows are documented Common-lot cash positions. The third
-     applies the same shape to three margin lots with TWD 120,000 borrowed. *)
+  (* The fixture requests Share units: 1,000 + 1,000 + 3,000 shares. *)
   let expected : Shioaji.position list =
-    [{ id = 0; code = "2890"; cond = "Cash"; lots = 1; yd_lots = 1;
+    [{ id = 0; code = "2890"; cond = "Cash";
+       shares = 1000; yd_shares = 1000;
        avg_price = 30.; last_price = 31.; loan_amount = 0.; interest = 0. };
-     { id = 1; code = "2330"; cond = "Cash"; lots = 1; yd_lots = 1;
+     { id = 1; code = "2330"; cond = "Cash";
+       shares = 1000; yd_shares = 1000;
        avg_price = 2000.; last_price = 1980.; loan_amount = 0.; interest = 0. };
-     { id = 2; code = "2330"; cond = "MarginTrading"; lots = 3; yd_lots = 2;
+     { id = 2; code = "2330"; cond = "MarginTrading";
+       shares = 3000; yd_shares = 2000;
        avg_price = 1950.; last_price = 1980.; loan_amount = 120000.;
        interest = 35. }]
   in
   assert (actual = expected)
+
+let test_tw_live_positions_share () =
+  let positions =
+    Shioaji.parse_positions (shioaji_fixture "positions_share.json")
+  in
+  (* One Share-unit holding at TWD 10 is worth TWD 10, not TWD 10,000. *)
+  let () = assert ((List.hd positions).Shioaji.shares = 1) in
+  assert_close 10. (Live.equity_of ~cash:0. ~positions)
 
 let test_shioaji_position_details_parse () =
   let actual =
@@ -5611,14 +5621,14 @@ let test_shioaji_parser_rejections () =
   let () =
     assert_failure (fun () -> ignore (Shioaji.parse_positions {|{}|}))
   in
-  (* Common-lot quantity must parse as a nonnegative integer. *)
+  (* Share-unit quantity must parse as a nonnegative integer. *)
   let () =
     assert_failure (fun () ->
       ignore
         (Shioaji.parse_positions
            {|[{"id":0,"code":"2330","cond":"Cash","quantity":"lots","yd_quantity":0,"price":1,"last_price":1,"margin_purchase_amount":0,"interest":0}]|}))
   in
-  (* Negative Common-lot quantity violates the nonnegative position value. *)
+  (* Negative share quantity violates the nonnegative position value. *)
   let () =
     assert_failure (fun () ->
       ignore
@@ -5664,9 +5674,10 @@ let test_shioaji_orders_today_parse () =
        code = "2890";
        action = "Buy";
        cond = "Cash";
+       lot = Shioaji.Common;
        status = "Filled";
-       order_lots = 2;
-       deal_lots = 2;
+       order_quantity = 2;
+       deal_quantity = 2;
        deal_price = Some 27.1;
        order_datetime = "2026-05-20T11:24:30+08:00" }]
   in
@@ -5689,9 +5700,10 @@ let test_shioaji_orders_today_parse () =
        code = "2890";
        action = "Buy";
        cond = "Cash";
+       lot = Shioaji.Common;
        status = "Filled";
-       order_lots = 2;
-       deal_lots = 2;
+       order_quantity = 2;
+       deal_quantity = 2;
        deal_price = Some 27.1;
        order_datetime = "2026-09-11T13:20:00+08:00" }]
   in
@@ -5872,7 +5884,7 @@ let test_tw_live_plan_legs () =
   let () =
     assert
       (Live.legs_of_plan ~price:10. entry
-       = [{ Live.action = "Buy"; cond = "Cash"; lots = 100 }])
+       = [{ Live.action = "Buy"; cond = "Cash"; lot = Shioaji.Common; quantity = 100 }])
   in
   let refinance =
     plan ~equity:1000000. ~cash:0. ~cash_value:1000000.
@@ -5883,9 +5895,9 @@ let test_tw_live_plan_legs () =
   let () =
     assert
       (Live.legs_of_plan ~price:10. refinance
-       = [{ Live.action = "Sell"; cond = "Cash"; lots = 15 };
-          { Live.action = "Buy"; cond = "MarginTrading"; lots = 15 };
-          { Live.action = "Buy"; cond = "MarginTrading"; lots = 22 }])
+       = [{ Live.action = "Sell"; cond = "Cash"; lot = Shioaji.Common; quantity = 15 };
+          { Live.action = "Buy"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 15 };
+          { Live.action = "Buy"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 22 }])
   in
   let mixed_refinance =
     plan ~equity:3000000. ~cash:0. ~cash_value:(2000000. /. 3.)
@@ -5901,20 +5913,160 @@ let test_tw_live_plan_legs () =
     plan ~equity:1000000. ~cash:0. ~cash_value:(1000000. /. 3.)
       ~margin_value:(5000000. /. 3.) ~loan:1000000. ~previous:2. 0.
   in
-  (* The margin sale floors to 166 lots and the independently derived
-     cash sale floors to 33 lots at TWD 10. *)
+  (* The margin sale floors to 166 lots; the cash sale is 33,333 shares:
+     33 Common lots followed by 333 odd shares. *)
   let () =
     assert
       (Live.legs_of_plan ~price:10. exit
-       = [{ Live.action = "Sell"; cond = "MarginTrading"; lots = 166 };
-          { Live.action = "Sell"; cond = "Cash"; lots = 33 }])
+       = [{ Live.action = "Sell"; cond = "MarginTrading";
+            lot = Shioaji.Common; quantity = 166 };
+          { Live.action = "Sell"; cond = "Cash";
+            lot = Shioaji.Common; quantity = 33 };
+          { Live.action = "Sell"; cond = "Cash";
+            lot = Shioaji.IntradayOdd; quantity = 333 }])
   in
   let sub_lot =
     plan ~equity:9990. ~cash:9990. ~cash_value:0. ~margin_value:0.
       ~loan:0. ~previous:0. 1.
   in
-  (* TWD 9,990 / TWD 10 = 999 shares, below one Common lot. *)
-  assert (Live.legs_of_plan ~price:10. sub_lot = [])
+  (* TWD 9,990 / TWD 10 = 999 shares in the odd book. *)
+  assert
+    (Live.legs_of_plan ~price:10. sub_lot
+     = [{ Live.action = "Buy"; cond = "Cash";
+          lot = Shioaji.IntradayOdd; quantity = 999 }])
+let test_tw_odd_sell_never_precedes_buy () =
+  let mature : Shioaji.position_detail =
+    { code = "2330"; cond = "MarginTrading"; date = "2024-05-22";
+      lots = 1 }
+  in
+  let positions =
+    [1000000., 0., 0., 0.;
+     6670., 333330., 660000., 390000.;
+     100000., 234560., 660000., 390000.]
+  in
+  let legs =
+    List.concat_map
+      (fun (cash, cash_value, margin_value, loan) ->
+        let equity = cash +. cash_value +. margin_value -. loan in
+        let detail_sets =
+          if margin_value = 0. then [[]] else [[]; [mature]]
+        in
+        List.concat_map
+          (fun previous ->
+            List.concat_map
+              (fun target ->
+                let plan =
+                  Engine.plan_fills
+                    ~costs:[| Engine.default_costs ~market:"tw"
+                                 ~symbol:"2330" |]
+                    ~capital:1. ~profile:(Engine.profile_of_market "tw")
+                    ~financing_ratios:[| 0.6 |]
+                    ~state:
+                      { Engine.equity; cash;
+                        cash_values = [| cash_value |];
+                        margin_values = [| margin_value |];
+                        loans = [| loan |]; interests = [| 0. |];
+                        tail_interests = [| 0. |]; debt = 0.;
+                        receivables = 0.;
+                        previous_targets = [| previous |] }
+                    ~prices:[| 10. |] ~targets:[| target |] ~force:false
+                in
+                List.map
+                  (fun details ->
+                    Live.maturity_rollover_legs ~session_date:"2026-05-22"
+                      ~symbol:"2330" details
+                    @ Live.legs_of_plan ~price:10. plan)
+                  detail_sets)
+              [0.; 0.5; 1.; 1.8; 2.])
+          [0.; 0.5; 1.; 2.])
+      positions
+  in
+  (* The mixed state has 33,333 cash shares and 66,000 margin shares;
+     its exit exercises the odd sell. Higher targets exercise buys, while
+     the 2024-05-22 margin detail matured 18 months before this session. *)
+  let has_odd_sell legs =
+    List.exists
+      (fun (leg : Live.leg) ->
+        leg.action = "Sell" && leg.lot = Shioaji.IntradayOdd)
+      legs
+  in
+  let () = assert (List.exists has_odd_sell legs) in
+  let () =
+    assert
+      (List.exists
+         (List.exists (fun (leg : Live.leg) -> leg.action = "Buy"))
+         legs)
+  in
+  let () =
+    assert
+      (List.exists
+         (function
+           | { Live.action = "Sell"; cond = "MarginTrading";
+               lot = Shioaji.Common; quantity = 1 }
+             :: { action = "Buy"; cond = "MarginTrading";
+                  lot = Shioaji.Common; quantity = 1 } :: _ -> true
+           | _ -> false)
+         legs)
+  in
+  let rec check seen_odd_sell = function
+    | [] -> ()
+    | (leg : Live.leg) :: rest ->
+        let () = assert (not (seen_odd_sell && leg.action = "Buy")) in
+        check
+          (seen_odd_sell ||
+           (leg.action = "Sell" && leg.lot = Shioaji.IntradayOdd))
+          rest
+  in
+  List.iter (check false) legs
+
+let test_tw_live_legs_split () =
+  let plan ~cash ~margin target =
+    Engine.plan_fills ~costs:[| zero_costs |] ~capital:1.
+      ~profile:(Engine.profile_of_market "tw")
+      ~financing_ratios:[| 0.6 |]
+      ~state:
+        { Engine.equity = cash +. margin; cash;
+          cash_values = [| 0. |]; margin_values = [| margin |];
+          loans = [| 0. |]; interests = [| 0. |];
+          tail_interests = [| 0. |]; debt = 0.; receivables = 0.;
+          previous_targets = [| 0. |] }
+      ~prices:[| 10. |] ~targets:[| target |] ~force:false
+  in
+  let split = plan ~cash:865800. ~margin:0. 1. in
+  (* 865,800 / 10 = 86,580 shares = 86 Common lots + 580 odd shares. *)
+  let () =
+    assert
+      (Live.legs_of_plan ~price:10. split
+       = [{ Live.action = "Buy"; cond = "Cash"; lot = Shioaji.Common;
+            quantity = 86 };
+          { Live.action = "Buy"; cond = "Cash"; lot = Shioaji.IntradayOdd;
+            quantity = 580 }])
+  in
+  (* 999 / 1000 = 0 lots + 999 odd shares; 1000 / 1000 = 1 lot. *)
+  let () =
+    assert
+      (Live.legs_of_plan ~price:10. (plan ~cash:9990. ~margin:0. 1.)
+       = [{ Live.action = "Buy"; cond = "Cash"; lot = Shioaji.IntradayOdd;
+            quantity = 999 }])
+  in
+  let () =
+    assert
+      (Live.legs_of_plan ~price:10. (plan ~cash:10000. ~margin:0. 1.)
+       = [{ Live.action = "Buy"; cond = "Cash"; lot = Shioaji.Common;
+            quantity = 1 }])
+  in
+  (* The engine's 1,000-share quantum has already turned a requested
+     865,800 / 10 into 86,000 shares = TWD 860,000, retaining 580. *)
+  let item =
+    { split.Engine.planned_assets.(0) with
+      Engine.plan_buy_cash = 0.; plan_buy_margin = 860000. }
+  in
+  let margin = { split with Engine.planned_assets = [| item |] } in
+  assert
+    (Live.legs_of_plan ~price:10. margin
+     = [{ Live.action = "Buy"; cond = "MarginTrading";
+          lot = Shioaji.Common; quantity = 86 }])
+
 
 let test_tw_live_startup_guard () =
   let simulation : Shioaji.info =
@@ -5983,10 +6135,10 @@ let test_tw_maturity_rollover_legs () =
     assert
       (Live.maturity_rollover_legs ~session_date:"2026-05-26"
          ~symbol:"2330" details
-       = [{ Live.action = "Sell"; cond = "MarginTrading"; lots = 2 };
-          { Live.action = "Buy"; cond = "MarginTrading"; lots = 2 };
-          { Live.action = "Sell"; cond = "MarginTrading"; lots = 1 };
-          { Live.action = "Buy"; cond = "MarginTrading"; lots = 1 }])
+       = [{ Live.action = "Sell"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 2 };
+          { Live.action = "Buy"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 2 };
+          { Live.action = "Sell"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 1 };
+          { Live.action = "Buy"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 1 }])
   in
   (* 2026-05-25 is one day before the 2026-05-26 maturity. *)
   assert
@@ -6042,7 +6194,7 @@ let test_tw_live_decide_override () =
           (shioaji_fixture "position_detail.json")
       in
       let production_position : Shioaji.position =
-        { id = 0; code = "2330"; cond = "Cash"; lots = 1; yd_lots = 1;
+        { id = 0; code = "2330"; cond = "Cash"; shares = 1000; yd_shares = 1000;
           avg_price = 2000.; last_price = 2000.; loan_amount = 0.;
           interest = 0. }
       in
@@ -6067,7 +6219,7 @@ let test_tw_live_decide_override () =
       let () = assert (production.Live.action = Live.Orders []) in
 
       let drift_position : Shioaji.position =
-        { id = 0; code = "2330"; cond = "Cash"; lots = 10; yd_lots = 10;
+        { id = 0; code = "2330"; cond = "Cash"; shares = 10000; yd_shares = 10000;
           avg_price = 200.; last_price = 200.; loan_amount = 0.;
           interest = 0. }
       in
@@ -6097,7 +6249,7 @@ let test_tw_live_decide_override () =
         assert
           (dropped.Live.action =
            Live.Orders
-             [{ Live.action = "Sell"; cond = "Cash"; lots = 10 }])
+             [{ Live.action = "Sell"; cond = "Cash"; lot = Shioaji.Common; quantity = 10 }])
       in
 
       let minimum_commission =
@@ -6110,10 +6262,14 @@ let test_tw_live_decide_override () =
               ~session_date:"2026-05-26" ~strat_path:minimum_strat_path
               ~data_dir)
       in
-      (* The target rises from zero to one. TWD 10,002 cash cannot buy a
-         1,000-share lot at TWD 10 because its 2.85 bps fee is TWD 2.85. *)
+      (* TWD 10,002 cannot fund 1,000 shares plus 2.85 commission, but
+         it can fund 999 shares at TWD 10 plus the 2.84715 fee. *)
       let () =
-        assert (minimum_commission.Live.action = Live.Orders [])
+        assert
+          (minimum_commission.Live.action
+           = Live.Orders
+               [{ action = "Buy"; cond = "Cash";
+                  lot = Shioaji.IntradayOdd; quantity = 999 }])
       in
 
       let decision =
@@ -6135,10 +6291,10 @@ let test_tw_live_decide_override () =
       let () =
         match decision.Live.action with
         | Live.Orders
-            ({ action = "Sell"; cond = "MarginTrading"; lots = 2 }
-             :: { action = "Buy"; cond = "MarginTrading"; lots = 2 }
-             :: { action = "Sell"; cond = "MarginTrading"; lots = 1 }
-             :: { action = "Buy"; cond = "MarginTrading"; lots = 1 }
+            ({ action = "Sell"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 2 }
+             :: { action = "Buy"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 2 }
+             :: { action = "Sell"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 1 }
+             :: { action = "Buy"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 1 }
              :: _) -> ()
         | _ -> assert false
       in
@@ -6281,24 +6437,65 @@ let test_tw_live_decide_override () =
              ~session_date:"2026-05-26" ~strat_path ~data_dir))))
 
 let tw_position cond lots : Shioaji.position =
-  { id = 0; code = "2330"; cond; lots; yd_lots = lots; avg_price = 10.;
-    last_price = 10.; loan_amount = 0.; interest = 0. }
+  { id = 0; code = "2330"; cond; shares = lots * 1000;
+    yd_shares = lots * 1000; avg_price = 10.; last_price = 10.;
+    loan_amount = 0.; interest = 0. }
 
-let tw_trade id (leg : Live.leg) status deal_lots : Shioaji.trade =
+let test_tw_position_detail_share_consistency () =
+  let position = { (tw_position "MarginTrading" 1) with Shioaji.id = 7 } in
+  let detail =
+    List.hd
+      (Shioaji.parse_position_details
+         (shioaji_fixture "position_detail.json"))
+  in
+  let load details ~detail_id =
+    let () = assert (detail_id = 7) in
+    details
+  in
+  (* The fixture's two Common lots imply 2,000 shares; holding 1,000
+     Share-unit margin shares cannot cover the details. *)
+  let () =
+    match
+      Live.fetch_position_details
+        ~position_details:(load [detail]) "2330" [position]
+    with
+    | _ -> assert false
+    | exception Failure reason ->
+        assert
+          (reason =
+           "TW position_detail quantity exceeds held margin shares for 2330")
+  in
+  let one = { detail with Shioaji.lots = 1 } in
+  (* Two separate 1-lot details also exceed a 1,000-share holding. *)
+  let () =
+    assert_failure (fun () ->
+      ignore
+        (Live.fetch_position_details
+           ~position_details:(load [one; one]) "2330" [position]))
+  in
+  (* Exactly one Common lot is consistent with 1,000 held shares. *)
+  assert
+    (Live.fetch_position_details
+       ~position_details:(load [one]) "2330" [position]
+     = [one])
+
+let tw_trade id (leg : Live.leg) status deal_quantity : Shioaji.trade =
   { order_id = id; code = "2330"; action = leg.action; cond = leg.cond;
-    status; order_lots = leg.lots; deal_lots;
-    deal_price = if deal_lots = 0 then None else Some 10.;
+    lot = leg.lot; status; order_quantity = leg.quantity; deal_quantity;
+    deal_price = if deal_quantity = 0 then None else Some 10.;
     order_datetime = "2026-05-22T13:20:00+08:00" }
 
-let execute_tw_test ?(now = fun () -> "2026-05-22T13:20:00+08:00")
+let execute_tw_test ?(mode = Live.Live) ?(bid = 10.) ?(ask = 10.)
+    ?(price = 10.) ?(log_odd = fun _ -> ())
+    ?(now = fun () -> "2026-05-22T13:20:00+08:00")
     ?(sleep = fun _ -> ())
     ?(place_order = fun _ ->
       { Shioaji.order_id = "1"; status = "PendingSubmit" })
     ?(orders_today = fun ~code:_ ~today:_ -> [])
     ?(costs = zero_costs) ~cash ~positions legs =
-  Live.execute_tw_legs ~now ~sleep ~place_order ~orders_today
-    ~exchange:"TSE" ~code:"2330" ~date:"2026-05-22" ~price:10.
-    ~financing_ratio:0.6 ~costs ~cash ~positions legs
+  Live.execute_tw_legs ~mode ~bid ~ask ~log_odd ~now ~sleep ~place_order
+    ~orders_today ~exchange:"TSE" ~code:"2330" ~date:"2026-05-22"
+    ~price ~financing_ratio:0.6 ~costs ~cash ~positions legs
 
 let scripted_placements entries =
   let entries = Queue.of_seq (List.to_seq entries) in
@@ -6308,32 +6505,249 @@ let scripted_placements entries =
     | Some (order_id, (expected : Live.leg)) ->
         let () = assert (request.action = expected.action) in
         let () = assert (request.cond = expected.cond) in
-        let () = assert (request.lots = expected.lots) in
+        let () = assert (request.lot = expected.lot) in
+        let () = assert (request.quantity = expected.quantity) in
         { Shioaji.order_id = order_id; status = "PendingSubmit" }
 
 let test_tw_default_sell_has_no_per_share_fee () =
-  let sell : Live.leg = { action = "Sell"; cond = "Cash"; lots = 1 } in
-  let buy : Live.leg = { action = "Buy"; cond = "Cash"; lots = 1 } in
+  let sell : Live.leg = { action = "Sell"; cond = "Cash"; lot = Shioaji.Common; quantity = 1 } in
+  let buy : Live.leg = { action = "Buy"; cond = "Cash"; lot = Shioaji.Common; quantity = 1 } in
   let result =
     execute_tw_test
       ~place_order:(scripted_placements ["1", sell; "2", buy])
       ~orders_today:(fun ~code:_ ~today:_ ->
         [tw_trade "1" sell "Filled" 1; tw_trade "2" buy "Filled" 1])
-      ~costs:(Engine.default_costs ~market:"tw" ~symbol:"2330")
+      ~costs:{ (Engine.default_costs ~market:"tw" ~symbol:"2330") with
+               Engine.fee_bps = 14.25 }
       ~cash:35.7 ~positions:[tw_position "Cash" 1] [sell; buy]
   in
-  (* Both scripted legs fill, so the execution records two trades. *)
-  let () = assert (List.length result.Live.trades = 2) in
-  (* TWD 35.70 + 10,000 sale - 2.85 commission - 30 tax exactly funds
-     the TWD 10,000 repurchase plus its TWD 2.85 commission. *)
+  (* List-rate settlement debits: 10,000 * 14.25 / 10,000 = 14.25 on
+     each side, plus 30 sell tax. 35.70 + 10,000 - 44.25 - 10,014.25
+     = -22.80, so the subsequent buy cannot be funded. *)
+  let () = assert (List.length result.Live.trades = 1) in
+  let () = assert (result.Live.remaining = [buy]) in
+  assert (Option.is_some result.Live.stop_reason)
+
+let test_tw_odd_order_body () =
+  let order action price : Shioaji.order_request =
+    { exchange = "TSE"; code = "2330"; action;
+      lot = Shioaji.IntradayOdd; quantity = 10; price; cond = "Cash";
+      custom_field = "bt0522" }
+  in
+  let buy = Shioaji.order_body (order "Buy" 10.1) in
+  let sell = Shioaji.order_body (order "Sell" 9.9) in
+  (* Buy uses the lot-book ask 10.1; sell uses bid 9.9. Both are LMT ROD. *)
+  let () = assert (contains buy {|"price":10.1|}) in
+  let () = assert (contains sell {|"price":9.9|}) in
+  let () = assert (contains buy {|"price_type":"LMT","order_type":"ROD","order_lot":"IntradayOdd"|}) in
+  let () = assert (contains sell {|"price_type":"LMT","order_type":"ROD","order_lot":"IntradayOdd"|}) in
+  let common =
+    Shioaji.order_body
+      { (order "Buy" 100.) with Shioaji.lot = Shioaji.Common;
+                                 quantity = 2 }
+  in
+  (* Common remains an MKT IOC order with two lots, not two shares. *)
+  let () =
+    assert
+      (contains common
+         {|"price":0,"quantity":2,"price_type":"MKT","order_type":"IOC","order_lot":"Common"|})
+  in
+  (* The broker boundary rejects zero or oversized intraday odd quantities. *)
+  let () =
+    assert_failure (fun () ->
+      ignore (Shioaji.order_body { (order "Buy" 10.1) with quantity = 0 }))
+  in
+  let () =
+    assert_failure (fun () ->
+      ignore (Shioaji.order_body { (order "Buy" 10.1) with quantity = 1000 }))
+  in
+  (* No margin-financed intraday odd order may reach the broker. *)
+  let () =
+    assert_failure (fun () ->
+      ignore
+        (Shioaji.order_body
+           { (order "Buy" 10.1) with cond = "MarginTrading" }))
+  in
+  (* 999 shares are still a legal intraday odd order. *)
+  let maximum = Shioaji.order_body { (order "Buy" 10.1) with quantity = 999 } in
+  assert (contains maximum {|"quantity":999|})
+
+let test_tw_odd_quote_and_skip () =
+  let odd : Live.leg =
+    { action = "Buy"; cond = "Cash"; lot = Shioaji.IntradayOdd;
+      quantity = 10 }
+  in
+  let common = { odd with lot = Shioaji.Common; quantity = 1 } in
+  let logs = Queue.create () in
+  let result =
+    execute_tw_test ~ask:Float.nan
+      ~log_odd:(fun message -> Queue.add message logs)
+      ~place_order:(scripted_placements ["1", common])
+      ~orders_today:(fun ~code:_ ~today:_ ->
+        [tw_trade "1" common "Filled" 1])
+      ~cash:10000. ~positions:[] [odd; common]
+  in
+  (* Missing ask skips only the odd buy; the funded Common order still fills. *)
+  let () = assert (Queue.take logs = "submitted=skip:odd-lot-quote-unavailable") in
+  let () = assert (List.length result.Live.trades = 1) in
   let () = assert (result.Live.remaining = []) in
-  (* Exact funding leaves no stop reason. *)
+  let () = assert (result.Live.stop_reason = None) in
+  let quotes = Queue.create () in
+  let sell = { odd with action = "Sell"; quantity = 10 } in
+  let buy =
+    execute_tw_test ~ask:10.1 ~cash:102. ~positions:[]
+      ~place_order:(fun request ->
+        let () = Queue.add request.Shioaji.price quotes in
+        { Shioaji.order_id = "odd-buy"; status = "Submitted" })
+      [odd]
+  in
+  (* 10 x 10.1 + a TWD 1 fee reserves TWD 102 without final-fill polling. *)
+  let () = assert (buy.Live.stop_reason = None) in
+  let () = assert (Queue.take quotes = 10.1) in
+  let sold =
+    execute_tw_test ~bid:9.9 ~cash:0.
+      ~positions:[{ (tw_position "Cash" 1) with Shioaji.shares = 10 }]
+      ~place_order:(fun request ->
+        let () = Queue.add request.Shioaji.price quotes in
+        { Shioaji.order_id = "odd-sell"; status = "Submitted" })
+      [sell]
+  in
+  let () = assert (sold.Live.stop_reason = None) in
+  assert (Queue.take quotes = 9.9)
+
+let test_tw_odd_independence_and_guard () =
+  let common : Live.leg =
+    { action = "Buy"; cond = "Cash"; lot = Shioaji.Common; quantity = 1 }
+  in
+  let odd =
+    { common with lot = Shioaji.IntradayOdd; quantity = 500 }
+  in
+  let failed =
+    execute_tw_test ~cash:15000. ~positions:[]
+      ~place_order:(scripted_placements ["common", common; "odd", odd])
+      ~orders_today:(fun ~code:_ ~today:_ ->
+        [tw_trade "common" common "Failed" 0])
+      [common; odd]
+  in
+  (* A definitively failed Common order cannot suppress its odd companion. *)
+  let () = assert (failed.Live.remaining = []) in
+  let () = assert (failed.Live.stop_reason = None) in
+  let () = assert (List.length failed.Live.trades = 1) in
+  let logs = Queue.create () in
+  let paper =
+    execute_tw_test ~mode:Live.Paper ~cash:10000. ~positions:[]
+      ~log_odd:(fun message -> Queue.add message logs)
+      ~place_order:(scripted_placements ["common", common])
+      ~orders_today:(fun ~code:_ ~today:_ ->
+        [tw_trade "common" common "Filled" 1])
+      [odd; common]
+  in
+  (* Simulation never sends odd orders but logs the explicit skip. *)
+  let () =
+    assert
+      (Queue.take logs = "submitted=skip:odd-lot-unsupported-in-simulation")
+  in
+  let () = assert (paper.Live.stop_reason = None) in
+  let sell = { odd with action = "Sell"; quantity = 1 } in
+  let guarded =
+    execute_tw_test ~cash:100. ~positions:[]
+      ~place_order:(fun _ -> assert false)
+      ~orders_today:(fun ~code:_ ~today:_ ->
+        [tw_trade "earlier" sell "Filled" 1])
+      [{ odd with quantity = 1 }]
+  in
+  (* An opposite IntradayOdd fill already listed today forbids a round trip. *)
+  let () = assert (guarded.Live.remaining = [{ odd with quantity = 1 }]) in
+  let () = assert (Option.is_some guarded.Live.stop_reason) in
+  let zero = { odd with quantity = 1 } in
+  let declined =
+    execute_tw_test
+      ~costs:{ (Engine.default_costs ~market:"tw" ~symbol:"2330") with
+               Engine.fee_bps = 14.25 }
+      ~cash:10020. ~positions:[]
+      ~place_order:(fun request ->
+        if request.Shioaji.lot = Shioaji.IntradayOdd then
+          { Shioaji.order_id = "rejected"; status = "Rejected" }
+        else
+          { Shioaji.order_id = "common"; status = "PendingSubmit" })
+      ~orders_today:(fun ~code:_ ~today:_ ->
+        [tw_trade "common" common "Filled" 1])
+      [zero; common]
+  in
+  (* A synchronously rejected odd buy must not reserve its nonexistent order. *)
+  let () = assert (declined.Live.stop_reason = None) in
+  assert (List.length declined.Live.trades = 1)
+
+let test_tw_odd_reservation_and_minimums () =
+  let costs =
+    { (Engine.default_costs ~market:"tw" ~symbol:"2330") with
+      Engine.fee_bps = 14.25 }
+  in
+  let odd : Live.leg =
+    { action = "Buy"; cond = "Cash"; lot = Shioaji.IntradayOdd;
+      quantity = 1 }
+  in
+  let common = { odd with lot = Shioaji.Common; quantity = 1 } in
+  let reserved =
+    execute_tw_test ~costs ~cash:10025. ~positions:[]
+      ~place_order:(scripted_placements ["odd", odd])
+      ~orders_today:(fun ~code:_ ~today:_ -> [])
+      [odd; common]
+  in
+  (* Odd 1 x 10 + min fee 1 reserves 11. Common 1000 x 10 +
+     list-rate fee 14.25 needs 10014.25; remaining 10014 is short. *)
+  let () = assert (reserved.Live.remaining = [common]) in
+  let () = assert (Option.is_some reserved.Live.stop_reason) in
+  let odd500 = { odd with quantity = 500 } in
+  let split =
+    execute_tw_test ~price:1. ~ask:1. ~bid:1. ~costs ~cash:1504.4
+      ~positions:[]
+      ~place_order:(scripted_placements
+        ["common", common; "odd500", odd500])
+      ~orders_today:(fun ~code:_ ~today:_ ->
+        [{ (tw_trade "common" common "Filled" 1) with
+           Shioaji.deal_price = Some 1. }])
+      [common; odd500; odd]
+  in
+  (* Common costs 1000 x 14.25 / 10000 = 1.425; odd 500 costs
+     max(0.7125, 1) = 1. After both, 1504.4 - 1001.425 - 501
+     = 1.975, short of a third odd buy's 1 + 1 = 2. *)
+  let () = assert (split.Live.remaining = [odd]) in
+  let () = assert (Option.is_some split.Live.stop_reason) in
+  let () = assert (List.length split.Live.trades = 1) in
+  let odd_sell = { odd with action = "Sell"; quantity = 10 } in
+  let no_credit =
+    execute_tw_test ~cash:0. ~positions:[
+      { (tw_position "Cash" 1) with Shioaji.shares = 10 }]
+      ~place_order:(scripted_placements ["odd-sell", odd_sell])
+      ~orders_today:(fun ~code:_ ~today:_ -> [])
+      [odd_sell; common]
+  in
+  (* An unfilled ROD odd sale provides no same-session cash for Common buy. *)
+  let () = assert (no_credit.Live.remaining = [common]) in
+  assert (Option.is_some no_credit.Live.stop_reason)
+
+let test_tw_common_fill_shares () =
+  let sell : Live.leg =
+    { action = "Sell"; cond = "Cash"; lot = Shioaji.Common; quantity = 86 }
+  in
+  let buy = { sell with action = "Buy" } in
+  let result =
+    execute_tw_test ~cash:0. ~positions:[tw_position "Cash" 86]
+      ~place_order:(scripted_placements ["sell", sell; "buy", buy])
+      ~orders_today:(fun ~code:_ ~today:_ ->
+        [tw_trade "sell" sell "Filled" 86;
+         tw_trade "buy" buy "Filled" 86])
+      [sell; buy]
+  in
+  (* 86 Common lots x 1000 shares x TWD 10 funds a TWD 860,000 buy. *)
+  let () = assert (List.length result.Live.trades = 2) in
   assert (result.Live.stop_reason = None)
 
 let test_tw_execution_stops_on_predecessor () =
-  let sell : Live.leg = { action = "Sell"; cond = "Cash"; lots = 2 } in
+  let sell : Live.leg = { action = "Sell"; cond = "Cash"; lot = Shioaji.Common; quantity = 2 } in
   let buy : Live.leg =
-    { action = "Buy"; cond = "MarginTrading"; lots = 2 }
+    { action = "Buy"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 2 }
   in
   let run trades =
     let result =
@@ -6357,7 +6771,7 @@ let test_tw_execution_stops_on_predecessor () =
   run [{ (tw_trade "1" sell "Filled" 2) with Shioaji.action = "Buy" }]
 
 let test_tw_execution_times_out () =
-  let buy : Live.leg = { action = "Buy"; cond = "Cash"; lots = 1 } in
+  let buy : Live.leg = { action = "Buy"; cond = "Cash"; lot = Shioaji.Common; quantity = 1 } in
   let result =
     execute_tw_test
       ~place_order:(scripted_placements ["1", buy])
@@ -6371,12 +6785,12 @@ let test_tw_execution_times_out () =
   assert (Option.is_some result.Live.stop_reason)
 
 let test_tw_execution_polls_zero_qty_pending () =
-  let buy : Live.leg = { action = "Buy"; cond = "Cash"; lots = 1 } in
+  let buy : Live.leg = { action = "Buy"; cond = "Cash"; lot = Shioaji.Common; quantity = 1 } in
   let statuses =
     Queue.of_seq
       (List.to_seq
          [[{ (tw_trade "1" buy "PendingSubmit" 0) with
-              Shioaji.order_lots = 0 }];
+              Shioaji.order_quantity = 0 }];
           [tw_trade "1" buy "Filled" 1]])
   in
   let result =
@@ -6391,9 +6805,9 @@ let test_tw_execution_polls_zero_qty_pending () =
   assert (result.Live.stop_reason = None)
 
 let test_tw_execution_rechecks_cutoff () =
-  let first : Live.leg = { action = "Buy"; cond = "Cash"; lots = 1 } in
+  let first : Live.leg = { action = "Buy"; cond = "Cash"; lot = Shioaji.Common; quantity = 1 } in
   let second : Live.leg =
-    { action = "Buy"; cond = "MarginTrading"; lots = 1 }
+    { action = "Buy"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 1 }
   in
   let times =
     Queue.of_seq
@@ -6415,12 +6829,12 @@ let test_tw_execution_rechecks_cutoff () =
   assert (Option.is_some result.Live.stop_reason)
 
 let test_tw_execution_advances_when_funded () =
-  let sell : Live.leg = { action = "Sell"; cond = "Cash"; lots = 1 } in
+  let sell : Live.leg = { action = "Sell"; cond = "Cash"; lot = Shioaji.Common; quantity = 1 } in
   let refinance : Live.leg =
-    { action = "Buy"; cond = "MarginTrading"; lots = 1 }
+    { action = "Buy"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 1 }
   in
   let ordinary : Live.leg =
-    { action = "Buy"; cond = "MarginTrading"; lots = 1 }
+    { action = "Buy"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 1 }
   in
   let result =
     execute_tw_test
@@ -6442,14 +6856,14 @@ let test_tw_execution_advances_when_funded () =
   assert (result.Live.stop_reason = None)
 
 let test_tw_execution_caps_rounded_funding () =
-  let sell : Live.leg = { action = "Sell"; cond = "Cash"; lots = 1 } in
+  let sell : Live.leg = { action = "Sell"; cond = "Cash"; lot = Shioaji.Common; quantity = 1 } in
   let refinance : Live.leg =
-    { action = "Buy"; cond = "MarginTrading"; lots = 1 }
+    { action = "Buy"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 1 }
   in
   let ordinary : Live.leg =
-    { action = "Buy"; cond = "MarginTrading"; lots = 2 }
+    { action = "Buy"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 2 }
   in
-  let capped = { ordinary with Live.lots = 1 } in
+  let capped = { ordinary with Live.quantity = 1 } in
   let result =
     execute_tw_test
       ~place_order:
@@ -6464,7 +6878,7 @@ let test_tw_execution_caps_rounded_funding () =
   (* The confirmed trade order_lots fields show requests of 1, 1, and 1. *)
   let () =
     assert
-      (List.map (fun (trade : Shioaji.trade) -> trade.order_lots)
+      (List.map (fun (trade : Shioaji.trade) -> trade.order_quantity)
          result.Live.trades
        = [1; 1; 1])
   in
@@ -6472,25 +6886,25 @@ let test_tw_execution_caps_rounded_funding () =
   let () =
     assert
       (result.Live.remaining =
-       [{ Live.action = "Buy"; cond = "MarginTrading"; lots = 1 }])
+       [{ Live.action = "Buy"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 1 }])
   in
   (* Capping the ordinary buy stops execution with its remainder retained. *)
   assert (Option.is_some result.Live.stop_reason)
 
 let test_tw_execution_tracks_refinanced_loan () =
   let cash_sell : Live.leg =
-    { action = "Sell"; cond = "Cash"; lots = 1 }
+    { action = "Sell"; cond = "Cash"; lot = Shioaji.Common; quantity = 1 }
   in
   let margin_buy : Live.leg =
-    { action = "Buy"; cond = "MarginTrading"; lots = 1 }
+    { action = "Buy"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 1 }
   in
   let margin_sell : Live.leg =
-    { action = "Sell"; cond = "MarginTrading"; lots = 1 }
+    { action = "Sell"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 1 }
   in
   let ordinary : Live.leg =
-    { action = "Buy"; cond = "MarginTrading"; lots = 2 }
+    { action = "Buy"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 2 }
   in
-  let capped = { ordinary with Live.lots = 1 } in
+  let capped = { ordinary with Live.quantity = 1 } in
   let result =
     execute_tw_test
       ~place_order:
@@ -6509,7 +6923,7 @@ let test_tw_execution_tracks_refinanced_loan () =
   (* The confirmed order_lots fields show five one-lot requests. *)
   let () =
     assert
-      (List.map (fun (trade : Shioaji.trade) -> trade.order_lots)
+      (List.map (fun (trade : Shioaji.trade) -> trade.order_quantity)
          result.Live.trades
        = [1; 1; 1; 1; 1])
   in
@@ -6517,14 +6931,14 @@ let test_tw_execution_tracks_refinanced_loan () =
   let () =
     assert
       (result.Live.remaining =
-       [{ Live.action = "Buy"; cond = "MarginTrading"; lots = 1 }])
+       [{ Live.action = "Buy"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 1 }])
   in
   (* Capping the ordinary buy stops execution with its remainder retained. *)
   assert (Option.is_some result.Live.stop_reason)
 
 let test_tw_execution_remaining_stops () =
-  let buy : Live.leg = { action = "Buy"; cond = "Cash"; lots = 1 } in
-  let sell : Live.leg = { action = "Sell"; cond = "Cash"; lots = 2 } in
+  let buy : Live.leg = { action = "Buy"; cond = "Cash"; lot = Shioaji.Common; quantity = 1 } in
+  let sell : Live.leg = { action = "Sell"; cond = "Cash"; lot = Shioaji.Common; quantity = 2 } in
   let run ?(cash = 10000.) ?(positions = [])
       ?(place_order = scripted_placements ["1", buy]) statuses leg =
     execute_tw_test ~place_order
@@ -6544,7 +6958,7 @@ let test_tw_execution_remaining_stops () =
   (* A two-lot status cannot confirm the one-lot request. *)
   let wrong_quantity =
     run
-      [{ (tw_trade "1" buy "Submitted" 0) with Shioaji.order_lots = 2 }]
+      [{ (tw_trade "1" buy "Submitted" 0) with Shioaji.order_quantity = 2 }]
       buy
   in
   let () = assert (Option.is_some wrong_quantity.Live.stop_reason) in
@@ -6640,12 +7054,12 @@ let test_shioaji_settlement_amounts () =
 
 let test_shioaji_weighted_fill_price () =
   let raw =
-    {|[{"contract":{"code":"2890"},"order":{"id":"weighted","action":"Buy","order_cond":"Cash","quantity":3},"status":{"id":"weighted","status":"Filled","order_quantity":3,"deal_quantity":3,"order_datetime":"2026-05-22T13:20:00+08:00","deals":[{"price":27,"quantity":1},{"price":30,"quantity":2}]}}]|}
+    {|[{"contract":{"code":"2890"},"order":{"id":"weighted","action":"Buy","order_cond":"Cash","order_lot":"Common","quantity":3},"status":{"id":"weighted","status":"Filled","order_quantity":3,"deal_quantity":3,"order_datetime":"2026-05-22T13:20:00+08:00","deals":[{"price":27,"quantity":1},{"price":30,"quantity":2}]}}]|}
   in
   match Shioaji.parse_orders_today ~code:"2890" ~today:"2026-05-22" raw with
   | [trade] ->
       (* Fixture deal quantities 1 + 2 = 3 lots. *)
-      let () = assert (trade.Shioaji.deal_lots = 3) in
+      let () = assert (trade.Shioaji.deal_quantity = 3) in
       (* (TWD 27 * 1 + TWD 30 * 2) / 3 = TWD 29. *)
       assert (trade.Shioaji.deal_price = Some 29.)
   | _ -> assert false
@@ -6823,6 +7237,7 @@ let () =
   let () = test_shioaji_request_headers () in
   let () = test_shioaji_snapshot_parse () in
   let () = test_shioaji_positions_parse () in
+  let () = test_tw_live_positions_share () in
   let () = test_shioaji_position_details_parse () in
   let () = test_shioaji_balance_parse () in
   let () = test_shioaji_placed_parse () in
@@ -6833,12 +7248,20 @@ let () =
   let () = test_tw_live_equity () in
   let () = test_tw_production_cash () in
   let () = test_tw_live_plan_legs () in
+  let () = test_tw_odd_sell_never_precedes_buy () in
+  let () = test_tw_live_legs_split () in
   let () = test_tw_live_startup_guard () in
   let () = test_tw_maturity_rollover_legs () in
+  let () = test_tw_position_detail_share_consistency () in
   let () = test_tw_live_decide_override () in
   let () = test_tw_execution_stops_on_predecessor () in
   let () = test_tw_execution_times_out () in
   let () = test_tw_default_sell_has_no_per_share_fee () in
+  let () = test_tw_odd_order_body () in
+  let () = test_tw_odd_quote_and_skip () in
+  let () = test_tw_odd_independence_and_guard () in
+  let () = test_tw_odd_reservation_and_minimums () in
+  let () = test_tw_common_fill_shares () in
   let () = test_tw_execution_polls_zero_qty_pending () in
   let () = test_tw_execution_rechecks_cutoff () in
   let () = test_tw_execution_advances_when_funded () in

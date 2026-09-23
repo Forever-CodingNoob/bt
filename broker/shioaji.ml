@@ -18,8 +18,8 @@ type position = {
   id : int;
   code : string;
   cond : string;
-  lots : int;
-  yd_lots : int;
+  shares : int;
+  yd_shares : int;
   avg_price : float;
   last_price : float;
   loan_amount : float;
@@ -33,11 +33,15 @@ type position_detail = {
   lots : int;
 }
 
+type lot = Common | IntradayOdd
+
 type order_request = {
   exchange : string;
   code : string;
   action : string;
-  lots : int;
+  lot : lot;
+  quantity : int;
+  price : float;
   cond : string;
   custom_field : string;
 }
@@ -52,9 +56,10 @@ type trade = {
   code : string;
   action : string;
   cond : string;
+  lot : lot;
   status : string;
-  order_lots : int;
-  deal_lots : int;
+  order_quantity : int;
+  deal_quantity : int;
   deal_price : float option;
   order_datetime : string;
 }
@@ -228,13 +233,13 @@ let parse_snapshot raw =
   | _ -> failwith "invalid Shioaji snapshot response"
 
 let parse_position = function
-  | [id; code; cond; lots; yd_lots; avg_price; last_price; loan_amount;
+  | [id; code; cond; shares; yd_shares; avg_price; last_price; loan_amount;
      interest] ->
       { id = nonnegative_int_field "position id" id;
         code;
         cond;
-        lots = nonnegative_int_field "position quantity" lots;
-        yd_lots = nonnegative_int_field "position yd_quantity" yd_lots;
+        shares = nonnegative_int_field "position quantity" shares;
+        yd_shares = nonnegative_int_field "position yd_quantity" yd_shares;
         avg_price = nonnegative_float_field "position price" avg_price;
         last_price =
           nonnegative_float_field "position last_price" last_price;
@@ -319,24 +324,26 @@ let deal_fields value =
       | false -> failwith "invalid Shioaji trade deal value"
 
 let parse_trade = function
-  | [order_id; code; action; cond; status; order_lots; deal_lots;
-     deals; order_datetime] ->
-      let order_lots =
-        nonnegative_int_field "trade order_quantity" order_lots
+  | [order_id; code; action; cond; lot; status; order_quantity;
+     deal_quantity; deals; order_datetime] ->
+      let order_quantity =
+        nonnegative_int_field "trade order_quantity" order_quantity
       in
-      let deal_lots = nonnegative_int_field "trade deal_quantity" deal_lots in
-      let deal_price, confirmed_lots = deal_fields deals in
-      (match deal_lots <= order_lots && confirmed_lots = deal_lots with
+      let deal_quantity =
+        nonnegative_int_field "trade deal_quantity" deal_quantity
+      in
+      let deal_price, confirmed_quantity = deal_fields deals in
+      let lot =
+        match lot with
+        | "Common" -> Common
+        | "IntradayOdd" -> IntradayOdd
+        | _ -> failwith "invalid Shioaji trade order_lot"
+      in
+      (match deal_quantity <= order_quantity
+             && confirmed_quantity = deal_quantity with
        | true ->
-           { order_id;
-             code;
-             action;
-             cond;
-             status;
-             order_lots;
-             deal_lots;
-             deal_price;
-             order_datetime }
+           { order_id; code; action; cond; lot; status; order_quantity;
+             deal_quantity; deal_price; order_datetime }
        | false -> failwith "invalid Shioaji trade quantities")
   | _ -> failwith "invalid Shioaji trades response"
 
@@ -344,7 +351,7 @@ let parse_orders_today ~code ~today raw =
   jq_rows
     ~args:["--arg"; "code"; code; "--arg"; "today"; today]
     "trades"
-    "def order_time: if (.status.order_datetime | type) == \"string\" then .status.order_datetime elif (.status.order_ts | type) == \"number\" then ((.status.order_ts | floor) + 28800 | strftime(\"%Y-%m-%dT%H:%M:%S\")) + \"+08:00\" else error(\"invalid trade timestamp\") end; map(select(.contract.code == $code and (order_time | startswith($today)))) | map(if ((.status.order_quantity | type) == \"number\" and (.status.deal_quantity | type) == \"number\" and (.status.deals | type) == \"array\" and all(.status.deals[]; (.price | type) == \"number\" and (.quantity | type) == \"number\")) then [.order.id, .contract.code, .order.action, .order.order_cond, .status.status, (.status.order_quantity | tostring), (.status.deal_quantity | tostring), (.status.deals | map([(.price | tostring), (.quantity | tostring)] | join(\",\")) | join(\";\")), order_time] | @tsv else error(\"invalid trade fields\") end) | join(\"\\n\")"
+    "def order_time: if (.status.order_datetime | type) == \"string\" then .status.order_datetime elif (.status.order_ts | type) == \"number\" then ((.status.order_ts | floor) + 28800 | strftime(\"%Y-%m-%dT%H:%M:%S\")) + \"+08:00\" else error(\"invalid trade timestamp\") end; map(select(.contract.code == $code and (order_time | startswith($today)))) | map(if ((.status.order_quantity | type) == \"number\" and (.status.deal_quantity | type) == \"number\" and (.status.deals | type) == \"array\" and all(.status.deals[]; (.price | type) == \"number\" and (.quantity | type) == \"number\")) then [.order.id, .contract.code, .order.action, .order.order_cond, .order.order_lot, .status.status, (.status.order_quantity | tostring), (.status.deal_quantity | tostring), (.status.deals | map((.price | tostring) + \",\" + (.quantity | tostring)) | join(\";\")), order_time] | @tsv else error(\"invalid trade fields\") end) | join(\"\\n\")"
     raw
   |> List.map parse_trade
 
@@ -413,7 +420,7 @@ let snapshot ~exchange ~code =
 
 let positions () =
   let body =
-    jq_object "positions" [] "{account_type:\"S\",unit:\"Common\"}"
+    jq_object "positions" [] "{account_type:\"S\",unit:\"Share\"}"
   in
   request ~method_:"POST" ~body ~path:"/api/v1/portfolio/position_unit" ()
   |> expect_ok "positions" parse_positions
@@ -442,23 +449,45 @@ let settlements () =
   request ~method_:"POST" ~body ~path:"/api/v1/portfolio/settlements" ()
   |> expect_ok "settlements" parse_settlements
 
+let order_body order =
+  let quantity =
+    match order.quantity > 0 with
+    | true -> order.quantity
+    | false -> failf "invalid Shioaji order quantity %d" order.quantity
+  in
+  let lot, price, price_type, order_type =
+    match order.lot with
+    | Common -> "Common", 0., "MKT", "IOC"
+    | IntradayOdd ->
+        let () =
+          if quantity > 999 then
+            failf "invalid Shioaji intraday odd quantity %d" quantity
+        in
+        let () =
+          if order.cond <> "Cash" then
+            failf "invalid Shioaji intraday odd condition %s" order.cond
+        in
+        let () =
+          if not (Float.is_finite order.price) || order.price <= 0. then
+            failwith "invalid intraday odd limit price"
+        in
+        "IntradayOdd", order.price, "LMT", "ROD"
+  in
+  jq_object "place_order"
+    ["--arg"; "exchange"; order.exchange;
+     "--arg"; "code"; order.code;
+     "--arg"; "action"; order.action;
+     "--argjson"; "quantity"; string_of_int quantity;
+     "--argjson"; "price"; Printf.sprintf "%.10g" price;
+     "--arg"; "price_type"; price_type;
+     "--arg"; "order_type"; order_type;
+     "--arg"; "lot"; lot;
+     "--arg"; "cond"; order.cond;
+     "--arg"; "custom_field"; order.custom_field]
+    "{contract:{security_type:\"STK\",exchange:$exchange,code:$code},stock_order:{action:$action,price:$price,quantity:$quantity,price_type:$price_type,order_type:$order_type,order_lot:$lot,order_cond:$cond,custom_field:$custom_field}}"
+
 let place_order order =
-  let lots =
-    match order.lots > 0 with
-    | true -> order.lots
-    | false -> failf "invalid Shioaji order quantity %d" order.lots
-  in
-  let body =
-    jq_object "place_order"
-      ["--arg"; "exchange"; order.exchange;
-       "--arg"; "code"; order.code;
-       "--arg"; "action"; order.action;
-       "--argjson"; "lots"; string_of_int lots;
-       "--arg"; "cond"; order.cond;
-       "--arg"; "custom_field"; order.custom_field]
-      "{contract:{security_type:\"STK\",exchange:$exchange,code:$code},stock_order:{action:$action,price:0,quantity:$lots,price_type:\"MKT\",order_type:\"IOC\",order_lot:\"Common\",order_cond:$cond,custom_field:$custom_field}}"
-  in
-  request ~method_:"POST" ~body ~path:"/api/v1/order/place_order" ()
+  request ~method_:"POST" ~body:(order_body order) ~path:"/api/v1/order/place_order" ()
   |> expect_ok "order submission" parse_placed
 
 let orders_today ~code ~today =

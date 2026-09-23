@@ -1,11 +1,12 @@
 (** Alpaca account mode used for live decisions. *)
 type mode = Alpaca.mode = Paper | Live
 
-(** One Shioaji Common-lot order leg. *)
+(** One TW stock order, with quantity in lots or shares according to [lot]. *)
 type leg = {
   action : string;
   cond : string;
-  lots : int;
+  lot : Shioaji.lot;
+  quantity : int;
 }
 
 
@@ -29,8 +30,8 @@ type decision = {
   action : action;
 }
 
-(** Result of submitting a TW plan sequentially. [remaining] was never posted;
-    [trades] contains the final observed status for every posted leg. *)
+(** TW submission result. [remaining] was never posted; [trades] holds
+    observed Common statuses. Pending odd ROD orders reconcile after close. *)
 type tw_execution = {
   trades : Shioaji.trade list;
   remaining : leg list;
@@ -87,11 +88,11 @@ val exchange_of_symbol : data_dir:string -> string -> string
 val tw_production_cash :
   balance:float -> settlements:Shioaji.settlement list -> float
 
-(** Value spendable cash and Common-lot positions net of loans and interest. *)
+(** Value cash and share-unit positions net of loans and interest. *)
 val equity_of : cash:float -> positions:Shioaji.position list -> float
 
-(** Convert a one-asset value-denominated plan to board-lot order legs,
-    retaining each cash and margin refinance sell-and-rebuy pair. *)
+(** Convert a one-asset absolute-TWD plan to Common and cash IntradayOdd
+    orders, preserving refinance sell-and-rebuy pairs. *)
 val legs_of_plan : price:float -> Engine.fill_plan -> leg list
 
 (** Return 18-calendar-month TW margin-lot sell/rebuy rollover pairs in
@@ -102,15 +103,24 @@ val maturity_rollover_legs :
   Shioaji.position_detail list ->
   leg list
 
+(** Fetch each margin position's dated details and reject detail lots whose
+    cumulative share count exceeds that position's Share-unit holding. *)
+val fetch_position_details :
+  ?position_details:(detail_id:int -> Shioaji.position_detail list) ->
+  string -> Shioaji.position list -> Shioaji.position_detail list
+
 (** Select the TW daemon phase from an RFC3339 instant in Taipei time. *)
 val taipei_phase :
   now:string ->
   [`Weekend | `Before_fetch | `Fetch | `Decide | `After_close]
 
-(** Submit TW legs in order with a fresh time check and fill confirmation
-    before each successor. Buy quantities are capped to confirmed cash while
-    margin principal and interest follow confirmed inventory changes. *)
+(** Submit TW legs in order. Common fills settle before the next leg;
+    intraday-odd ROD orders reserve buy cash without waiting for final fills. *)
 val execute_tw_legs :
+  ?log_odd:(string -> unit) ->
+  mode:mode ->
+  bid:float ->
+  ask:float ->
   now:(unit -> string) ->
   sleep:(float -> unit) ->
   place_order:(Shioaji.order_request -> Shioaji.placed) ->
