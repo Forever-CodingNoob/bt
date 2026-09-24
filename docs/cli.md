@@ -72,19 +72,19 @@ bt live STRAT [--live] [--equity TWD] [--data-dir DIR]
 
 ## `bt fetch`
 
-Downloads price data and stores it in a local CSV cache. Taiwan data comes from [FinMind](https://finmind.github.io). US data comes from [Tiingo](https://www.tiingo.com). Use the positional form for new commands. The separate `--market` and `--symbol` options are an equivalent form.
+`bt fetch` downloads price data into a local CSV cache. Taiwan data comes from [FinMind](https://finmind.github.io) and US data from [Tiingo](https://www.tiingo.com). Prefer the positional `MARKET/SYMBOL` form; the `--market` and `--symbol` options are equivalent.
 
 ### Fetch options
 
 | Argument or option | Default | Description |
 |---|---|---|
-| `MARKET/SYMBOL` | - | Select one market and symbol, for example `tw/0050`. The market must be `tw` or `us`. Use this argument or use both options below. |
+| `MARKET/SYMBOL` | - | Select one market and symbol, for example `tw/0050`. The market must be `tw` or `us`. Use this argument or both options below. |
 | `--market tw\|us` | - | Select the Taiwan or US market when you do not use the positional argument. |
 | `--symbol SYM` | - | Select the symbol when you do not use the positional argument. |
-| `--from YYYY-MM-DD` | `1994-10-01` | Set the first date to request. |
+| `--from YYYY-MM-DD` | `1994-10-01` for a new cache | Set the first date to request. |
 | `--to YYYY-MM-DD` | today | Set the last date to request. |
 | `--data-dir DIR` | `data/` | Set the cache directory. |
-| `--bars 1m` | daily | Fetch US regular-session SIP minute bars from Alpaca; other resolutions are rejected. |
+| `--bars 1m` | daily | Fetch US regular-session SIP minute bars from Alpaca. Only `1m` is accepted. |
 | `-h`, `-help`, `--help` | - | Print the fetch options to standard output and exit with code 0. |
 
 ### API tokens
@@ -96,7 +96,7 @@ export FINMIND_TOKEN="your_finmind_token"   # for tw
 export TIINGO_TOKEN="your_tiingo_api_token" # for us
 ```
 
-The command stops with code 1 if the required token is missing or empty.
+`bt fetch` exits with code 1 when the required token is missing or empty.
 
 ### Cache files
 
@@ -117,27 +117,27 @@ The command stops with code 1 if the required token is missing or empty.
 Replace `data/` with the value of `--data-dir` when you set that option.
 
 > [!TIP]
-> A plain fetch updates an existing TW cache forward only. Pass an explicit `--from` earlier than the cache start to backfill.
+> Without `--from`, `bt fetch` extends an existing cache forward only. To backfill, pass a `--from` date earlier than the cache start.
 
-For both markets, `bt fetch` adds data at both ends of the cache. If `--from` is earlier than the first cached date, it fetches the missing earlier range and prepends it. It also fetches dates after the last cached date and appends them. Cached rows win at both boundaries. A repeated fetch is idempotent.
+For both markets, `bt fetch` can extend the cache at both ends. When `--from` is earlier than the first cached date, it fetches the missing earlier range and prepends it. It then fetches dates after the last cached date and appends them. Cached rows win at both boundaries, so a repeated fetch is idempotent.
 
-For Taiwan, the command fetches the full dividend-factor history and rewrites `SYM.div.csv` on each run, fetches cash dividends into `SYM.cashdiv.csv`, and fetches split, capital-reduction, and par-value-change events into `SYM.events.csv`. If the source omits a pay date, the loader uses one calendar month after the ex-date.
+For Taiwan, each run also rewrites three adjustment files from their full history: dividend factors in `SYM.div.csv`, cash dividends in `SYM.cashdiv.csv`, and split, capital-reduction, and par-value-change events in `SYM.events.csv`. If the source omits a pay date, the loader uses one calendar month after the ex-date.
 
 > [!WARNING]
-> If the FinMind cash-dividend API returns status 400, 402, or 403, `bt fetch` derives cash from the legacy dividend factors and treats every factor as cash-only. This is exact for cash-only TW ETFs but can misprice stocks that also pay stock dividends.
+> If the FinMind cash-dividend API returns status 400, 402, or 403, `bt fetch` derives cash from the legacy dividend factors and treats every factor as cash-only. The result is exact for cash-only TW ETFs but can misprice stocks that also pay stock dividends.
 
 Other fetch failures keep an existing cash-dividend file; without one, `bt run` warns and continues without cash credits.
 
-For every Taiwan fetch, the command also downloads the `TaiwanStockInfo` table and rewrites `data/tw/stockinfo.csv`. It keeps only `twse` and `tpex` rows. If this fetch fails, the command keeps the existing stock-info cache. An unknown symbol or a missing cache makes `bt run` warn and use the TWSE financing ratio of 60%.
+For every Taiwan fetch, the command also requests the symbol's rows from the `TaiwanStockInfo` table and merges them into `data/tw/stockinfo.csv`, replacing that symbol's earlier rows. It keeps only `twse` and `tpex` rows. If this request fails, the command keeps the existing stock-info cache. An unknown symbol or a missing cache makes `bt run` warn and use the TWSE financing ratio of 60%.
 
 > [!WARNING]
 > The stock-info table selects the standard exchange ratio only. The engine assumes every Taiwan symbol is marginable and does not check broker eligibility or reduced ratios. Leveraged ETFs such as 00685L have historically been excluded from margin financing or assigned reduced ratios.
 
-For US, the command derives all four files from one Tiingo response: raw prices, signal-plane dividend factors, cash dividends (credited at the ex-date; Tiingo provides no pay date), and split events. Split factors are snapped to the nearest small rational to remove vendor floating-point noise.
+For US, the command derives all four files from the same Tiingo response: raw prices, signal-plane dividend factors, cash dividends, and split events. Tiingo provides no pay date, so `bt run` credits US cash dividends at the ex-date. The command snaps split factors to the nearest small rational to remove vendor floating-point noise. If a Tiingo request fails, the command prints a warning, keeps any cached files, and exits with code 0.
 
 ### Price adjustments
 
-The engine loads two price series for every asset. The signal series includes cash-dividend and corporate-event adjustments; the DSL evaluates indicators and rules on this series. The money series includes split, capital-reduction, par-value-change, and stock-dividend adjustments but leaves cash-dividend drops in place. The engine uses the money series for fills, inventory, loans, collateral, and equity.
+The engine loads two price series for every asset. The signal series includes cash-dividend and corporate-event adjustments, and the DSL evaluates indicators and rules on it. The money series includes split, capital-reduction, par-value-change, and stock-dividend adjustments but leaves cash-dividend drops in place. The engine uses the money series for fills, inventory, loans, collateral, and equity.
 
 For Taiwan, `<symbol>.div.csv` supplies the full dividend adjustment to the signal series and `<symbol>.cashdiv.csv` separates the cash component for the money series and ledger. `<symbol>.events.csv` supplies exact split, capital-reduction, and par-value-change factors to both price series. Share-count event factors also restate earlier volume to the post-event share basis. Cash-dividend factors do not change volume.
 
@@ -145,29 +145,29 @@ For US assets, `<symbol>.div.csv` supplies the dividend adjustment to the signal
 
 ## `bt daytrade`
 
-Runs one or more single-stock US strategies on cached regular-session minute bars.
+`bt daytrade` runs one or more single-stock US strategies on cached regular-session minute bars.
 
 ### Daytrade options
 
 | Argument or option | Default | Description |
 |---|---|---|
 | `STRAT...` | required | Each file declares one unaliased US stock and `bars Nm`; basenames must be unique. |
-| `--baseline us/SYM` | none | Daily Tiingo buy-and-hold on the common session dates. |
-| `--fill open\|close` | `open` | Next-bar open or same-bar close decisions; session liquidation always uses the last close. |
-| `--leverage N` | `1.0` | Positive finite previous-close buying-power multiplier. |
-| `--from D`, `--to D` | all cached dates | Inclusive date bounds. |
+| `--baseline us/SYM` | none | Add a daily Tiingo buy-and-hold baseline on the common session dates. |
+| `--fill open\|close` | `open` | Fill each decision at the next bar's open or at the same bar's close. Session liquidation uses the last close in both modes. |
+| `--leverage N` | `1.0` | Set the buying-power multiplier on previous-close cash. It must be positive and finite. |
+| `--from D`, `--to D` | all cached dates | Set inclusive date bounds. |
 | `-p name=value` | strategy defaults | Override a declared parameter. |
 | `--capital USD` | required | Set the positive finite starting dollar value. It scales the per-share sell fee and its cap; sizing stays in fractional exposure units. |
-| `--fee-bps F` | `0` | Commission on each side. |
-| `--tax-bps F` | `0.206` | Sell-side SEC fee in basis points. |
-| `--slip-bps F` | `0` | Slippage on each side. |
-| `--per-share-fee F` | `0.000195` | Dollar sell fee per share. |
-| `--per-share-cap F` | `9.79` | Dollar cap per sell order. |
-| `--data-dir DIR` | `data/` | Minute, calendar, and optional daily baseline cache root. |
-| `--out-dir DIR` | `out/` | Output directory. |
-| `--out-name NAME` | joined strategy names | Equity and plot filename stem; trade logs retain each strategy basename. |
+| `--fee-bps F` | `0` | Set the commission in basis points on each side. |
+| `--tax-bps F` | `0.206` | Set the sell-side SEC fee in basis points. |
+| `--slip-bps F` | `0` | Set slippage in basis points on each side. |
+| `--per-share-fee F` | `0.000195` | Set the dollar sell fee per share. |
+| `--per-share-cap F` | `9.79` | Set the dollar cap per sell order. |
+| `--data-dir DIR` | `data/` | Set the cache root for minute bars, the calendar, and the optional daily baseline. |
+| `--out-dir DIR` | `out/` | Set the output directory. |
+| `--out-name NAME` | joined strategy names | Set the equity and plot filename stem. Trade logs keep each strategy basename. |
 | `--no-plot` | off | Skip `scripts/plot.py`. |
-| `-h`, `-help`, `--help` | - | Print usage and exit successfully. |
+| `-h`, `-help`, `--help` | - | Print usage and exit with code 0. |
 
 ### Data requirements
 
@@ -177,10 +177,10 @@ bt fetch us/SPY --data-dir data
 bt daytrade examples/daytrade_orb.strat --baseline us/SPY --capital 100000 --data-dir data --from 2026-01-01
 ```
 
-Minute fetches require `APCA_API_KEY_ID` and `APCA_API_SECRET_KEY`; daily US fetches require `TIINGO_TOKEN`. Minute fetch refreshes the calendar from 2016 through today, requests SIP history through now minus 16 minutes, paginates in year ranges, and resumes from the last cached minute (2016 for an empty cache). Failed requests retain cached data. Timestamps are ET left edges with DST conversion; only calendar regular hours are retained.
+Minute fetches require `APCA_API_KEY_ID` and `APCA_API_SECRET_KEY`. Daily US fetches require `TIINGO_TOKEN`. A minute fetch refreshes the calendar from 2016 through today and requests SIP history through 16 minutes before now. It paginates in year ranges and resumes from the last cached minute, or from 2016 for an empty cache. A failed request keeps the cached data. Timestamps are ET bar left edges with DST conversion, and the cache keeps only calendar regular hours.
 
 > [!IMPORTANT]
-> Strategies and the optional daily baseline are intersected by session date before evaluation. At least two common dates are required. Calendar sessions with no bars are omitted. Minute bars are not replaced by daily bars.
+> `bt daytrade` intersects the strategies and the optional daily baseline by session date before evaluation and requires at least two common dates. It omits calendar sessions with no bars and does not replace minute bars with daily bars.
 
 ### Intraday output fields
 
@@ -201,25 +201,25 @@ Minute fetches require `APCA_API_KEY_ID` and `APCA_API_SECRET_KEY`; daily US fet
 | `--loan-term-months` | No term loans. |
 | `--dividend-tax` | No overnight dividend holdings. |
 
-These flags are usage errors (exit 2). `bt run`, `bt target`, and `bt live` reject `bars` strategies with `day trading strategies run under bt daytrade`; this command does not place live trades.
+`bt daytrade` treats these flags as usage errors (exit 2). It does not place live trades. `bt run`, `bt target`, and `bt live` reject `bars` strategies with `day trading strategies run under bt daytrade`.
 
 ## `bt target`
 
-Runs one US Alpaca or TW Shioaji decision, simulation or production, and prints the proposed action without submitting an order.
+`bt target` runs one decision against US Alpaca or TW Shioaji, in simulation or production mode, and prints the proposed action without submitting an order.
 
-The following options are shared by both market arms.
+Both market arms share these options.
 
 | Argument or option | Default | Description |
 |---|---|---|
-| `STRAT` | - | Read one strategy containing exactly one US or TW stock declaration. |
+| `STRAT` | required | Read one strategy containing exactly one US or TW stock declaration. |
 | `--data-dir DIR` | `data/` | Set the Tiingo or FinMind cache directory selected by the strategy market. |
-| `--provisional-close PRICE` | - | Use a positive PRICE for a local provisional bar instead of the broker snapshot. The output is marked `provisional: override PRICE`. |
+| `--provisional-close PRICE` | - | Build the provisional bar from a positive PRICE instead of the broker snapshot. The output then starts with `provisional: override PRICE`. |
 | `-h`, `-help`, `--help` | - | Print the target options and exit with code 0. |
 
 > [!TIP]
 > Use `--provisional-close PRICE` for a dry run when a current broker snapshot is unavailable or unsuitable.
 
-Both market arms write these fields, one per line.
+Both market arms print these fields to standard output, one per line.
 
 | Field | Meaning |
 |---|---|
@@ -231,7 +231,7 @@ Both market arms write these fields, one per line.
 | `provisional-low` | Show the provisional bar's low. |
 | `provisional-close` | Show the provisional bar's close. |
 | `provisional-volume` | Show the provisional bar's volume. |
-| `target` | Show the exposure selected by the strategy. |
+| `target` | Show the strategy's effective target exposure after the engine clamps it. |
 | `equity` | Show the account equity used to size the decision. |
 | `held` | Show the current share position. |
 
@@ -250,7 +250,7 @@ The strategy must declare exactly one US stock. The command needs Tiingo history
 |---|---|---|
 | `--live` | paper | Select the live Alpaca endpoint. |
 
-`--equity` is rejected for US strategies.
+`bt target` rejects `--equity` for US strategies.
 
 #### Environment
 
@@ -264,9 +264,9 @@ The Alpaca key variables must contain credentials for the selected account.
 
 #### Decision cycle
 
-The command fetches Tiingo history through Alpaca's previous daily bar, appends Alpaca's current snapshot as a provisional bar, and evaluates the strategy through the same DSL compiler used by `bt run`.
+The command fetches Tiingo history through Alpaca's previous daily bar, appends Alpaca's current snapshot as a provisional bar, and evaluates the strategy with the same DSL compiler as `bt run`. With `--provisional-close PRICE`, the command skips the Alpaca snapshot and treats the last cached date as the previous daily bar.
 
-Desired shares are `target x equity / provisional close`, a fractional quantity. The order quantity is the difference from the held position, rounded down to at most 9 decimal places. A buy below USD 1 notional is skipped with the reason `below $1 minimum order value`. A sell of any positive quantity, capped at the held position, becomes an order, so a position worth less than USD 1 can always be closed.
+Desired shares are `target x equity / provisional close`, a fractional quantity. The order quantity is the difference from the held position, rounded down to at most 9 decimal places. The command skips a buy below USD 1 notional with the reason `below $1 minimum order value`. A sell of any positive quantity, capped at the held position, becomes an order, so you can always close a position worth less than USD 1.
 
 #### Output
 
@@ -303,11 +303,11 @@ SJ_CA_PASSWD=YOUR_CA_PASSWORD
 SJ_PRODUCTION=false
 ```
 
-`SJ_API_KEY` and `SJ_SEC_KEY` let the server log in to Shioaji. Copies in the `bt` environment are optional: `bt` sends a Bearer header only when both are set and nonempty, for servers that enforce Bearer authentication. `SJ_CA_PATH` and `SJ_CA_PASSWD` activate the certificate required for production order placement, and `SJ_PRODUCTION=false` or an unset value selects simulation while `true` selects production. The CA path, CA password, and production setting remain server-only.
+The server uses `SJ_API_KEY` and `SJ_SEC_KEY` to log in to Shioaji. Copies in the `bt` environment are optional: `bt` sends a Bearer header only when both are set and nonempty, for servers that enforce Bearer authentication. `SJ_CA_PATH` and `SJ_CA_PASSWD` activate the certificate that production order placement requires. `SJ_PRODUCTION=true` selects production; `false` or an unset value selects simulation. The CA path, CA password, and production setting stay server-only.
 
 #### Options
 
-TW production sizes from broker balance, signed T+1 and T+2 settlements, and positions read with `unit: Share`. T+0 is required for settlement-window validation and startup audit but is already reflected in the balance.
+In production, `bt` sizes from the broker balance, the signed T+1 and T+2 settlements, and positions read with `unit: Share`. The T+0 row must be present for settlement-window validation, but `bt` does not add it because the balance already reflects it.
 
 | Option | Default | Description |
 |---|---|---|
@@ -332,11 +332,11 @@ The Shioaji server may still need its own keys to log in. `bt` never fails becau
 
 #### Decision cycle
 
-The TW target reads account and snapshot data from Shioaji and historical data from FinMind. It queries `TaiwanStockTradingDate` for the previous session and never treats cached prices as a calendar. It refreshes adjustments through today and rejects stale snapshots or a cache that does not end on the previous session.
+The TW target reads account and snapshot data from Shioaji and historical data from FinMind. It queries `TaiwanStockTradingDate` for the previous session and never treats cached prices as a calendar. It refreshes adjustments through today and rejects a stale snapshot or a cache that does not end on the previous session.
 
-On TW, `--provisional-close PRICE` replaces only the snapshot price: the command still checks Shioaji server mode, queries the independent FinMind trading calendar, fetches history, and requires the cache to end on the verified previous session.
+On TW, `--provisional-close PRICE` replaces only the snapshot. The command still checks the Shioaji server mode, queries the independent FinMind trading calendar, fetches history, and requires the cache to end on the verified previous session.
 
-The resulting plan preserves cash and margin inventories. It can contain cash sells, margin sells, cash buys, margin buys, and paired sell/rebuy refinancing legs. Dated `MarginTrading` position details that reach the engine's 18-calendar-month, month-end-clamped maturity produce sell/rebuy pairs before ordinary target legs. The engine floors cash quantities to whole shares and margin and refinance quantities to 1000-share lots, as in `bt run`. The plan prices commission at SinoPac's settlement-debit list rate of 14.25 bps, the same rate the `bt live` daemon funds with, so printed buy quantities can be slightly lower than a `bt run` backtest's at the 2.85 bps default. The design is in [Design: share quantum and odd lots](./specs/share-quantum-and-odd-lots.md).
+The resulting plan preserves the cash and margin inventories. It can contain cash sells, margin sells, cash buys, margin buys, and paired sell/rebuy refinancing legs. When a dated `MarginTrading` position detail reaches the engine's 18-calendar-month, month-end-clamped maturity, the plan puts a sell/rebuy pair before the ordinary target legs. As in `bt run`, the engine floors cash quantities to whole shares and margin and refinance quantities to 1000-share lots. The plan prices commission at SinoPac's settlement-debit list rate of 14.25 bps, the rate the `bt live` daemon funds with, so printed buy quantities can be slightly lower than a `bt run` backtest's at the 2.85 bps default. The design is in [Design: share quantum and odd lots](./specs/share-quantum-and-odd-lots.md).
 
 | Leg | Orders |
 |---|---|
@@ -344,7 +344,7 @@ The resulting plan preserves cash and margin inventories. It can contain cash se
 | Margin buy or sell | One `Common` order. N is already a multiple of 1000. |
 | Refinance or rollover sell and rebuy | One `Common` order per side. |
 
-Production requires exactly one settlement row for each of T+0, T+1, and T+2 and rejects missing, duplicate, or other T-day rows. Spendable cash is `acc_balance + T+1 + T+2` using each signed amount; T+0 is already reflected in `acc_balance`, so it is validated and logged but not added again. Equity adds all positions, counted in shares, at broker `last_price`, then subtracts margin loan principal and interest. A real-account probe tracked a TWD -107 purchase payable at T+2 on 2026-09-16 and T+1 on 2026-09-17 while `acc_balance` remained TWD 100,000, then at T+0 on 2026-09-18 when `acc_balance` fell to TWD 99,893. Pending T+1 and T+2 settlements change the daily cash budget without skipping the session.
+Production requires exactly one settlement row for each of T+0, T+1, and T+2 and rejects missing, duplicate, or other T-day rows. Spendable cash is `acc_balance + T+1 + T+2`, using each signed amount. `bt` validates T+0 but does not add it again, because `acc_balance` already reflects it. Equity is spendable cash plus all positions, counted in shares, at broker `last_price`, minus margin loan principal and interest. A real-account probe tracked a TWD -107 purchase payable at T+2 on 2026-09-16 and T+1 on 2026-09-17 while `acc_balance` remained TWD 100,000, then at T+0 on 2026-09-18 when `acc_balance` fell to TWD 99,893. Pending T+1 and T+2 settlements change the daily cash budget without skipping the session.
 
 #### Output
 
@@ -367,23 +367,23 @@ leg: Buy Cash IntradayOdd 580
 The mode mismatch guard refuses simulation commands against a production server and refuses `--live` against a simulation server. The decision fails when the dated `position_detail` quantities of a margin position, counted in 1000-share lots, exceed its held margin shares.
 
 > [!WARNING]
-> `--equity` is user-supplied simulation total equity, not broker cash or an `account_balance` result. With the supported one-stock account shape, `bt` infers simulation cash from equity, the selected symbol's cash and margin inventory values, loan principal, and interest. It rejects a nonzero holding in another symbol.
+> `--equity` is the total equity you supply for simulation; `bt` does not read it from broker cash or `account_balance`. With the supported one-stock account shape, `bt` infers simulation cash as equity minus the selected symbol's cash and margin inventory values, plus loan principal and interest. It rejects a nonzero holding in another symbol.
 
-Production startup logs `acc_balance`, each T-day amount, derived spendable cash, and derived equity. T+0 remains visible for audit even though the verified cash formula excludes it.
+`bt target` does not print `acc_balance` or the T-day amounts. `bt live` logs them with derived spendable cash and equity at production startup; see [Output and logs](#output-and-logs-1). T+0 stays visible there for audit even though the verified cash formula excludes it.
 
 ## `bt live`
 
-Runs the close-scheduled trading daemon for one US or TW strategy.
+`bt live` runs the close-scheduled trading daemon for one US or TW strategy.
 
-The following options are shared by both market arms.
+Both market arms share these options.
 
 | Argument or option | Default | Description |
 |---|---|---|
-| `STRAT` | - | Read one strategy containing exactly one US or TW stock declaration. |
+| `STRAT` | required | Read one strategy containing exactly one US or TW stock declaration. |
 | `--data-dir DIR` | `data/` | Set the Tiingo or FinMind cache directory selected by the strategy market. |
 | `-h`, `-help`, `--help` | - | Print the live options and exit with code 0. |
 
-Logs are append-only ASCII text. Both daemons record the session date, fetched-through date, provisional close, target, equity, held position, action or skip reason, and fill state and price.
+Both daemons print ASCII log lines to standard output. They record the session date, fetched-through date, provisional close, target, equity, held position, action or skip reason, and fill state and price.
 
 ### US market
 
@@ -397,7 +397,7 @@ The strategy must declare exactly one US stock. The selected Alpaca account must
 |---|---|---|
 | `--live` | paper | Select the live Alpaca endpoint and permit real-money orders. |
 
-`--equity` is rejected for US strategies.
+`bt live` rejects `--equity` for US strategies.
 
 #### Environment
 
@@ -407,7 +407,7 @@ The strategy must declare exactly one US stock. The selected Alpaca account must
 | `APCA_API_KEY_ID` | - | Identify the selected paper or live Alpaca account. |
 | `APCA_API_SECRET_KEY` | - | Authenticate the selected paper or live Alpaca account. |
 
-Startup prints the mode, account number, and equity.
+At startup, the daemon logs the mode, account number, and equity.
 
 #### Decision cycle
 
@@ -416,7 +416,7 @@ The daemon derives every phase from Alpaca's `next_close`.
 | Phase | Timing | Action |
 |---|---|---|
 | Evaluate | 15 minutes before the close | Refresh Tiingo history and evaluate the provisional daily bar. |
-| Submit | Before 10 minutes before the close | Query today's deterministic client order ID, then submit a fractional `market` order with `time_in_force: day` when needed. |
+| Submit | Until 10 minutes before the close | Query today's deterministic client order ID, then submit a fractional `market` order with `time_in_force: day` when needed. |
 | Reconcile | After the close | Poll the order every 15 seconds until it reaches a terminal status or 5 minutes pass after the close, then log the fill. |
 | Sleep | After reconciliation | Sleep until the next open. |
 
@@ -424,17 +424,17 @@ The Submit phase ends 10 minutes before the close because Alpaca queues a day or
 
 #### Output and logs
 
-The US log records held shares, the deterministic order or skip reason, and the reconciled fill. Startup also records the selected mode, account number, and equity.
+Each US decision line records `held` and `order`, which holds the deterministic order as `SIDE:QUANTITY:CLIENT-ORDER-ID` or the skip reason as `skip:REASON`. Fill lines record `client-order-id`, `fill-status`, `fill-price`, and `filled-qty`. The `startup` line records the selected `mode`, `account` number, and `equity`.
 
 #### Failure handling
 
-An inactive or trading-blocked account is refused at startup. A stale cache, fetch or snapshot error, evaluation error, or order failure logs one error line and stops the US action for the day.
+The daemon refuses to start with an inactive or trading-blocked account. A stale cache, fetch or snapshot error, evaluation error, or order failure logs one error line and stops the US action for the day.
 
 > [!CAUTION]
 > `bt live --live` submits real-money fractional market orders. Confirm the credentials, account, and strategy before starting it.
 
 > [!WARNING]
-> The free Alpaca IEX feed can produce a provisional price that differs from the consolidated tape. The market order fills near the decision time, about 15 minutes before the close, not at the official close; model that gap in `bt run` with `--slip-bps`. Alpaca paper accounts also do not simulate dividends, so paper cash and equity can diverge from a live account.
+> The free Alpaca IEX feed can produce a provisional price that differs from the consolidated tape. The market order fills near the decision time, about 15 minutes before the official close; model that gap in `bt run` with `--slip-bps`. Alpaca paper accounts also do not simulate dividends, so paper cash and equity can diverge from a live account.
 
 > [!IMPORTANT]
 > The US path recomputes desired shares from the account and stops after a failed prerequisite or order.
@@ -500,7 +500,7 @@ Live planning and execution both use SinoPac's settlement-debit list rate of 14.
 
 #### Output and logs
 
-Each decision line records `cash-shares`, `margin-shares`, `loan`, `planned-legs` as `ACTION:CONDITION:LOT:QUANTITY` entries, and `submitted` as `complete`, `stop:REASON remaining:LEGS`, `skip:no-order-legs`, or `skip:existing-orders`. Odd-lot orders add their own `submitted=` lines. Trade lines record `order-id`, `action`, `cond`, `lot`, `fill-status`, `deal-quantity` in the trade's lot unit, and `fill-price`. Production startup also records `acc_balance`, T+0, T+1, T+2, spendable cash, and equity.
+Each decision line records `cash-shares`, `margin-shares`, `loan`, `planned-legs` as `ACTION:CONDITION:LOT:QUANTITY` entries, and `submitted` as `complete`, `stop:REASON remaining:LEGS`, `skip:no-order-legs`, or `skip:existing-orders`. Odd-lot orders add their own `submitted=` lines. Trade lines record `order-id`, `action`, `cond`, `lot`, `fill-status`, `deal-quantity` in the trade's lot unit, and `fill-price`. The production `startup` line also records `acc-balance`, `t0`, `t1`, `t2`, spendable `cash`, and `equity`.
 
 #### Failure handling
 
@@ -519,11 +519,11 @@ No execution path guarantees exactly once across concurrent daemon processes or 
 > [!NOTE]
 > The TW path queries today's orders before planning and carries only confirmed `Common` fills and pending odd-lot buy costs between legs. This reduces duplicate risk but is not an exactly-once guarantee for concurrent processes.
 
-Pending T+1 and T+2 settlements never suppress a production session; their signed amounts alter the available cash passed to the unchanged planner and executor. T+0 remains required and logged but is already reflected in `acc_balance`.
+Pending T+1 and T+2 settlements never suppress a production session; their signed amounts change the available cash passed to the unchanged planner and executor. T+0 must still be present and appears in the startup log, but `acc_balance` already reflects it.
 
 ## `bt run`
 
-Loads one or more strategy files and their cached prices. Each strategy file selects its data with exactly one `stock "market/symbol"` statement.
+`bt run` backtests one or more strategy files on cached prices. Each strategy file selects its data with `stock "market/symbol"` statements; a file that declares more than one stock gives each an `as` alias.
 
 > [!IMPORTANT]
 > `--benchmark` was renamed to `--baseline`. Do not pass `--market`, `--symbol`, or `--benchmark-market` to `bt run`. Put the market and symbol in each strategy file.
@@ -532,7 +532,7 @@ Loads one or more strategy files and their cached prices. Each strategy file sel
 
 | Argument or option | Default | Description |
 |---|---|---|
-| `STRAT...` | - | Read one or more strategies from these files. At least one file is required. The file basename without its extension becomes the strategy name. |
+| `STRAT...` | required | Read strategies from one or more files. The file basename without its extension becomes the strategy name. |
 | `--baseline M/SYM` | - | Add a buy-and-hold baseline for this market and symbol. |
 | `--from YYYY-MM-DD` | first cached common date | Set the first date to load. |
 | `--to YYYY-MM-DD` | last cached common date | Set the last date to load. |
@@ -543,9 +543,9 @@ Loads one or more strategy files and their cached prices. Each strategy file sel
 | `--tax-bps F` | per symbol class | Override the sell tax in basis points for all strategies and the baseline. |
 | `--slip-bps F` | `0` | Override slippage in basis points for all strategies and the baseline. |
 | `--min-fee F` | TW 1, US 0 | Override the minimum commission per order in the market's currency. |
-| `--dividend-tax PERCENT` | `0` | Reduce every TW receivable and US cash dividend at creation. Represents dividend income tax and the NHI supplementary premium. |
+| `--dividend-tax PERCENT` | `0` | Reduce every TW receivable and US cash dividend by this percent when the engine creates it, to model dividend income tax and the NHI supplementary premium. |
 | `--financing-rate PERCENT` | TW 6.35, US 6.25 | Set the annual financing rate. |
-| `--maintenance-ratio PERCENT` | TW 130 (collateral/loan), US tiered | Set a flat maintenance threshold for either market. When unset, TW uses 130% collateral over loan and US uses the tiered table (100% below $2.50, 50% $2.50-$6, 30% above $6). |
+| `--maintenance-ratio PERCENT` | TW 130 (collateral/loan), US tiered | Set a flat maintenance threshold for either market. When unset, TW uses 130% collateral over loan and US uses the tiered table (100% below $2.50, 50% from $2.50 to below $6, 30% at $6 and above). |
 | `--per-share-fee F` | US 0.000195, TW 0 | Override the per-share sell fee in dollars. |
 | `--per-share-cap F` | US 9.79, TW 0 | Override the per-share sell fee cap in dollars per order. Use 0 for uncapped. |
 | `--financing-ratio PERCENT` | TW 60, US 50 | Set the fresh-loan financing ratio for every asset. TW defaults from cached stockinfo (TWSE/TPEX 60%). US defaults to the Reg T initial-margin ratio of 50%. |
@@ -553,17 +553,17 @@ Loads one or more strategy files and their cached prices. Each strategy file sel
 | `--data-dir DIR` | `data/` | Set the cache directory. |
 | `--out-dir DIR` | `out/` | Set the output directory. |
 | `--out-name NAME` | strategy names joined with `_vs_` | Set the equity CSV and PNG stem. |
-| `--no-plot` | - | Do not run the plot script or update the equity PNG. |
+| `--no-plot` | off | Do not run the plot script or update the equity PNG. |
 | `-h`, `-help`, `--help` | - | Print the run options to standard output and exit with code 0. |
 
 > [!NOTE]
 > The four margin options and `--dividend-tax` apply to every strategy and the baseline. US assets ignore `--loan-term-months`.
 
-For the full margin and dividend engine guide, see [engine.md](./engine.md).
+[engine.md](./engine.md) covers the margin and dividend engine in full.
 
-Taiwan cash quantities are floored to whole shares and Taiwan margin quantities to 1000-share lots; the floored remainder stays in cash. US quantities stay fractional. See [Share quantum](./engine.md#share-quantum).
+The engine floors Taiwan cash quantities to whole shares and Taiwan margin quantities to 1000-share lots; the floored remainder stays in cash. US quantities stay fractional. See [Share quantum](./engine.md#share-quantum).
 
-The command applies `--from` and `--to` to every input. It then uses the exact intersection of trading dates across all strategies and the optional baseline. This rule gives every report column the same dates. The command stops if fewer than two common dates remain.
+The command applies `--from` and `--to` to every input, then keeps only the trading dates common to all strategies and the optional baseline, so every report column covers the same dates. The command stops if fewer than two common dates remain.
 
 > [!IMPORTANT]
 > Strategy names must be unique. `one/a.strat` and `two/a.strat` both have the name `a` and produce a duplicate-basename error. A strategy with the basename `baseline` conflicts with `--baseline`.
@@ -578,7 +578,7 @@ One basis point is 0.01%. One hundred basis points are 1%.
 |---|---|---|---|---|---|
 | US | 0 bps (0%) | - | 0.206 bps (SEC fee, effective 2026-04-04) | $0.000195/share, $0.01 floor, $9.79 cap (TAF, effective 2026-01-01) | 0 bps (0%) |
 | Taiwan ordinary bond ETF (`00...B`) | 2.85 bps (0.0285%) | 1 TWD per order | 0 bps (0%) through 2026-12-31 | - | 0 bps (0%) |
-| Other Taiwan `00` or `02` ETN | 2.85 bps (0.0285%) | 1 TWD per order | 10 bps (0.10%) | - | 0 bps (0%) |
+| Other Taiwan `00` ETF or `02` ETN | 2.85 bps (0.0285%) | 1 TWD per order | 10 bps (0.10%) | - | 0 bps (0%) |
 | Other Taiwan symbol | 2.85 bps (0.0285%) | 1 TWD per order | 30 bps (0.30%) | - | 0 bps (0%) |
 
 Leveraged and inverse bond ETFs end in `L` or `R`, not `B`, so they use the 10 bps ETF rate. The Taiwan fee is SinoPac's electronic-trading promotion rate, 20% of the 0.1425% list rate.
@@ -595,7 +595,7 @@ The engine closes a final open exposure at the last close in both modes. It appl
 
 ## Run outputs
 
-`bt run` prints a report table to standard output. The table has one column for each strategy and, when requested, one baseline column. It shows Total return, CAGR, Sharpe, MaxDD, and Calmar. The lines below the table show each strategy's trade count and win rate, the common date range, and the fill mode. The `name:` line after the table joins each strategy's stock labels with `+`. When the same symbol appears under multiple aliases, the label carries a `#alias` suffix (for example `tw/00685L#core+tw/00685L#trade`).
+`bt run` prints a report table to standard output. The table has one column for each strategy and, when requested, one baseline column. It shows Total return, CAGR, Sharpe, MaxDD, and Calmar. Below the table, each strategy gets a `name:` line with its stock labels joined by `+`, its trade count, and its win rate. A final line shows the common date range and the fill mode. When the same symbol appears under multiple aliases, the label carries a `#alias` suffix (for example `tw/00685L#core+tw/00685L#trade`).
 
 If a strategy had a loan on at least one bar, `bt run` also prints a margin line:
 
@@ -610,13 +610,13 @@ The default stem joins strategy names in argument order with `_vs_`. A single st
 | File | Content |
 |---|---|
 | `<stem>.csv` | All equity curves. Header: `date`, each strategy name in argument order, and `baseline` when requested. |
-| `<name>.trades.csv` | One fill log per strategy. Header: `date,stock,price,from_exposure,to_exposure`. One row per fill per stock. When the same symbol appears under multiple aliases, the `stock` column carries `market/symbol#alias`. No baseline fill log. |
+| `<name>.trades.csv` | One fill log per strategy. Header: `date,stock,price,from_exposure,to_exposure`. One row per fill per stock. When the same symbol appears under multiple aliases, the `stock` column carries `market/symbol#alias`. The baseline has no fill log. |
 | `<stem>.png` | Equity graph. Not created with `--no-plot`. |
 
-`--out-name` changes only `<stem>.csv` and `<stem>.png`, not `<name>.trades.csv`.
+`--out-name` changes only `<stem>.csv` and `<stem>.png`; `<name>.trades.csv` keeps the strategy name.
 
 > [!NOTE]
-> `bt` runs `scripts/plot.py` directly; it does not copy the script into the output directory. `python3` and matplotlib are optional. If either is unavailable or plotting fails, the command prints a warning and exits with code 0 after it saves the CSV files.
+> `bt` runs `scripts/plot.py` in place and does not copy it into the output directory. `python3` and matplotlib are optional. If either is unavailable or plotting fails, the command prints a warning and exits with code 0 after it saves the CSV files.
 
 ## Exit codes
 

@@ -16,7 +16,7 @@
 ## Module layout
 
 ```
-bin/bt.ml          CLI dispatch: fetch | run | target | live
+bin/bt.ml          CLI dispatch: fetch | run | daytrade | target | live
 broker/alpaca.ml   Alpaca REST client: trading + market data via curl and jq
 broker/alpaca.mli  Alpaca REST interface
 broker/shioaji.ml  Shioaji REST client: TW account, market data, and orders via curl and jq
@@ -29,6 +29,8 @@ lang/dsl.ml        Evaluator; compiles a script to Engine.strategy
 lang/dsl.mli       DSL interface
 engine/engine.ml   Portfolio engine (per-asset targets, two-inventory margin accounting)
 engine/engine.mli  Engine interface
+intraday/intraday.ml Session-aware intraday simulation for bt daytrade
+intraday/intraday.mli Intraday interface
 lang/lexer.mll     Lexer (ocamllex)
 broker/live.ml     Live decision cycle and close-scheduled daemon
 broker/live.mli    Live interface
@@ -60,8 +62,7 @@ docs/plans/           Implementation plans
 
 ## Build and test
 
-Create the project-local opam switch first; see "Build and test" in README.md.
-All commands below assume `eval $(opam env)` ran in this directory.
+Create the project-local opam switch first; see [Build and test](README.md#build-and-test) in README.md. Every command below assumes you ran `eval $(opam env)` in this directory.
 
 ```sh
 dune build --root .          # must be clean; warnings are errors
@@ -72,50 +73,50 @@ dune test --root . --force   # all asserts must pass
 
 - Use the OCaml standard library and `unix` only. Do not add opam package dependencies.
 - No `for` or `while` loops. Sequence side effects with `let () = e in`.
-- Branch on the market with `match` arms (`| "tw" -> ... | "us" -> ...`), never `if market = ...`. New markets must slot in as new arms.
-- Make list recursion tail-recursive. Use an accumulator and `List.rev`. Use `Array` index loops for series math.
-- Preserve floating-point operation order. Do not rewrite arithmetic that would change rounding.
-- A numeric series is a `float array`. Warmup values are `Float.nan`. A comparison with NaN gives `false`.
+- Branch on the market with `match` arms (`| "tw" -> ... | "us" -> ...`), never `if market = ...`. A new market must slot in as a new arm.
+- Make list recursion tail-recursive with an accumulator and `List.rev`. Use `Array` index loops for series math.
+- Preserve floating-point operation order. Do not rewrite arithmetic in a way that changes rounding.
+- A numeric series is a `float array`. Warmup values are `Float.nan`. Any comparison with NaN gives `false`.
 - Put one space on each side of `=`. Do not align code with extra spaces.
-- Network and JSON work goes through `curl` and `jq` as subprocesses. Do not parse JSON in OCaml.
-- Do not embed Python (or other foreign code) in `.ml` files. Python scripts are standalone files in `scripts/`.
-- ASCII-only typography in code and docs (no arrows, em dashes, typographic quotes; CJK content terms allowed).
+- Send network and JSON work through `curl` and `jq` subprocesses. Do not parse JSON in OCaml.
+- Do not embed Python or other foreign code in `.ml` files. Python scripts live as standalone files in `scripts/`.
+- Use ASCII-only typography in code and docs: no arrows, em dashes, or typographic quotes. CJK content terms are allowed.
 
 ## Documentation style
 
 - Use one H1 per document. Keep a disciplined H2-H4 hierarchy; use H5 or H6 only for genuinely nested material.
-- Avoid essay walls: use short paragraphs under precise headers, with at most one introductory sentence before the first subsection.
-- GitHub alerts have fixed semantics: `> [!NOTE]` provides context, `> [!TIP]` gives usage advice, `> [!IMPORTANT]` states load-bearing semantics, `> [!WARNING]` identifies fidelity gaps, and `> [!CAUTION]` marks destructive or irreversible actions. Alerts carry real content, never decoration.
-- Use tables for enumerable content. Option tables in `docs/cli.md` include a `Default` column; defaults never hide inside descriptions.
-- Keep a full-depth table of contents in every document, covering every header level.
+- Avoid essay walls. Write short paragraphs under precise headers, with at most one introductory sentence before the first subsection.
+- GitHub alerts have fixed meanings: `> [!NOTE]` gives context, `> [!TIP]` gives usage advice, `> [!IMPORTANT]` states load-bearing semantics, `> [!WARNING]` flags fidelity gaps, and `> [!CAUTION]` marks destructive or irreversible actions. Use alerts for real content, never for decoration.
+- Use tables for enumerable content. Option tables in `docs/cli.md` include a `Default` column; never hide a default inside a description.
+- Keep a full-depth table of contents in every document that covers every header level.
 - Use ASCII-only typography. Never hard-wrap mid-sentence.
-- Follow Keep a Changelog 1.1.0 in `CHANGELOG.md`: behavior-changing commits add entries under `[Unreleased]`; releases are git tags plus GitHub pre-releases.
-- Put design specs in `docs/specs/` and implementation plans in `docs/plans/`, with simple undated filenames that state the content.
+- Follow Keep a Changelog 1.1.0 in `CHANGELOG.md`. Each behavior-changing commit adds an entry under `[Unreleased]`. A release is a git tag plus a GitHub pre-release.
+- Put design specs in `docs/specs/` and implementation plans in `docs/plans/`. Give them simple undated filenames that state the content.
 
 ## Tests
 
-- Tests are plain asserts in `test/test_bt.ml`. Do not add a test framework.
+- Write tests as plain asserts in `test/test_bt.ml`. Do not add a test framework.
 - Test exact values against hand-computed or independently simulated numbers.
-- Each non-trivial branch needs one check that fails when the logic breaks.
-- Write a derivation comment above each expected value explaining how it was computed. These comments are part of the test contract.
-- `test_engine_buyhold_costs` is the sentinel test: it pins the E1 cost-sizing sequence for a single buy-and-hold bar pair. A change that breaks this value has changed the engine's cost identity.
-- Byte-identity gates (e.g. `Marshal.to_bytes ... = Marshal.to_bytes ...`) verify that a code path produces structurally identical output. Do not weaken them to tolerance checks.
+- Give each non-trivial branch one check that fails when the logic breaks.
+- Above each expected value, write a derivation comment that explains how you computed it. These comments are part of the test contract.
+- `test_engine_buyhold_costs` is the sentinel test. It pins the E1 cost-sizing sequence for a single buy-and-hold bar pair. A change that breaks this value changes the engine's cost identity.
+- Byte-identity gates (e.g. `Marshal.to_bytes ... = Marshal.to_bytes ...`) check that a code path produces structurally identical output. Do not weaken them to tolerance checks.
 
 ## Fetching test data
 
-Firewall egress approval is scoped to a binary's hash. After every rebuild, copy the current build to a fresh name and make it executable:
+Firewall egress approval is tied to a binary's hash. After every rebuild, copy the current build to a fresh name and make it executable:
 
 ```sh
 cp _build/default/bin/bt.exe bt-test<n+1>.exe && chmod +x bt-test<n+1>.exe
 ```
 
-Run fetches through that fresh name, never through an `_build/` path directly:
+Run fetches through that fresh name, never through an `_build/` path:
 
 ```sh
 ./bt-test<n+1>.exe fetch tw/0050
 ```
 
-These binaries are gitignored.
+Git ignores these binaries.
 
 ## Data cache layout
 
@@ -129,6 +130,8 @@ data/us/<SYMBOL>/<SYMBOL>.csv            Price bars (date,open,high,low,close,vo
 data/us/<SYMBOL>/<SYMBOL>.events.csv     Corporate-action factors (date,factor)
 data/us/<SYMBOL>/<SYMBOL>.cashdiv.csv    Cash dividends (ex_date,cash_per_share,pay_date)
 data/us/<SYMBOL>/<SYMBOL>.div.csv        Dividend factors (date,factor)
+data/us/<SYMBOL>/1m/<YEAR>.csv           Minute bars (time,open,high,low,close,volume)
+data/us/calendar.csv                     Exchange sessions (date,open,close)
 ```
 
 ## Fixed contracts
@@ -136,20 +139,20 @@ data/us/<SYMBOL>/<SYMBOL>.div.csv        Dividend factors (date,factor)
 Do not change these types or formats:
 
 - `Data.bar` = `{ date; o; h; l; c; v }`
-- `Engine.strategy` = `{ targets : float array array }` (per-asset target arrays in stock declaration order)
+- `Engine.strategy` = `{ targets : float array array }` (one target array per asset, in stock declaration order)
 - Engine fill modes: `Close_same` fills at the decision close. `Open_next` fills at the next open.
 - Margin accounting keeps separate cash and margin inventories for each asset. Equity subtracts loans, accrued interest, and residual debt.
-- Buys use cash first. A fresh margin buy takes a standard exchange-ratio loan. Refinancing uses a sell and buy pair with full costs on both legs. Interest is a liability that settles with repayment.
-- TW maintenance is total margin inventory value divided by total loans. Below the threshold (130% by default), a margin call sells all margin inventories. US maintenance is equity over a tiered or flat required margin. Below the required level, a minimum-cure sell reduces margin just enough. `margin.maintenance_override` is `float option`: `None` uses the market default, `Some v` overrides. Bankruptcy sells everything, keeps residual debt, and freezes the account.
-- The engine assumes every Taiwan symbol is marginable at the standard TWSE or TPEX ratio. Broker eligibility and reduced ratios, including possible limits on leveraged ETFs such as 00685L, are outside the model.
+- Buys use cash first. A fresh margin buy takes a standard exchange-ratio loan. A refinance is a sell and buy pair with full costs on both legs. Interest is a liability that settles with repayment.
+- TW maintenance is total margin inventory value divided by total loans. Below the threshold (130% by default), a margin call sells all margin inventories. US maintenance is equity over a tiered or flat required margin. Below the required level, a minimum-cure sell reduces margin just enough to cure. `margin.maintenance_override` is `float option`: `None` uses the market default, and `Some v` overrides it. Bankruptcy sells everything, keeps residual debt, and freezes the account.
+- The engine assumes every Taiwan symbol is marginable at the standard TWSE or TPEX ratio. The model ignores broker eligibility and reduced ratios, including possible limits on leveraged ETFs such as 00685L.
 - TW cache header: `date,open,high,low,close,volume`
 - Dividend cache header: `date,factor`
 - US cache header: `date,open,high,low,close,volume`
-- Fill log header: `date,stock,price,from_exposure,to_exposure`; `stock` is `market/symbol`, or `market/symbol#alias` when the same symbol is declared under multiple aliases.
+- Fill log header: `date,stock,price,from_exposure,to_exposure`. `stock` is `market/symbol`, or `market/symbol#alias` when a strategy declares the same symbol under multiple aliases.
 
 ## How to add an indicator
 
-1. Add the function to `series/series.ml`. Give NaN for the warmup indexes. Export it in `series/series.mli`.
+1. Add the function to `series/series.ml` and return NaN for the warmup indexes. Export it in `series/series.mli`.
 2. Add the name and arity to `builtin_arity` in `lang/dsl.ml`.
 3. Add the call case to `eval_call` in `lang/dsl.ml`.
 4. Add an exact-value assert to `test/test_bt.ml` with a derivation comment.

@@ -4,7 +4,7 @@ Date: 2026-09-19
 Status: implemented
 
 > [!IMPORTANT]
-> If a market supports fractional shares, bt trades fractional shares. If it does not, bt rounds to the smallest unit the market trades and the live path submits that exact quantity. Backtest and live use one rounding rule, held in the market profile, so live exposure equals backtest exposure by construction.
+> If a market supports fractional shares, bt trades fractional shares. Otherwise bt rounds to the smallest unit the market trades, and the live path submits that exact quantity. Backtest and live share one rounding rule, held in the market profile, so live exposure equals backtest exposure by construction.
 
 ## Contents
 
@@ -25,13 +25,13 @@ Close the gap between target exposure and real exposure in both live markets, an
 
 ## Decisions
 
-- One rounding rule per market, stored in `Engine.market_profile` and applied inside `Engine.plan_fills`, so `bt run`, `bt target`, and `bt live` floor with the same quantum; live planning prices commission at the 14.25 bps debit rate, so its buy quantities can be slightly lower than a backtest's.
-- `--capital` is required for `bt run` and `bt daytrade`. The share quantum converts value to shares, which needs a money scale, and the minimum fee and per-share fees always apply in real accounts. The engine's `capital : float option` becomes `capital : float` and every branch that ran without capital is deleted.
+- One rounding rule per market, stored in `Engine.market_profile` and applied inside `Engine.plan_fills`, so `bt run`, `bt target`, and `bt live` floor with the same quantum. Live planning prices commission at the 14.25 bps debit rate, so its buy quantities can be slightly lower than a backtest's.
+- `--capital` is required for `bt run` and `bt daytrade`. The share quantum converts value to shares, which needs a money scale, and real accounts always charge the minimum fee and per-share fees. The engine's `capital : float option` becomes `capital : float`, and every branch that ran without capital is deleted.
 - TW cash inventory rounds to whole shares. TW margin inventory rounds to 1000-share lots because odd lots cannot be margined. US inventory is fractional.
-- TW live submits each ordinary cash leg as one `Common` order for the lot part plus one `IntradayOdd` order for the remainder. Margin legs and refinance legs are whole lots only. Lot orders are `MKT` + `IOC`; odd-lot orders are limit `ROD`, the only form TWSE accepts. Refinance ordering and dependency are unchanged: the rebuy is submitted only after the sell has completely filled, sized to the shares actually sold.
-- US live submits a fractional `market` order with `time_in_force: day`. The decision runs 15 minutes before the close and the submit cutoff is 10 minutes before the close, because Alpaca queues a day order sent after the close for the next session. Market-on-close is dropped because Alpaca rejects fractional MOC orders. The near-close fill versus the backtester's close fill is the case `--slip-bps` already models, so no new fidelity gap is introduced.
-- TW default commission becomes 0.0285% with a TWD 1 minimum per order (SinoPac electronic-trading promotion rate, flat, no monthly tier). Backtests use this 2.85 bps rate. Live planning and live funding both use the 14.25 bps settlement-debit list rate with the same TWD 1 minimum, because SinoPac debits the list rate at settlement and rebates the discount later.
-- Odd lots cannot form a same-day round trip. The daemon trades once per session and ordinary legs never contain both a buy and a sell of the same symbol, so this cannot happen by construction; the executor still refuses an `IntradayOdd` order in the opposite direction of an `IntradayOdd` fill already recorded today and stops the remaining legs.
+- TW live submits each ordinary cash leg as one `Common` order for the lot part plus one `IntradayOdd` order for the remainder. Margin legs and refinance legs are whole lots only. Lot orders are `MKT` + `IOC`. Odd-lot orders are limit `ROD`, the only form TWSE accepts. Refinance ordering and dependency are unchanged: bt submits the rebuy only after the sell has completely filled, sized to the shares actually sold.
+- US live submits a fractional `market` order with `time_in_force: day`. The decision runs 15 minutes before the close. The submit cutoff is 10 minutes before the close because Alpaca queues a day order sent after the close for the next session. Market-on-close is dropped because Alpaca rejects fractional MOC orders. `--slip-bps` already models the gap between the near-close fill and the backtester's close fill, so this change adds no new fidelity gap.
+- TW default commission becomes 0.0285% with a TWD 1 minimum per order. That is the SinoPac electronic-trading promotion rate, applied flat without the monthly tier. Backtests use this 2.85 bps rate. Live planning and live funding both use the 14.25 bps settlement-debit list rate with the same TWD 1 minimum, because SinoPac debits the list rate at settlement and rebates the discount later.
+- Odd lots cannot form a same-day round trip. The daemon trades once per session, and ordinary legs never contain both a buy and a sell of the same symbol, so a round trip cannot arise by construction. The executor still refuses an `IntradayOdd` order in the opposite direction of an `IntradayOdd` fill already recorded today, and stops the remaining legs.
 
 ## Market facts
 
@@ -56,32 +56,32 @@ With quantum 0 the floor is skipped, so US backtests at a fixed capital are byte
 
 Share counts arrive from the engine already floored. `Live.legs_of_plan` translates each leg into orders:
 
-- Cash buy or sell of N shares: one `Common` order for N / 1000 lots when that is positive, then one `IntradayOdd` order for N mod 1000 shares when that is positive. Same action and condition.
-- Margin buy, margin sell, and every refinance leg: one `Common` order. N is a multiple of 1000 by the margin quantum, so there is no remainder.
+- Cash buy or sell of N shares: one `Common` order for N / 1000 lots when that is positive, then one `IntradayOdd` order for N mod 1000 shares when that is positive. Both orders carry the leg's action and condition.
+- Margin buy, margin sell, and every refinance leg: one `Common` order. The margin quantum makes N a multiple of 1000, so no remainder exists.
 
-Leg record: `{ action; cond; lot : Common | IntradayOdd; quantity }` where `quantity` is lots for `Common` and shares for `IntradayOdd`, matching what Shioaji expects for each. `Shioaji.place_order` passes the lot kind through. Lot orders use `MKT` + `IOC` with price 0. Odd-lot orders use `LMT` + `ROD`, priced at the snapshot ask for a buy and the snapshot bid for a sell; a missing or non-positive quote skips only the odd-lot order. The request builder rejects an odd-lot quantity above 999 or a condition other than `Cash`.
+Leg record: `{ action; cond; lot : Common | IntradayOdd; quantity }`. `quantity` counts lots for `Common` and shares for `IntradayOdd`, matching what Shioaji expects for each. `Shioaji.place_order` passes the lot kind through. Lot orders use `MKT` + `IOC` with price 0. Odd-lot orders use `LMT` + `ROD`, priced at the snapshot ask for a buy and the snapshot bid for a sell. A missing or non-positive quote skips only the odd-lot order. The request builder rejects an odd-lot quantity above 999 or a condition other than `Cash`.
 
 Executor rules:
 
 - Funding and fill math are in shares. A `Common` fill of k lots is k x 1000 shares.
-- The lot order and the odd order of one leg are independent: if either is rejected, the other still goes and later ordinary legs still go.
-- The executor does not wait for an odd-lot fill. A sent odd-lot buy reserves its full cost from cash at once. Odd-lot sale proceeds are never credited to same-session cash; an invariant test shows that a live plan never holds an odd-lot sell followed by a buy.
+- The lot order and the odd order of one leg are independent. If either is rejected, bt still sends the other and the later ordinary legs.
+- The executor does not wait for an odd-lot fill. A sent odd-lot buy reserves its full cost from cash at once. The executor never credits odd-lot sale proceeds to same-session cash; an invariant test shows that a live plan never holds an odd-lot sell followed by a buy.
 - Refinance dependency is unchanged: sells run first, the rebuy waits for the complete sell fill and is sized to the shares actually sold.
-- Failure handling: a `Common` order rejected with no fill, or a rejected odd-lot placement, lets later independent legs run. A failed sell blocks its dependent rebuy and every leg after it. An IOC partial fill is final and stops later legs. The unfilled remainder is traded again only when a later session's effective target changes; an unchanged target preserves the resulting drift. An ambiguous placement is never resubmitted and stops the day.
+- Failure handling: a `Common` order rejected with no fill, or a rejected odd-lot placement, lets later independent legs run. A failed sell blocks its dependent rebuy and every leg after it. An IOC partial fill is final and stops later legs. bt trades the unfilled remainder again only when a later session's effective target changes; an unchanged target keeps the resulting drift. An ambiguous placement stops the day, and bt never resubmits it.
 - Same-day round-trip guard: the executor refuses an `IntradayOdd` order when today's trade listing already holds an `IntradayOdd` fill in the opposite direction for the symbol.
-- Simulation server: odd lots are unsupported. In simulation the odd order is skipped with a log line; production submits it.
+- Simulation server: odd lots are unsupported. In simulation bt skips the odd order with a log line; production submits it.
 - Positions are read with `unit: Share` so odd holdings count in inventory and equity. `position_detail` takes no unit field and reports lots; a detail quantity larger than the held margin shares stops the day.
 - Live funding uses the 14.25 bps settlement-debit list rate with a TWD 1 minimum per order for affordability and cash carry.
 
 ## US live: fractional shares
 
-- `desired_shares` returns a float. The order quantity is the fractional difference between desired and held, rounded down to Alpaca's 9-decimal precision. Buy deltas below USD 1 notional are skipped. Sells of any positive quantity are submitted, so a sub-USD-1 position can always be closed.
+- Desired shares are fractional: target x equity / price. The order quantity is the fractional difference between desired and held, rounded down to Alpaca's 9-decimal precision. bt skips buy deltas below USD 1 notional. It submits sells of any positive quantity, so a sub-USD-1 position can always be closed.
 - Order: `type: market`, `time_in_force: day`. The decision runs about 15 minutes before the close and submission stops 10 minutes before the close. The deterministic `client_order_id` and the query-before-submit dedup are unchanged.
-- Whole-share truncation (`desired_shares`, `order_delta`) is removed. The US backtester never rounded, so its outputs are unchanged.
+- US live no longer truncates desired shares or the order delta to whole shares. The US backtester never rounded, so its outputs are unchanged.
 
 ## Costs
 
-TW defaults: `fee_bps` 2.85 and `min_fee` 1, replacing the previous defaults. Sell tax and slippage unchanged. The minimum applies per order, so a cash leg split into a lot order and an odd order pays two minimums in live execution. The backtest planner charges one minimum per asset trade, a fidelity note in `docs/engine.md`. Live funding debits the 14.25 bps list rate with the same TWD 1 minimum. Because capital is mandatory, the minimum fee and the US per-share fees always apply in the backtester; the "only with `--capital`" clauses are removed from code and docs.
+TW defaults: `fee_bps` 2.85 and `min_fee` 1 replace the previous defaults. Sell tax and slippage are unchanged. The minimum applies per order, so a cash leg split into a lot order and an odd order pays two minimums in live execution. The backtest planner charges one minimum per asset trade, a fidelity note in `docs/engine.md`. Live funding debits the 14.25 bps list rate with the same TWD 1 minimum. Because capital is mandatory, the backtester always applies the minimum fee and the US per-share fees, and the "only with `--capital`" clauses are removed from code and docs.
 
 ## Testing and gates
 
