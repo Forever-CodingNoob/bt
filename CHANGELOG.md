@@ -27,6 +27,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - TW live accepts Shioaji snapshot timestamps with 1 to 9 fractional-second digits and truncates them to whole seconds for session-time checks.
 - TW live planning now keeps drift when the effective target is unchanged and trades only when the target changes. It applies the minimum commission without rescaling absolute broker values.
+- US live and `bt target` reject an Alpaca snapshot whose open, high, low, or latest trade price is not positive and finite. Before, a negative price made the desired share count negative, so the daemon could sell the whole holding.
 
 ## [0.9.0] - 2026-09-06
 

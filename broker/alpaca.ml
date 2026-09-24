@@ -77,6 +77,11 @@ let float_field label value =
   try float_of_string value with Failure _ ->
     failf "invalid Alpaca %s value %S" label value
 
+let price_field label value =
+  let price = float_field label value in
+  if Float.is_finite price && price > 0. then price
+  else failf "invalid Alpaca %s value %S" label value
+
 let bool_field label value =
   try bool_of_string value with Invalid_argument _ ->
     failf "invalid Alpaca %s value %S" label value
@@ -125,10 +130,10 @@ let parse_snapshot raw =
   | [day_date; prev_day_date; day_open; day_high; day_low; latest; day_volume] ->
       { day_date;
         prev_day_date;
-        day_open = float_field "snapshot dailyBar.o" day_open;
-        day_high = float_field "snapshot dailyBar.h" day_high;
-        day_low = float_field "snapshot dailyBar.l" day_low;
-        latest = float_field "snapshot latestTrade.p" latest;
+        day_open = price_field "snapshot dailyBar.o" day_open;
+        day_high = price_field "snapshot dailyBar.h" day_high;
+        day_low = price_field "snapshot dailyBar.l" day_low;
+        latest = price_field "snapshot latestTrade.p" latest;
         day_volume = float_field "snapshot dailyBar.v" day_volume }
   | _ -> failwith "invalid Alpaca snapshot response"
 

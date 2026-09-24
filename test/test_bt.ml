@@ -4387,7 +4387,8 @@ let test_alpaca_order_parse () =
   assert (filled = filled_expected)
 
 let test_alpaca_snapshot_parse () =
-  let actual = Alpaca.parse_snapshot (alpaca_fixture "snapshot.json") in
+  let fixture = alpaca_fixture "snapshot.json" in
+  let actual = Alpaca.parse_snapshot fixture in
   (* Dates are the dailyBar and prevDailyBar timestamp prefixes.
      OHLCV comes from dailyBar; latest comes from latestTrade.p. *)
   let expected : Alpaca.snapshot_t =
@@ -4399,7 +4400,22 @@ let test_alpaca_snapshot_parse () =
       latest = 172.55;
       day_volume = 56457696. }
   in
-  assert (actual = expected)
+  assert (actual = expected);
+  let with_field before after =
+    String.concat "\n"
+      (List.map
+         (fun line -> if line = before then after else line)
+         (String.split_on_char '\n' fixture))
+  in
+  assert_failure (fun () ->
+    ignore (Alpaca.parse_snapshot
+      (with_field "    \"p\": 172.55," "    \"p\": -1,")));
+  assert_failure (fun () ->
+    ignore (Alpaca.parse_snapshot
+      (with_field "    \"p\": 172.55," "    \"p\": 0,")));
+  assert_failure (fun () ->
+    ignore (Alpaca.parse_snapshot
+      (with_field "    \"l\": 171.6618," "    \"l\": -1,")))
 
 let test_engine_effective_targets () =
   let ratio =
