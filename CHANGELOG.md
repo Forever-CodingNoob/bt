@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-## [0.10.0] - 2026-09-23
+## [0.10.0] - 2026-09-24
 
 ### Added
 
@@ -19,8 +19,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `bt run` and `bt daytrade` require `--capital`. A missing value is a usage error (`run: --capital is required`, `daytrade: --capital is required`). The minimum fee and per-share fees always apply.
 - The backtest and live planning floor TW quantities to whole shares for cash inventory and to 1000-share lots for margin inventory. US quantities stay fractional.
 - The TW default commission is 0.0285% (SinoPac electronic-trading promotion rate) with a TWD 1 minimum per order. It replaces 0.0399% with a TWD 20 minimum.
-- TW live submits `Common` lots plus one `IntradayOdd` remainder per cash leg. It sends odd-lot orders as limit `ROD` orders at the snapshot ask or bid, does not poll them, and skips them on the simulation server. TW live reads positions in shares. Live planning and execution both use the 14.25 bps settlement-debit list rate.
+- TW live submits `Common` lots plus one `IntradayOdd` remainder per cash leg. It sends odd-lot orders as limit `ROD` orders at the snapshot ask or bid, does not poll them, and skips them on the simulation server. Live planning and execution both use the 14.25 bps settlement-debit list rate.
 - If the broker rejects a `Common` order with no fill, TW live still runs the later independent legs. A rejected sell still blocks its dependent rebuy.
+- TW live reads positions in shares, so any holding in another symbol, including an odd lot, now makes `bt target` fail and the daemon skip the day, as the one-stock account rule requires. Before, positions were read in whole lots, so the odd-lot part of every holding was not seen and was left out of equity.
 - US live submits fractional `market` orders with `time_in_force: day` instead of whole-share market-on-close orders. It skips buys below USD 1 and submits sells of any positive quantity.
 
 ### Fixed
