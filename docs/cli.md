@@ -577,7 +577,7 @@ One basis point is 0.01%. One hundred basis points are 1%.
 | Market and symbol | Fee | Minimum fee | Sell tax | Per-share sell fee | Slippage |
 |---|---|---|---|---|---|
 | US | 0 bps (0%) | - | 0.206 bps (SEC fee, effective 2026-04-04) | $0.000195/share, $0.01 floor, $9.79 cap (TAF, effective 2026-01-01) | 0 bps (0%) |
-| Taiwan ordinary bond ETF (`00...B`) | 2.85 bps (0.0285%) | 1 TWD per order | 0 bps (0%) through 2026-12-31 | - | 0 bps (0%) |
+| Taiwan ordinary bond ETF (`00...B`) | 2.85 bps (0.0285%) | 1 TWD per order | 0 bps (0%) through 2026-12-31; the engine has no end date, see [Costs and taxes](./engine.md#costs-and-taxes-1) | - | 0 bps (0%) |
 | Other Taiwan `00` ETF or `02` ETN | 2.85 bps (0.0285%) | 1 TWD per order | 10 bps (0.10%) | - | 0 bps (0%) |
 | Other Taiwan symbol | 2.85 bps (0.0285%) | 1 TWD per order | 30 bps (0.30%) | - | 0 bps (0%) |
 

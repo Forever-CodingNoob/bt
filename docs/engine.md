@@ -164,9 +164,12 @@ Sell-tax classes:
 
 | Symbol class | Sell tax |
 |---|---|
-| Ordinary bond ETF (`00...B`) | 0% (temporary exemption through 2026-12-31; the engine applies 0% on every date) |
+| Ordinary bond ETF (`00...B`) | 0% (temporary exemption through 2026-12-31) |
 | Other `00` ETFs and `02` ETNs | 0.1% |
 | All other Taiwan symbols | 0.3% |
+
+> [!WARNING]
+> The bond ETF sell-tax exemption ends 2026-12-31, but `default_costs` in `engine/engine.ml` has no end date. From 2027-01-01, backtests and TW live still price `00...B` sells at 0% tax, so they understate the cost of those sells until someone updates `default_costs`.
 
 Override these with `--fee-bps`, `--tax-bps`, and `--slip-bps`.
 

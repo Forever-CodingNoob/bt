@@ -151,6 +151,7 @@ let default_costs ~market ~symbol =
       in
       let is_etf = starts_with_zero '0' in
       let tax_bps =
+        (* The bond ETF sell-tax exemption ends 2026-12-31, but this rule has no date check: from 2027-01-01 it understates tax on 00...B sells. Update it when the rule changes. *)
         if is_etf && symbol.[length - 1] = 'B' then 0.
         else if is_etf || starts_with_zero '2' then 10.
         else 30.
