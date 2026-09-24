@@ -57,16 +57,6 @@ val snapshot_session :
   provisional_date:string ->
   [`Proceed | `Skip of string]
 
-(** Convert target exposure to fractional shares. *)
-val desired_shares : target:float -> equity:float -> price:float -> float
-
-(** Difference between desired and held shares. *)
-val order_delta : desired:float -> held:float -> float
-
-(** Whether a buy's absolute notional is below one dollar; sells never are. *)
-val below_threshold :
-  side:[`Buy | `Sell] -> delta:float -> price:float -> bool
-
 (** Build the deterministic daily Alpaca client order identifier. *)
 val client_order_id : symbol:string -> date:string -> string
 
@@ -119,7 +109,6 @@ val taipei_phase :
 (** Submit TW legs in order. Common fills settle before the next leg;
     intraday-odd ROD orders reserve buy cash without waiting for final fills. *)
 val execute_tw_legs :
-  ?log_odd:(string -> unit) ->
   mode:mode ->
   bid:float ->
   ask:float ->

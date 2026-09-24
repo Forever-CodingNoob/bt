@@ -274,6 +274,14 @@ let require_price_response json_path process_status http_code =
     | `Ok -> ()
     | `Error message -> failf "FinMind API error: %s" message
 
+let transform_json ~args ~expression ~json_path ~rows_path =
+  match
+    run_to_file "/usr/bin/jq" (("-r" :: args) @ [expression; json_path])
+      rows_path
+  with
+  | Unix.WEXITED 0 -> ()
+  | _ -> failwith "jq failed while converting the FinMind response"
+
 let parse_previous_trading_day ~before raw =
   let () = ignore (parse_date "before" before) in
   with_temp ".json" (fun json_path ->
@@ -293,12 +301,9 @@ let parse_previous_trading_day ~before raw =
             "if type == \"object\" and (.date | type) == \"string\" " ^
             "then [.date] | @tsv else error(\"invalid trading date\") end end"
           in
-          let status =
-            run_to_file "/usr/bin/jq" ["-er"; expression; json_path] dates_path
-          in
           let () =
-            if not (process_ok status) then
-              failwith "invalid FinMind trading calendar response"
+            transform_json ~args:["-e"] ~expression ~json_path
+              ~rows_path:dates_path
           in
           let dates =
             String.split_on_char '\n' (read_text dates_path)
@@ -307,19 +312,13 @@ let parse_previous_trading_day ~before raw =
             List.fold_left
               (fun latest date ->
                 let () = ignore (parse_date "trading calendar" date) in
-                if String.compare date before >= 0 then latest
-                else
-                  match latest with
-                  | None -> Some date
-                  | Some previous ->
-                      Some
-                        (if String.compare date previous > 0 then date
-                         else previous))
-              None dates
+                if String.compare date before < 0 &&
+                   String.compare date latest > 0 then date
+                else latest)
+              "" dates
           in
-          match latest with
-          | Some date -> date
-          | None -> failf "no trading date before %s" before))
+          if latest = "" then failf "no trading date before %s" before
+          else latest))
 
 
 let unquote field =
@@ -494,13 +493,6 @@ let rewrite_rows ~header ~rows_path ~cache_path =
       let () = Sys.rename temporary cache_path in
       completed := true)
 
-let transform_json ~args ~expression ~json_path ~rows_path =
-  match
-    run_to_file "/usr/bin/jq" (("-r" :: args) @ [expression; json_path])
-      rows_path
-  with
-  | Unix.WEXITED 0 -> ()
-  | _ -> failwith "jq failed while converting the FinMind response"
 
 let fetch_rows ~token ~dataset ~symbol ~from_ ~to_ ~expression ~consume =
   with_temp ".json" (fun json_path ->
@@ -1429,12 +1421,7 @@ let fetch_tw_adjustments_with_token ~token ~symbol ~to_ ~directory =
     fetch_events ~token ~symbol ~to_
       ~cache_path:(Filename.concat directory (symbol ^ ".events.csv"))
   in
-  match dividend_failure with
-  | Some _ as failure -> failure
-  | None ->
-      (match cash_failure with
-       | Some _ as failure -> failure
-       | None -> events_failure)
+  List.find_map Fun.id [dividend_failure; cash_failure; events_failure]
 
 let fetch_tw_adjustments ~symbol ~to_ ~data_dir =
   let () = check_symbol symbol in
@@ -1504,6 +1491,35 @@ let fetch ~market ~symbol ~from_ ~to_ ~data_dir =
   | _ -> failf "invalid market %S (expected tw or us)" market
 
 
+let stockinfo_kind ~data_dir ~symbol =
+  let path =
+    Filename.concat (Filename.concat data_dir "tw") "stockinfo.csv"
+  in
+  let input = open_in path in
+  Fun.protect
+    ~finally:(fun () -> close_in input)
+    (fun () ->
+      let () = ignore (input_line input) in
+      let rec read_best best =
+        match input_line input with
+        | line ->
+            let best =
+              match String.split_on_char ',' line with
+              | [stock_id; kind; date] when unquote stock_id = symbol ->
+                  let date = unquote date in
+                  (match best with
+                   | Some (previous, _) when String.compare previous date >= 0 ->
+                       best
+                   | _ -> Some (date, unquote kind))
+              | _ -> best
+            in
+            read_best best
+        | exception End_of_file -> best
+      in
+      match read_best None with
+      | Some (_, kind) -> Some kind
+      | None -> None)
+
 let financing_ratio ~market ~data_dir ~symbol =
   let market = market_name market in
   match market with
@@ -1522,37 +1538,10 @@ let financing_ratio ~market ~data_dir ~symbol =
     in
     if not (Sys.file_exists path) then fallback ()
     else
-      let input = open_in path in
-      Fun.protect
-        ~finally:(fun () -> close_in input)
-        (fun () ->
-          let () =
-            match input_line input with
-            | _header -> ()
-            | exception End_of_file -> ()
-          in
-          let rec read_best best =
-            match input_line input with
-            | line ->
-                let best =
-                  match String.split_on_char ',' line with
-                  | [stock_id; kind; date]
-                    when unquote stock_id = symbol ->
-                      let date = unquote date in
-                      (match best with
-                       | Some (previous, _)
-                         when String.compare previous date >= 0 ->
-                           best
-                       | _ -> Some (date, unquote kind))
-                  | _ -> best
-                in
-                read_best best
-            | exception End_of_file -> best
-          in
-          (match read_best None with
-           | Some (_, "twse") -> 0.6
-           | Some (_, "tpex") -> 0.6
-           | _ -> fallback ()))
+      (match stockinfo_kind ~data_dir ~symbol with
+       | Some ("twse" | "tpex") -> 0.6
+       | None | Some _ -> fallback ()
+       | exception End_of_file -> fallback ())
   | _ -> failf "invalid market %S (expected tw or us)" market
 
 

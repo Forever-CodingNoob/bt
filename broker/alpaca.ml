@@ -58,28 +58,12 @@ let read_text path =
     ~finally:(fun () -> close_in input)
     (fun () -> really_input_string input (in_channel_length input))
 
-let rec wait_for pid =
-  try snd (Unix.waitpid [] pid) with
-  | Unix.Unix_error (Unix.EINTR, _, _) -> wait_for pid
-
 let run_capture program args =
-  with_temp ".out" (fun output_path ->
-    let output =
-      Unix.openfile output_path [Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC] 0o600
-    in
-    let pid =
-      Fun.protect
-        ~finally:(fun () -> Unix.close output)
-        (fun () ->
-          Unix.create_process program (Array.of_list (program :: args))
-            Unix.stdin output Unix.stderr)
-    in
-    let status = wait_for pid in
-    status, read_text output_path)
+  let input = Unix.open_process_args_in program (Array.of_list (program :: args)) in
+  let output = In_channel.input_all input in
+  Unix.close_process_in input, output
 
-let process_ok = function
-  | Unix.WEXITED 0 -> true
-  | Unix.WEXITED _ | Unix.WSIGNALED _ | Unix.WSTOPPED _ -> false
+let process_ok = function Unix.WEXITED 0 -> true | _ -> false
 
 let jq_fields label expression raw =
   with_temp ".json" (fun input_path ->

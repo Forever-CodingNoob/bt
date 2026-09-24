@@ -1,7 +1,6 @@
 (** Shioaji server information used to guard live and simulation modes. *)
 type info = {
   simulation : bool;
-  version : string;
 }
 
 (** Shioaji stock snapshot fields used to build a provisional daily bar. *)
@@ -22,8 +21,6 @@ type position = {
   code : string;
   cond : string;
   shares : int;
-  yd_shares : int;
-  avg_price : float;
   last_price : float;
   loan_amount : float;
   interest : float;
@@ -71,18 +68,13 @@ type trade = {
   order_quantity : int;
   deal_quantity : int;
   deal_price : float option;
-  order_datetime : string;
 }
 
-(** A dated raw stock-account settlement amount and its T-day offset. *)
+(** A raw stock-account settlement amount and its T-day offset. *)
 type settlement = {
-  date : string;
   amount : float;
   day : int;
 }
-
-(** Shioaji REST root from [SHIOAJI_URL], defaulting to localhost port 8080. *)
-val base_url : unit -> string
 
 (** Build JSON request headers. Include Bearer authentication only when
     requested and both supplied credentials are nonempty. *)
@@ -104,7 +96,7 @@ val parse_position_details : string -> position_detail list
 (** Parse settlement cash, raising [Failure] with a non-empty broker error. *)
 val parse_balance : string -> float
 
-(** Parse a list of dated raw stock-account settlement amounts. *)
+(** Parse raw stock-account settlement amounts, validating broker dates. *)
 val parse_settlements : string -> settlement list
 
 (** Parse the initial result of placing an order. *)
@@ -113,7 +105,7 @@ val parse_placed : string -> placed
 (** Parse and retain today's trades for one stock code. *)
 val parse_orders_today : code:string -> today:string -> string -> trade list
 
-(** Fetch server mode and version information. *)
+(** Fetch server simulation-mode information. *)
 val info : unit -> info
 
 (** Fetch one stock snapshot. *)

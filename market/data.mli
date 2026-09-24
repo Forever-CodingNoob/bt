@@ -68,6 +68,10 @@ val load_asset :
 (** Retain bars whose dates satisfy the supplied predicate. *)
 val filter_dates : keep:(string -> bool) -> bar array -> bar array
 
+(** Return the latest dated stockinfo type for a TW symbol, if present.
+    Raises [End_of_file] for an empty cache. *)
+val stockinfo_kind : data_dir:string -> symbol:string -> string option
+
 (** Return the financing ratio for a symbol: US defaults to Reg T 50%,
     TW resolves from cached stockinfo or falls back to TWSE 60%. *)
 val financing_ratio : market:string -> data_dir:string -> symbol:string -> float

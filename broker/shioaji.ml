@@ -1,6 +1,5 @@
 type info = {
   simulation : bool;
-  version : string;
 }
 
 type snapshot = {
@@ -19,8 +18,6 @@ type position = {
   code : string;
   cond : string;
   shares : int;
-  yd_shares : int;
-  avg_price : float;
   last_price : float;
   loan_amount : float;
   interest : float;
@@ -61,11 +58,9 @@ type trade = {
   order_quantity : int;
   deal_quantity : int;
   deal_price : float option;
-  order_datetime : string;
 }
 
 type settlement = {
-  date : string;
   amount : float;
   day : int;
 }
@@ -96,28 +91,12 @@ let read_text path =
     ~finally:(fun () -> close_in input)
     (fun () -> really_input_string input (in_channel_length input))
 
-let rec wait_for pid =
-  try snd (Unix.waitpid [] pid) with
-  | Unix.Unix_error (Unix.EINTR, _, _) -> wait_for pid
-
 let run_capture program args =
-  with_temp ".out" (fun output_path ->
-    let output =
-      Unix.openfile output_path [Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC] 0o600
-    in
-    let pid =
-      Fun.protect
-        ~finally:(fun () -> Unix.close output)
-        (fun () ->
-          Unix.create_process program (Array.of_list (program :: args))
-            Unix.stdin output Unix.stderr)
-    in
-    let status = wait_for pid in
-    status, read_text output_path)
+  let input = Unix.open_process_args_in program (Array.of_list (program :: args)) in
+  let output = In_channel.input_all input in
+  Unix.close_process_in input, output
 
-let process_ok = function
-  | Unix.WEXITED 0 -> true
-  | Unix.WEXITED _ | Unix.WSIGNALED _ | Unix.WSTOPPED _ -> false
+let process_ok = function Unix.WEXITED 0 -> true | _ -> false
 
 let jq_output ?(args = []) label expression raw =
   with_temp ".json" (fun input_path ->
@@ -210,8 +189,8 @@ let parse_info raw =
   match
     jq_fields "info" "[(.simulation | tostring), .version] | @tsv" raw
   with
-  | [simulation; version] ->
-      { simulation = bool_field "info simulation" simulation; version }
+  | [simulation; _version] ->
+      { simulation = bool_field "info simulation" simulation }
   | _ -> failwith "invalid Shioaji info response"
 
 let parse_snapshot raw =
@@ -235,12 +214,12 @@ let parse_snapshot raw =
 let parse_position = function
   | [id; code; cond; shares; yd_shares; avg_price; last_price; loan_amount;
      interest] ->
+      let () = ignore (nonnegative_int_field "position yd_quantity" yd_shares) in
+      let () = ignore (nonnegative_float_field "position price" avg_price) in
       { id = nonnegative_int_field "position id" id;
         code;
         cond;
         shares = nonnegative_int_field "position quantity" shares;
-        yd_shares = nonnegative_int_field "position yd_quantity" yd_shares;
-        avg_price = nonnegative_float_field "position price" avg_price;
         last_price =
           nonnegative_float_field "position last_price" last_price;
         loan_amount =
@@ -283,9 +262,8 @@ let parse_settlement = function
       let day = nonnegative_int_field "settlement T" day in
       (match day <= 2 with
        | true ->
-           { date = date_field "settlement date" date;
-             amount = float_field "settlement amount" amount;
-             day }
+           let () = ignore (date_field "settlement date" date) in
+           { amount = float_field "settlement amount" amount; day }
        | false -> failf "invalid Shioaji settlement T value %d" day)
   | _ -> failwith "invalid Shioaji settlements response"
 
@@ -325,7 +303,7 @@ let deal_fields value =
 
 let parse_trade = function
   | [order_id; code; action; cond; lot; status; order_quantity;
-     deal_quantity; deals; order_datetime] ->
+     deal_quantity; deals; _order_datetime] ->
       let order_quantity =
         nonnegative_int_field "trade order_quantity" order_quantity
       in
@@ -343,7 +321,7 @@ let parse_trade = function
              && confirmed_quantity = deal_quantity with
        | true ->
            { order_id; code; action; cond; lot; status; order_quantity;
-             deal_quantity; deal_price; order_datetime }
+             deal_quantity; deal_price }
        | false -> failwith "invalid Shioaji trade quantities")
   | _ -> failwith "invalid Shioaji trades response"
 
@@ -419,9 +397,7 @@ let snapshot ~exchange ~code =
   |> expect_ok "snapshot" parse_snapshot
 
 let positions () =
-  let body =
-    jq_object "positions" [] "{account_type:\"S\",unit:\"Share\"}"
-  in
+  let body = {|{"account_type":"S","unit":"Share"}|} in
   request ~method_:"POST" ~body ~path:"/api/v1/portfolio/position_unit" ()
   |> expect_ok "positions" parse_positions
 
@@ -440,12 +416,12 @@ let position_details ~detail_id =
   |> expect_ok "position detail" parse_position_details
 
 let balance () =
-  let body = jq_object "balance" [] "{}" in
+  let body = {|{}|} in
   request ~method_:"POST" ~body ~path:"/api/v1/portfolio/account_balance" ()
   |> expect_ok "balance" parse_balance
 
 let settlements () =
-  let body = jq_object "settlements" [] "{account_type:\"S\"}" in
+  let body = {|{"account_type":"S"}|} in
   request ~method_:"POST" ~body ~path:"/api/v1/portfolio/settlements" ()
   |> expect_ok "settlements" parse_settlements
 
@@ -491,6 +467,6 @@ let place_order order =
   |> expect_ok "order submission" parse_placed
 
 let orders_today ~code ~today =
-  let body = jq_object "trades" [] "{}" in
+  let body = {|{}|} in
   request ~method_:"POST" ~body ~path:"/api/v1/order/trades" ()
   |> expect_ok "order status" (parse_orders_today ~code ~today)

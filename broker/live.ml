@@ -63,27 +63,17 @@ let snapshot_session ~session_date ~provisional_date =
           %s"
          provisional_date session_date)
 
-let desired_shares ~target ~equity ~price =
-  target *. equity /. price
-
-let order_delta ~desired ~held =
-  desired -. held
-
-let below_threshold ~side ~delta ~price =
-  match side with
-  | `Buy -> abs_float (delta *. price) < 1.
-  | `Sell -> false
 
 let client_order_id ~symbol ~date =
   Printf.sprintf "bt-%s-%s" symbol date
 
 let decide_action ~symbol ~date ~target ~equity ~price ~held =
-  let delta = order_delta ~desired:(desired_shares ~target ~equity ~price) ~held in
+  let delta = (target *. equity /. price) -. held in
   let side, shares =
     if delta > 0. then (`Buy, delta) else (`Sell, Float.min (-. delta) held)
   in
   let qty = float_of_string (Alpaca.qty_string shares) in
-  if qty = 0. || below_threshold ~side ~delta:qty ~price then
+  if qty = 0. || (side = `Buy && qty *. price < 1.) then
     Skip "below $1 minimum order value"
   else
     Order { side; qty; id = client_order_id ~symbol ~date }
@@ -154,50 +144,17 @@ let shift_rfc3339 value seconds =
     (String.sub value start (String.length value - start))
 
 
-let unquote value =
-  let length = String.length value in
-  if length >= 2 && value.[0] = '"' && value.[length - 1] = '"' then
-    String.sub value 1 (length - 2)
-  else
-    value
-
 let exchange_of_symbol ~data_dir symbol =
-  let path =
-    Filename.concat (Filename.concat data_dir "tw") "stockinfo.csv"
-  in
-  let input = open_in path in
-  Fun.protect
-    ~finally:(fun () -> close_in input)
-    (fun () ->
-      let () =
-        match input_line input with
-        | _ -> ()
-        | exception End_of_file -> failwith "empty TW stockinfo cache"
-      in
-      let rec read_best best =
-        match input_line input with
-        | line ->
-            let best =
-              match String.split_on_char ',' line with
-              | [stock_id; kind; date] when unquote stock_id = symbol ->
-                  let row = unquote date, unquote kind in
-                  (match best with
-                   | Some (previous, _) when previous >= fst row -> best
-                   | _ -> Some row)
-              | _ -> best
-            in
-            read_best best
-        | exception End_of_file -> best
-      in
-      match read_best None with
-      | Some (_, "twse") -> "TSE"
-      | Some (_, "tpex") -> "OTC"
-      | Some (_, kind) ->
-          failwith
-            (Printf.sprintf "unsupported TW exchange type %S for %s" kind symbol)
-      | None ->
-          failwith
-            (Printf.sprintf "TW stockinfo has no exchange for %s" symbol))
+  match Data.stockinfo_kind ~data_dir ~symbol with
+  | Some "twse" -> "TSE"
+  | Some "tpex" -> "OTC"
+  | Some kind ->
+      failwith
+        (Printf.sprintf "unsupported TW exchange type %S for %s" kind symbol)
+  | None ->
+      failwith
+        (Printf.sprintf "TW stockinfo has no exchange for %s" symbol)
+  | exception End_of_file -> failwith "empty TW stockinfo cache"
 
 let tw_settlement_amount day settlements =
   match
@@ -1094,8 +1051,8 @@ let tw_order_cost (costs : Engine.costs) ~action ~price ~shares =
         Engine.taf_dollars costs ~shares:(float_of_int shares)
       else 0.)
 
-let execute_tw_legs ?(log_odd = fun message -> log "%s" message)
-    ~mode ~bid ~ask ~now ~sleep ~place_order ~orders_today ~exchange ~code
+let execute_tw_legs ~mode ~bid ~ask ~now ~sleep ~place_order ~orders_today
+    ~exchange ~code
     ~date ~price ~financing_ratio ~costs ~cash ~positions legs =
   let () = validate_date "order" date in
   let () =
@@ -1286,26 +1243,22 @@ let execute_tw_legs ?(log_odd = fun message -> log "%s" message)
           submit cash cash_shares margin_lots loans interests previous trades
             rest
         in
-        let dependent =
+        let dependency_filled =
           match previous with
-          | Some ((predecessor : leg), _) ->
-              predecessor.action = "Sell"
-              && leg.action = "Buy" && leg.cond = "MarginTrading"
-              && predecessor.quantity = leg.quantity
-              && predecessor.lot = leg.lot
-          | None -> false
+          | Some ((predecessor : leg), filled)
+            when predecessor.action = "Sell"
+                 && leg.action = "Buy" && leg.cond = "MarginTrading"
+                 && predecessor.quantity = leg.quantity
+                 && predecessor.lot = leg.lot ->
+              Some filled
+          | _ -> None
         in
-        let full_predecessor =
-          match previous with
-          | Some (_, filled) -> filled
-          | None -> true
-        in
-        if dependent && not full_predecessor then
+        if dependency_filled = Some false then
           stop
             (Printf.sprintf "dependent %s %s %d needs complete sell fill"
                leg.action leg.cond leg.quantity) (leg :: rest)
         else if leg.lot = Shioaji.IntradayOdd && mode = Paper then
-          let () = log_odd "submitted=skip:odd-lot-unsupported-in-simulation" in
+          let () = log "submitted=skip:odd-lot-unsupported-in-simulation" in
           continue cash cash_shares margin_lots loans interests None trades
         else
           let quote =
@@ -1317,7 +1270,7 @@ let execute_tw_legs ?(log_odd = fun message -> log "%s" message)
                 failwith (Printf.sprintf "unsupported TW order action %s" action)
           in
           if not (Float.is_finite quote) || quote <= 0. then
-            let () = log_odd "submitted=skip:odd-lot-quote-unavailable" in
+            let () = log "submitted=skip:odd-lot-quote-unavailable" in
             continue cash cash_shares margin_lots loans interests None trades
           else
             let available =
@@ -1328,7 +1281,7 @@ let execute_tw_legs ?(log_odd = fun message -> log "%s" message)
               | action ->
                   failwith (Printf.sprintf "unsupported TW order action %s" action)
             in
-            if dependent && available <> leg.quantity then
+            if Option.is_some dependency_filled && available <> leg.quantity then
               stop
                 (Printf.sprintf "dependent %s %s %d is not fully funded"
                    leg.action leg.cond leg.quantity) (leg :: rest)
@@ -1399,9 +1352,7 @@ let execute_tw_legs ?(log_odd = fun message -> log "%s" message)
                       when submitted.lot = Shioaji.IntradayOdd
                            && List.mem placed.status
                                 ["Failed"; "Inactive"; "Cancelled"; "Rejected"] ->
-                        let () =
-                          log_odd "submitted=skip:odd-lot-rejected"
-                        in
+                        let () = log "submitted=skip:odd-lot-rejected" in
                         continue cash cash_shares margin_lots loans interests
                           None trades
                     | Ok (placed : Shioaji.placed) when placed.order_id = "" ->
@@ -1419,10 +1370,8 @@ let execute_tw_legs ?(log_odd = fun message -> log "%s" message)
                           else cash_shares
                         in
                         let () =
-                          log_odd
-                            (Printf.sprintf
-                               "submitted=intraday-odd-rod-pending quantity=%d"
-                               available)
+                          log "submitted=intraday-odd-rod-pending quantity=%d"
+                            available
                         in
                         if available <> leg.quantity then
                           stop
