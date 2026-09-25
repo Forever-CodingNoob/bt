@@ -4665,6 +4665,34 @@ let test_us_live_submit_cutoff () =
     (List.of_seq (Queue.to_seq posted)
      = [ ("SPY", 1.666666666, "bt-SPY-2025-06-24") ])
 
+let test_live_daemon_lock () =
+  with_temp_market "us" (fun root _ ->
+    let directory = Filename.concat root ".bt" in
+    let lock_path = Filename.concat directory "live-us-paper.lock" in
+    let fork_expect available =
+      let pid = Unix.fork () in
+      if pid = 0 then
+        let status =
+          match Live.lock_daemon ~directory ~market:"us" Live.Paper with
+          | fd ->
+              Unix.close fd;
+              if available then 0 else 1
+          | exception Failure _ -> if not available then 0 else 1
+          | exception _ -> 1
+        in
+        Unix._exit status
+      else
+        let _, status = Unix.waitpid [] pid in
+        assert (status = Unix.WEXITED 0)
+    in
+    let fd = Live.lock_daemon ~directory ~market:"us" Live.Paper in
+    let () = assert (Sys.file_exists lock_path) in
+    let () =
+      Fun.protect ~finally:(fun () -> Unix.close fd)
+        (fun () -> fork_expect false)
+    in
+    fork_expect true)
+
 let test_live_startup_guard () =
   let account : Alpaca.account_t =
     { equity = 10000.;
@@ -7177,6 +7205,7 @@ let () =
   test_us_live_quantity_limit ();
   test_live_schedule ();
   test_us_live_submit_cutoff ();
+  test_live_daemon_lock ();
   test_live_startup_guard ();
   test_live_commands_reject_tw ();
   let () = test_tw_live_rejects_production_equity () in

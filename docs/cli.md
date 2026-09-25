@@ -385,6 +385,8 @@ Both market arms share these options.
 
 Both daemons print ASCII log lines to standard output. They record the session date, fetched-through date, provisional close, target, equity, held position, action or skip reason, and fill state and price.
 
+Only one daemon for a user can hold `~/.bt/live-<market>-<mode>.lock` at a time (`paper` or `live` for US; `simulation` or `production` for TW), regardless of the data directory; another fails with `another bt live daemon holds <path>`.
+
 ### US market
 
 #### Prerequisites
@@ -424,11 +426,11 @@ The Submit phase ends 10 minutes before the close because Alpaca queues a day or
 
 #### Output and logs
 
-Each US decision line records `held` and `order`, which holds the deterministic order as `SIDE:QUANTITY:CLIENT-ORDER-ID` or the skip reason as `skip:REASON`. Fill lines record `client-order-id`, `fill-status`, `fill-price`, and `filled-qty`. The `startup` line records the selected `mode`, `account` number, and `equity`.
+Each daemon line starts with a UTC timestamp in `YYYY-MM-DDTHH:MM:SSZ` format. Each US decision line records `held` and `order`, which holds the deterministic order as `SIDE:QUANTITY:CLIENT-ORDER-ID` or the skip reason as `skip:REASON`. Fill lines record `client-order-id`, `fill-status`, `fill-price`, and `filled-qty`. The `startup` line records the selected `mode`, `account` number, and `equity`.
 
 #### Failure handling
 
-The daemon refuses to start with an inactive or trading-blocked account. A stale cache, fetch or snapshot error, evaluation error, or order failure logs one error line and stops the US action for the day.
+The daemon refuses to start with an inactive or trading-blocked account. A stale cache, fetch or snapshot error, evaluation error, or order failure logs one error line and stops the US action for the day. A failed Alpaca clock request is retried every 60 seconds, and the daemon continues the same session when it recovers.
 
 > [!CAUTION]
 > `bt live --live` submits real-money fractional market orders. Confirm the credentials, account, and strategy before starting it.
@@ -500,7 +502,7 @@ Live planning and execution both use SinoPac's settlement-debit list rate of 14.
 
 #### Output and logs
 
-Each decision line records `cash-shares`, `margin-shares`, `loan`, `planned-legs` as `ACTION:CONDITION:LOT:QUANTITY` entries, and `submitted` as `complete`, `stop:REASON remaining:LEGS`, `skip:no-order-legs`, or `skip:existing-orders`. Odd-lot orders add their own `submitted=` lines. Trade lines record `order-id`, `action`, `cond`, `lot`, `fill-status`, `deal-quantity` in the trade's lot unit, and `fill-price`. The production `startup` line also records `acc-balance`, `t0`, `t1`, `t2`, spendable `cash`, and `equity`.
+Each daemon line starts with a UTC timestamp in `YYYY-MM-DDTHH:MM:SSZ` format. Each decision line records `cash-shares`, `margin-shares`, `loan`, `planned-legs` as `ACTION:CONDITION:LOT:QUANTITY` entries, and `submitted` as `complete`, `stop:REASON remaining:LEGS`, `skip:no-order-legs`, or `skip:existing-orders`. Odd-lot orders add their own `submitted=` lines. Trade lines record `order-id`, `action`, `cond`, `lot`, `fill-status`, `deal-quantity` in the trade's lot unit, and `fill-price`. The production `startup` line also records `acc-balance`, `t0`, `t1`, `t2`, spendable `cash`, and `equity`.
 
 #### Failure handling
 

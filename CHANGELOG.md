@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- The US daemon continues the same session after a failed Alpaca clock request recovers. Before, it skipped to the next open, so a transient network error could skip the day's decision.
+- `bt live` refuses to start while another daemon of the same user holds the lock for the same market and mode, so two daemons for one account cannot both submit the day's order.
+
+### Changed
+
+- Each `bt live` log line starts with a UTC timestamp.
+
 ## [0.10.0] - 2026-09-24
 
 ### Added

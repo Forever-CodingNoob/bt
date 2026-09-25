@@ -758,7 +758,10 @@ let printable_ascii value =
 let log format =
   Printf.ksprintf
     (fun line ->
-      print_endline (printable_ascii line);
+      let utc = Unix.gmtime (Unix.gettimeofday ()) in
+      Printf.printf "%04d-%02d-%02dT%02d:%02d:%02dZ %s\n"
+        (utc.tm_year + 1900) (utc.tm_mon + 1) utc.tm_mday
+        utc.tm_hour utc.tm_min utc.tm_sec (printable_ascii line);
       flush stdout)
     format
 
@@ -895,18 +898,17 @@ let run_us mode ~strat_path ~data_dir =
   let rec cycle () =
     match Alpaca.clock mode with
     | exception error ->
-        log "date=unknown error=%s order=skip"
+        log "date=unknown error=%s order=retry"
           (Printexc.to_string error);
         let rec resume_next_session () =
           Unix.sleepf 60.;
           match Alpaca.clock mode with
           | exception _ -> resume_next_session ()
-          | recovered ->
-              sleep_until recovered.next_open;
-              cycle ()
+          | recovered -> step recovered
         in
         resume_next_session ()
-    | clock ->
+    | clock -> step clock
+  and step clock =
         if not clock.is_open then begin
           sleep_until clock.next_open;
           cycle ()
@@ -1655,11 +1657,41 @@ let run_tw mode ~equity ~symbol ~strat_path ~data_dir =
   in
   cycle None None
 
+let lock_daemon ~directory ~market mode =
+  let name =
+    match market, mode with
+    | "us", mode -> mode_name mode
+    | "tw", Paper -> "simulation"
+    | "tw", Live -> "production"
+    | _ -> failwith "live trading supports us and tw only"
+  in
+  Data.mkdir_p directory;
+  let path = Filename.concat directory ("live-" ^ market ^ "-" ^ name ^ ".lock") in
+  let fd = Unix.openfile path [Unix.O_CREAT; Unix.O_RDWR] 0o600 in
+  match Unix.lockf fd Unix.F_TLOCK 0 with
+  | () -> fd
+  | exception Unix.Unix_error ((Unix.EACCES | Unix.EAGAIN), _, _) ->
+      Unix.close fd;
+      failwith ("another bt live daemon holds " ^ path)
+  | exception error ->
+      Unix.close fd;
+      raise error
+
 let run ?equity mode ~strat_path ~data_dir =
   let ast = Dsl.parse_file strat_path in
+  let directory =
+    match Sys.getenv_opt "HOME" with
+    | Some home when home <> "" -> Filename.concat home ".bt"
+    | _ -> failwith "HOME must be set to run bt live"
+  in
   match Dsl.stocks_of ~filename:strat_path ast with
-  | [_, "us", _] -> run_us mode ~strat_path ~data_dir
+  | [_, "us", _] ->
+      let fd = lock_daemon ~directory ~market:"us" mode in
+      Fun.protect ~finally:(fun () -> Unix.close fd)
+        (fun () -> run_us mode ~strat_path ~data_dir)
   | [_, "tw", symbol] ->
-      run_tw mode ~equity ~symbol ~strat_path ~data_dir
+      let fd = lock_daemon ~directory ~market:"tw" mode in
+      Fun.protect ~finally:(fun () -> Unix.close fd)
+        (fun () -> run_tw mode ~equity ~symbol ~strat_path ~data_dir)
   | [_, _, _] -> failwith "live trading supports us and tw only"
   | _ -> failwith "live trading requires exactly one stock"

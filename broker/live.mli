@@ -179,6 +179,10 @@ val decide :
   data_dir:string ->
   decision
 
+(** Lock one market and daemon mode until the returned descriptor is closed. *)
+val lock_daemon :
+  directory:string -> market:string -> mode -> Unix.file_descr
+
 (** Run the live trading daemon until the process is stopped. *)
 val run :
   ?equity:float -> mode -> strat_path:string -> data_dir:string -> unit
