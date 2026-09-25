@@ -878,6 +878,15 @@ let execute_decision ?(order_by_client_id = Alpaca.order_by_client_id)
                   order))
   | Orders _ -> failwith "TW order legs require Shioaji"
 
+let retry_clock ~clock ~sleep ~dispatch =
+  let rec loop () =
+    sleep 60.;
+    match clock () with
+    | exception _ -> loop ()
+    | recovered -> dispatch recovered
+  in
+  loop ()
+
 let run_us mode ~strat_path ~data_dir =
   let ast = Dsl.parse_file strat_path in
   let symbol =
@@ -900,13 +909,8 @@ let run_us mode ~strat_path ~data_dir =
     | exception error ->
         log "date=unknown error=%s order=retry"
           (Printexc.to_string error);
-        let rec resume_next_session () =
-          Unix.sleepf 60.;
-          match Alpaca.clock mode with
-          | exception _ -> resume_next_session ()
-          | recovered -> step recovered
-        in
-        resume_next_session ()
+        retry_clock ~clock:(fun () -> Alpaca.clock mode) ~sleep:Unix.sleepf
+          ~dispatch:step
     | clock -> step clock
   and step clock =
         if not clock.is_open then begin
@@ -1667,7 +1671,7 @@ let lock_daemon ~directory ~market mode =
   in
   Data.mkdir_p directory;
   let path = Filename.concat directory ("live-" ^ market ^ "-" ^ name ^ ".lock") in
-  let fd = Unix.openfile path [Unix.O_CREAT; Unix.O_RDWR] 0o600 in
+  let fd = Unix.openfile path [Unix.O_CREAT; Unix.O_RDWR; Unix.O_CLOEXEC] 0o600 in
   match Unix.lockf fd Unix.F_TLOCK 0 with
   | () -> fd
   | exception Unix.Unix_error ((Unix.EACCES | Unix.EAGAIN), _, _) ->

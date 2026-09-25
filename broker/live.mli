@@ -179,6 +179,13 @@ val decide :
   data_dir:string ->
   decision
 
+(** Retry the clock every 60 seconds, then dispatch the recovered clock once. *)
+val retry_clock :
+  clock:(unit -> Alpaca.clock_t) ->
+  sleep:(float -> unit) ->
+  dispatch:(Alpaca.clock_t -> unit) ->
+  unit
+
 (** Lock one market and daemon mode until the returned descriptor is closed. *)
 val lock_daemon :
   directory:string -> market:string -> mode -> Unix.file_descr

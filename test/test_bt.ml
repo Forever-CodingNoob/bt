@@ -4665,6 +4665,31 @@ let test_us_live_submit_cutoff () =
     (List.of_seq (Queue.to_seq posted)
      = [ ("SPY", 1.666666666, "bt-SPY-2025-06-24") ])
 
+let test_live_retry_clock () =
+  let recovered : Alpaca.clock_t =
+    { timestamp = "2025-06-25T09:30:00-04:00";
+      is_open = true;
+      next_open = "2025-06-26T09:30:00-04:00";
+      next_close = "2025-06-25T16:00:00-04:00" }
+  in
+  let attempts = ref 0 in
+  let sleeps = ref [] in
+  let dispatched = ref [] in
+  let clock () =
+    incr attempts;
+    match !attempts with
+    | 1 | 2 -> failwith "clock unavailable"
+    | 3 -> recovered
+    | _ -> failwith "clock called after recovery"
+  in
+  Live.retry_clock ~clock
+    ~sleep:(fun seconds -> sleeps := seconds :: !sleeps)
+    ~dispatch:(fun value -> dispatched := value :: !dispatched);
+  (* Two failed clocks and one recovered clock require three 60-second sleeps. *)
+  assert (!attempts = 3);
+  assert (!sleeps = [60.; 60.; 60.]);
+  assert (!dispatched = [recovered])
+
 let test_live_daemon_lock () =
   with_temp_market "us" (fun root _ ->
     let directory = Filename.concat root ".bt" in
@@ -4677,7 +4702,11 @@ let test_live_daemon_lock () =
           | fd ->
               Unix.close fd;
               if available then 0 else 1
-          | exception Failure _ -> if not available then 0 else 1
+          | exception Failure message ->
+              if not available
+                 && String.starts_with ~prefix:"another bt live daemon holds"
+                      message
+              then 0 else 1
           | exception _ -> 1
         in
         Unix._exit status
@@ -7205,6 +7234,7 @@ let () =
   test_us_live_quantity_limit ();
   test_live_schedule ();
   test_us_live_submit_cutoff ();
+  test_live_retry_clock ();
   test_live_daemon_lock ();
   test_live_startup_guard ();
   test_live_commands_reject_tw ();

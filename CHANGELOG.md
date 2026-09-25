@@ -8,8 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- The US daemon continues the same session after a failed Alpaca clock request recovers. Before, it skipped to the next open, so a transient network error could skip the day's decision.
-- `bt live` refuses to start while another daemon of the same user holds the lock for the same market and mode, so two daemons for one account cannot both submit the day's order.
+- When the Alpaca clock request at the start of a US daemon cycle fails, the daemon retries it every 60 seconds and continues the same session once a request succeeds. Before, it skipped to the next open, so a transient network error could skip the day's decision. The clock check just before order submission does not retry: a failure there logs `order=skip` and stops the US action for the day.
+- `bt live` refuses to start while another daemon holds `$HOME/.bt/live-<market>-<mode>.lock`, so two daemons that share a `HOME`, market, and mode cannot both submit the day's order. The lock does not exclude daemons with different `HOME` values, even when they trade the same account.
 
 ### Changed
 

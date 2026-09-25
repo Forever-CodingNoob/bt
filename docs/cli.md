@@ -385,7 +385,7 @@ Both market arms share these options.
 
 Both daemons print ASCII log lines to standard output. They record the session date, fetched-through date, provisional close, target, equity, held position, action or skip reason, and fill state and price.
 
-Only one daemon for a user can hold `~/.bt/live-<market>-<mode>.lock` at a time (`paper` or `live` for US; `simulation` or `production` for TW), regardless of the data directory; another fails with `another bt live daemon holds <path>`.
+Only one daemon can hold `$HOME/.bt/live-<market>-<mode>.lock` at a time (`paper` or `live` for US; `simulation` or `production` for TW), regardless of the data directory; another fails with `another bt live daemon holds <path>`. The lock excludes only daemons that share a `HOME`, market, and mode, so daemons with different `HOME` values can trade the same account at once.
 
 ### US market
 
@@ -430,7 +430,7 @@ Each daemon line starts with a UTC timestamp in `YYYY-MM-DDTHH:MM:SSZ` format. E
 
 #### Failure handling
 
-The daemon refuses to start with an inactive or trading-blocked account. A stale cache, fetch or snapshot error, evaluation error, or order failure logs one error line and stops the US action for the day. A failed Alpaca clock request is retried every 60 seconds, and the daemon continues the same session when it recovers.
+The daemon refuses to start with an inactive or trading-blocked account. A stale cache, fetch or snapshot error, evaluation error, or order failure logs one error line and stops the US action for the day. If the Alpaca clock request at the start of a daemon cycle fails, the daemon logs `order=retry`, retries every 60 seconds, and continues the same session once a request succeeds. The clock check just before order submission does not retry: a failure there logs `order=skip` and stops the US action for the day.
 
 > [!CAUTION]
 > `bt live --live` submits real-money fractional market orders. Confirm the credentials, account, and strategy before starting it.
