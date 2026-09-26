@@ -18,6 +18,24 @@ let assert_failure function_ =
   in
   assert failed
 
+let capture_stdout function_ =
+  let path = Filename.temp_file "bt-stdout-" ".txt" in
+  Fun.protect ~finally:(fun () -> Sys.remove path) (fun () ->
+    let saved = Unix.dup Unix.stdout in
+    let target = Unix.openfile path [Unix.O_WRONLY; Unix.O_TRUNC] 0o600 in
+    flush stdout;
+    Unix.dup2 target Unix.stdout;
+    Unix.close target;
+    Fun.protect
+      ~finally:(fun () ->
+        flush stdout;
+        Unix.dup2 saved Unix.stdout;
+        Unix.close saved)
+      function_;
+    let input = open_in path in
+    Fun.protect ~finally:(fun () -> close_in input) (fun () ->
+      really_input_string input (in_channel_length input)))
+
 let with_temp_strategy contents function_ =
   let path = Filename.temp_file "bt-test-" ".strat" in
   Fun.protect
@@ -4609,10 +4627,10 @@ let test_live_schedule () =
     (Live.next_actions ~now:"2025-06-24T15:45:00-04:00" ~next_close:close
      = `Decide);
   assert
-    (Live.next_actions ~now:"2025-06-24T15:49:59-04:00" ~next_close:close
+    (Live.next_actions ~now:"2025-06-24T15:57:59-04:00" ~next_close:close
      = `Decide);
   assert
-    (Live.next_actions ~now:"2025-06-24T15:50:00-04:00" ~next_close:close
+    (Live.next_actions ~now:"2025-06-24T15:58:00-04:00" ~next_close:close
      = `Cutoff_passed);
   assert
     (Live.next_actions ~now:"2025-06-24T15:59:59-04:00" ~next_close:close
@@ -4626,7 +4644,11 @@ let test_live_schedule () =
        ~next_close:early_close
      = `Sleep_until "2025-11-28T12:45:00-05:00");
   assert
-    (Live.next_actions ~now:"2025-11-28T12:50:00-05:00"
+    (Live.next_actions ~now:"2025-11-28T12:57:59-05:00"
+       ~next_close:early_close
+     = `Decide);
+  assert
+    (Live.next_actions ~now:"2025-11-28T12:58:00-05:00"
        ~next_close:early_close
      = `Cutoff_passed)
 
@@ -4655,15 +4677,211 @@ let test_us_live_submit_cutoff () =
           filled_avg_price = Some 300.; filled_qty = qty })
       Live.Paper "SPY" close decision
   in
-  (* 15:50:00 is the cutoff, 10 minutes before the 16:00 close: no POST. *)
-  let () = execute "2025-06-24T15:50:00-04:00" in
+  (* Two minutes before the 16:00 close, the submission window has ended. *)
+  let () = execute "2025-06-24T15:58:00-04:00" in
   let () = assert (Queue.is_empty posted) in
   (* One second earlier the order is posted; filled is terminal, so no
      fill polling follows. *)
-  let () = execute "2025-06-24T15:49:59-04:00" in
+  let () = execute "2025-06-24T15:57:59-04:00" in
   assert
     (List.of_seq (Queue.to_seq posted)
      = [ ("SPY", 1.666666666, "bt-SPY-2025-06-24") ])
+
+let test_us_uncertain_submission_stops () =
+  let decision : Live.decision =
+    { fetched_through = "2025-06-23";
+      provisional =
+        { date = "2025-06-24"; o = 300.; h = 300.; l = 300.; c = 300.; v = 0. };
+      target = 0.5; equity = 1000.; held = 0.;
+      action =
+        Live.Order { side = `Buy; qty = 1.; id = "bt-SPY-2025-06-24" } }
+  in
+  let submissions = ref 0 in
+  let close = "2025-06-24T16:00:00-04:00" in
+  let () =
+    Live.execute_decision
+      ~order_by_client_id:(fun _ _ -> None)
+      ~clock:(fun _ ->
+        { Alpaca.timestamp = "2025-06-24T15:57:59-04:00";
+          is_open = true;
+          next_open = "2025-06-25T09:30:00-04:00"; next_close = close })
+      ~submit_market:(fun _ ~symbol:_ ~qty:_ ~side:_ ~client_order_id:_ ->
+        incr submissions;
+        failwith "curl failed while calling Alpaca")
+      Live.Paper "SPY" close decision
+  in
+  (* A POST that may have reached Alpaca cannot safely be submitted again. *)
+  assert (!submissions = 1)
+
+let test_us_rejected_submission_stops () =
+  let decision : Live.decision =
+    { fetched_through = "2025-06-23";
+      provisional =
+        { date = "2025-06-24"; o = 300.; h = 300.; l = 300.; c = 300.; v = 0. };
+      target = 0.5; equity = 1000.; held = 0.;
+      action =
+        Live.Order { side = `Buy; qty = 1.; id = "bt-SPY-2025-06-24" } }
+  in
+  let submissions = ref 0 in
+  let close = "2025-06-24T16:00:00-04:00" in
+  let () =
+    Live.execute_decision
+      ~order_by_client_id:(fun _ _ -> None)
+      ~clock:(fun _ ->
+        { Alpaca.timestamp = "2025-06-24T15:57:59-04:00";
+          is_open = true;
+          next_open = "2025-06-25T09:30:00-04:00"; next_close = close })
+      ~submit_market:(fun _ ~symbol:_ ~qty:_ ~side:_ ~client_order_id:_ ->
+        incr submissions;
+        { Alpaca.id = "rejected-id"; status = "rejected";
+          filled_avg_price = None; filled_qty = 0. })
+      Live.Paper "SPY" close decision
+  in
+  (* The broker returned a rejected order, so no second POST is safe. *)
+  assert (!submissions = 1)
+
+let test_us_rejected_log_failure_stops () =
+  let decision : Live.decision =
+    { fetched_through = "2025-06-23";
+      provisional =
+        { date = "2025-06-24"; o = 300.; h = 300.; l = 300.; c = 300.; v = 0. };
+      target = 0.5; equity = 1000.; held = 0.;
+      action =
+        Live.Order { side = `Buy; qty = 1.; id = "bt-SPY-2025-06-24" } }
+  in
+  let submissions = ref 0 in
+  let close = "2025-06-24T16:00:00-04:00" in
+  let saved = Unix.dup Unix.stdout in
+  let read_only = Unix.openfile "/dev/null" [Unix.O_RDONLY] 0 in
+  let broken = ref false in
+  let () =
+    Fun.protect
+      ~finally:(fun () ->
+        if !broken then Unix.dup2 saved Unix.stdout;
+        Unix.close saved;
+        Unix.close read_only)
+      (fun () ->
+        Live.execute_decision
+          ~order_by_client_id:(fun _ _ -> None)
+          ~clock:(fun _ ->
+            { Alpaca.timestamp = "2025-06-24T15:57:59-04:00";
+              is_open = true;
+              next_open = "2025-06-25T09:30:00-04:00"; next_close = close })
+          ~submit_market:(fun _ ~symbol:_ ~qty:_ ~side:_ ~client_order_id:_ ->
+            incr submissions;
+            Unix.dup2 read_only Unix.stdout;
+            broken := true;
+            { Alpaca.id = "rejected-id"; status = "rejected";
+              filled_avg_price = None; filled_qty = 0. })
+          Live.Paper "SPY" close decision)
+  in
+  (* A failed post-POST log must never re-enter submission. *)
+  assert (!submissions = 1)
+
+let test_us_decision_logs_after_preflight () =
+  let decision : Live.decision =
+    { fetched_through = "2025-06-23";
+      provisional =
+        { date = "2025-06-24"; o = 300.; h = 300.; l = 300.; c = 300.; v = 0. };
+      target = 0.5; equity = 1000.; held = 0.;
+      action = Live.Order { side = `Buy; qty = 1.; id = "bt-SPY-2025-06-24" } }
+  in
+  let close = "2025-06-24T16:00:00-04:00" in
+  let check ~lookup ~clock =
+    capture_stdout (fun () ->
+      assert_failure (fun () ->
+        Live.execute_decision ~order_by_client_id:lookup ~clock
+          ~submit_market:(fun _ ~symbol:_ ~qty:_ ~side:_ ~client_order_id:_ ->
+            failwith "unexpected submission")
+          Live.Paper "SPY" close decision))
+  in
+  (* Neither a failed lookup nor a failed pre-submit clock logs a decision. *)
+  let () =
+    assert
+      (check ~lookup:(fun _ _ -> failwith "lookup unavailable")
+         ~clock:(fun _ -> failwith "unexpected clock") = "")
+  in
+  let () =
+    assert
+      (check ~lookup:(fun _ _ -> None)
+         ~clock:(fun _ -> failwith "clock unavailable") = "")
+  in
+  let skipped = { decision with Live.action = Live.Skip "no trade" } in
+  let output =
+    capture_stdout (fun () ->
+      Live.execute_decision
+        ~order_by_client_id:(fun _ _ -> failwith "unexpected lookup")
+        Live.Paper "SPY" close skipped)
+  in
+  assert (contains output "order=skip:no trade fill=pending")
+
+let test_us_step_routing () =
+  let next_open = "2025-06-25T09:30:00-04:00" in
+  let decision : Live.decision =
+    { fetched_through = "2025-06-23";
+      provisional =
+        { date = "2025-06-24"; o = 300.; h = 300.; l = 300.; c = 300.; v = 0. };
+      target = 0.5; equity = 1000.; held = 0.; action = Live.Skip "no trade" }
+  in
+  let existing : Alpaca.order_t =
+    { id = "existing"; status = "filled";
+      filled_avg_price = Some 300.; filled_qty = 1. }
+  in
+  let run timestamp ~lookup ~decide ~execute ~finish =
+    let events = ref [] in
+    let record event = events := event :: !events in
+    let clock : Alpaca.clock_t =
+      { timestamp; is_open = true; next_open;
+        next_close = "2025-06-24T16:00:00-04:00" }
+    in
+    Live.us_step ~symbol:"SPY"
+      ~lookup:(fun id -> record ("lookup:" ^ id); lookup id)
+      ~decide:(fun date -> record ("decide:" ^ date); decide date)
+      ~execute:(fun clock decision ->
+        record "execute"; execute clock decision)
+      ~finish:(fun clock date id order ->
+        record "finish"; finish clock date id order)
+      ~sleep_until:(fun timestamp -> record ("sleep:" ^ timestamp))
+      ~retry:(fun () -> record "retry")
+      ~continue:(fun () -> record "continue") clock;
+    List.rev !events
+  in
+  let decide_time = "2025-06-24T15:57:59-04:00" in
+  let cutoff_time = "2025-06-24T15:58:00-04:00" in
+  let id = "lookup:bt-SPY-2025-06-24" in
+  let idle = "sleep:" ^ next_open in
+  let unreachable _ = failwith "unexpected decision" in
+  let no_execute _ _ = failwith "unexpected execution" in
+  let no_finish _ _ _ _ = failwith "unexpected reconciliation" in
+  (* A failed Decide-phase evaluation retries without executing an order. *)
+  let () =
+    assert
+      (run decide_time ~lookup:(fun _ -> None)
+         ~decide:(fun _ -> failwith "stale snapshot")
+         ~execute:no_execute ~finish:no_finish
+       = [id; "decide:2025-06-24"; "retry"])
+  in
+  (* At the cutoff a failed lookup skips to next open, without another retry. *)
+  let () =
+    assert
+      (run cutoff_time ~lookup:(fun _ -> failwith "lookup unavailable")
+         ~decide:unreachable ~execute:no_execute ~finish:no_finish
+       = [id; idle; "continue"])
+  in
+  (* Reconciliation of an existing order never calls decide. *)
+  let () =
+    assert
+      (run decide_time ~lookup:(fun _ -> Some existing)
+         ~decide:unreachable ~execute:no_execute
+         ~finish:(fun _ _ _ order -> assert (order = existing))
+       = [id; "finish"; idle; "continue"])
+  in
+  (* An execution that returns after a rejected or uncertain POST ends today. *)
+  assert
+    (run decide_time ~lookup:(fun _ -> None)
+       ~decide:(fun _ -> decision)
+       ~execute:(fun _ _ -> ()) ~finish:no_finish
+     = [id; "decide:2025-06-24"; "execute"; idle; "continue"])
 
 let test_live_retry_clock () =
   let recovered : Alpaca.clock_t =
@@ -5890,12 +6108,12 @@ let test_tw_live_phase () =
     assert
       (Live.taipei_phase ~now:"2026-05-22T13:20:00+08:00" = `Decide)
   in
-  (* 13:24:59 is one second before the 13:25 submission cutoff. *)
+  (* 13:24:59 remains in the decision phase, after the submission cutoff. *)
   let () =
     assert
       (Live.taipei_phase ~now:"2026-05-22T13:24:59+08:00" = `Decide)
   in
-  (* The 13:25:00 cutoff starts the after-close phase. *)
+  (* 13:25:00 ends the decision phase and status polling window. *)
   let () =
     assert
       (Live.taipei_phase ~now:"2026-05-22T13:25:00+08:00"
@@ -6964,6 +7182,56 @@ let test_tw_execution_polls_zero_qty_pending () =
   (* The eventual complete fill is successful. *)
   assert (result.Live.stop_reason = None)
 
+let test_tw_execution_submission_window () =
+  let buy : Live.leg =
+    { action = "Buy"; cond = "Cash"; lot = Shioaji.Common; quantity = 1 }
+  in
+  let placed = ref 0 in
+  let place_order _ =
+    incr placed;
+    { Shioaji.order_id = "1"; status = "PendingSubmit" }
+  in
+  let execute timestamp =
+    execute_tw_test ~now:(fun () -> timestamp) ~place_order
+      ~orders_today:(fun ~code:_ ~today:_ ->
+        [tw_trade "1" buy "Filled" 1])
+      ~cash:10000. ~positions:[] [buy]
+  in
+  (* 13:24:29 is inside the submission window and yields a confirmed fill. *)
+  let before = execute "2026-05-22T13:24:29+08:00" in
+  let () = assert (before.Live.trades = [tw_trade "1" buy "Filled" 1]) in
+  let () = assert (!placed = 1) in
+  (* At 13:24:30 the leg remains unsubmitted and no placement is attempted. *)
+  let at_cutoff = execute "2026-05-22T13:24:30+08:00" in
+  let () = assert (at_cutoff.Live.remaining = [buy]) in
+  let () = assert (!placed = 1) in
+  assert
+    (at_cutoff.Live.stop_reason
+     = Some "submission window closed before Buy Cash 1")
+
+let test_tw_odd_guard_rechecks_submission_window () =
+  let buy : Live.leg =
+    { action = "Buy"; cond = "Cash"; lot = Shioaji.IntradayOdd; quantity = 1 }
+  in
+  let timestamp = ref "2026-05-22T13:24:29+08:00" in
+  let placements = ref 0 in
+  let result =
+    execute_tw_test ~now:(fun () -> !timestamp)
+      ~orders_today:(fun ~code:_ ~today:_ ->
+        timestamp := "2026-05-22T13:24:31+08:00";
+        [])
+      ~place_order:(fun _ ->
+        incr placements;
+        { Shioaji.order_id = "1"; status = "PendingSubmit" })
+      ~cash:1000. ~positions:[] [buy]
+  in
+  (* The history lookup crosses the deadline, so the odd order is unsent. *)
+  let () = assert (!placements = 0) in
+  let () = assert (result.Live.remaining = [buy]) in
+  assert
+    (result.Live.stop_reason
+     = Some "submission window closed before Buy Cash 1")
+
 let test_tw_execution_rechecks_cutoff () =
   let first : Live.leg = { action = "Buy"; cond = "Cash"; lot = Shioaji.Common; quantity = 1 } in
   let second : Live.leg =
@@ -7234,6 +7502,11 @@ let () =
   test_us_live_quantity_limit ();
   test_live_schedule ();
   test_us_live_submit_cutoff ();
+  test_us_uncertain_submission_stops ();
+  test_us_rejected_submission_stops ();
+  test_us_rejected_log_failure_stops ();
+  test_us_decision_logs_after_preflight ();
+  test_us_step_routing ();
   test_live_retry_clock ();
   test_live_daemon_lock ();
   test_live_startup_guard ();
@@ -7410,6 +7683,8 @@ let () =
   let () = test_tw_odd_reservation_and_minimums () in
   let () = test_tw_common_fill_shares () in
   let () = test_tw_execution_polls_zero_qty_pending () in
+  let () = test_tw_execution_submission_window () in
+  let () = test_tw_odd_guard_rechecks_submission_window () in
   let () = test_tw_execution_rechecks_cutoff () in
   let () = test_tw_execution_advances_when_funded () in
   let () = test_tw_execution_caps_rounded_funding () in

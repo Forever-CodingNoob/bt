@@ -418,19 +418,19 @@ The daemon derives every phase from Alpaca's `next_close`.
 | Phase | Timing | Action |
 |---|---|---|
 | Evaluate | 15 minutes before the close | Refresh Tiingo history and evaluate the provisional daily bar. |
-| Submit | Until 10 minutes before the close | Query today's deterministic client order ID, then submit a fractional `market` order with `time_in_force: day` when needed. |
+| Submit | Until 2 minutes before the close | Query today's deterministic client order ID, then submit a fractional `market` order with `time_in_force: day` when needed. |
 | Reconcile | After the close | Poll the order every 15 seconds until it reaches a terminal status or 5 minutes pass after the close, then log the fill. |
 | Sleep | After reconciliation | Sleep until the next open. |
 
-The Submit phase ends 10 minutes before the close because Alpaca queues a day order sent after the close for the next session. At or after that cutoff, the daemon logs `error=submit cutoff passed order=skip` and submits nothing. The desired-share, fractional-quantity, and USD 1 buy-minimum rules match `bt target`.
+The Submit phase ends 2 minutes before the close because Alpaca queues a day order sent after the close for the next session, and the order request can take up to its 60-second curl timeout. At or after that cutoff, the daemon logs `error=submit cutoff passed order=skip` and submits nothing. The desired-share, fractional-quantity, and USD 1 buy-minimum rules match `bt target`.
 
 #### Output and logs
 
-Each daemon line starts with a UTC timestamp in `YYYY-MM-DDTHH:MM:SSZ` format. Each US decision line records `held` and `order`, which holds the deterministic order as `SIDE:QUANTITY:CLIENT-ORDER-ID` or the skip reason as `skip:REASON`. Fill lines record `client-order-id`, `fill-status`, `fill-price`, and `filled-qty`. The `startup` line records the selected `mode`, `account` number, and `equity`.
+Each daemon line starts with a UTC timestamp in `YYYY-MM-DDTHH:MM:SSZ` format. Each US decision line records `held` and `order`, which holds the deterministic order as `SIDE:QUANTITY:CLIENT-ORDER-ID` or the skip reason as `skip:REASON`. For a new submission, the daemon writes the decision line only after today's order lookup and the pre-submit clock check succeed, so an attempt that fails before then and retries writes no decision line. When the lookup finds today's order already placed, the daemon writes the decision line right after the lookup, with no clock check. Fill lines record `client-order-id`, `fill-status`, `fill-price`, and `filled-qty`. The `startup` line records the selected `mode`, `account` number, and `equity`.
 
 #### Failure handling
 
-The daemon refuses to start with an inactive or trading-blocked account. A stale cache, fetch or snapshot error, evaluation error, or order failure logs one error line and stops the US action for the day. If the Alpaca clock request at the start of a daemon cycle fails, the daemon logs `order=retry`, retries every 60 seconds, and continues the same session once a request succeeds. The clock check just before order submission does not retry: a failure there logs `order=skip` and stops the US action for the day.
+The daemon refuses to start with an inactive or trading-blocked account. If the Alpaca clock request at the start of a daemon cycle fails, the daemon logs `order=retry`, retries every 60 seconds, and continues the same session once a request succeeds. Before the cutoff, a stale cache, a fetch, snapshot, or evaluation error, a failed order lookup, or a failed clock check just before submission also logs `order=retry`, and the daemon retries every 60 seconds. Each retry looks up today's client order ID first, so a day that already has an order gets no second one. At or after the cutoff, a failed order lookup logs `order=skip` and ends the US action for the day. Once the daemon sends the order request, the day ends there with no retry, because the request may have reached Alpaca and a retry could submit the order twice. A failed request logs `error=order submission uncertain: REASON order=skip`, a `rejected` status logs `error=Alpaca rejected the order order=skip`, and a failure while following the submitted order logs `error=REASON order=skip`.
 
 > [!CAUTION]
 > `bt live --live` submits real-money fractional market orders. Confirm the credentials, account, and strategy before starting it.
@@ -439,7 +439,7 @@ The daemon refuses to start with an inactive or trading-blocked account. A stale
 > The free Alpaca IEX feed can produce a provisional price that differs from the consolidated tape. The market order fills near the decision time, about 15 minutes before the official close; model that gap in `bt run` with `--slip-bps`. Alpaca paper accounts also do not simulate dividends, so paper cash and equity can diverge from a live account.
 
 > [!IMPORTANT]
-> The US path recomputes desired shares from the account and stops after a failed prerequisite or order.
+> The US path recomputes desired shares from the account on every attempt. It retries a failed prerequisite until the cutoff but never retries after it sends the order request.
 
 > [!NOTE]
 > The US path queries the deterministic client order ID before submission. This reduces duplicate risk but is not an exactly-once guarantee for concurrent processes.
@@ -476,7 +476,7 @@ The Shioaji server may still need its own keys to log in. `bt` never fails becau
 |---|---|---|
 | Prepare | 13:05 | Check that a snapshot is dated today, query FinMind's independent trading calendar for the previous session, fetch prices through that session, refresh adjustment datasets through today, and require an exact price-cache end date. |
 | Decide | 13:20 | Request a fresh snapshot, validate its session and OHLCV values, append the provisional bar, evaluate the final and previous effective targets, read aggregate positions in shares and dated margin details, derive simulation or production cash and equity, prepend due 18-month rollover pairs, and plan ordinary cash, margin, and refinancing legs in absolute TWD. An unchanged effective target preserves drift; a changed target trades from current inventory. |
-| Execute | Before 13:25 | Split legs into `Common` and `IntradayOdd` orders as in `bt target` and submit them sequentially. Recheck the date and cutoff immediately before every order and during every status poll. |
+| Execute | New orders before 13:24:30; status polls before 13:25 | Split legs into `Common` and `IntradayOdd` orders as in `bt target` and submit them sequentially. Recheck the date and the 13:24:30 order cutoff immediately before every order, and the date and 13:25 during every status poll. Continuous trading ends at 13:25, so the 30-second margin reduces the chance that a checked order reaches the broker in the closing call. |
 | Reconcile | After 13:30 | Query and log today's resulting trades, including fill status, deal quantity, and weighted deal price. |
 
 | Order | Request | Confirmation |

@@ -272,7 +272,7 @@ let next_actions ~now ~next_close =
   let now = rfc3339_seconds now in
   let close = rfc3339_seconds next_close in
   let decide_at = close - (15 * 60) in
-  let submit_at = close - (10 * 60) in
+  let submit_at = close - (2 * 60) in
   if now < decide_at then
     `Sleep_until (shift_rfc3339 next_close (-15 * 60))
   else if now < submit_at then
@@ -849,33 +849,44 @@ let finish_order mode next_close date client_order_id
 let execute_decision ?(order_by_client_id = Alpaca.order_by_client_id)
     ?(clock = Alpaca.clock) ?(submit_market = Alpaca.submit_market) mode
     symbol next_close decision =
-  log_decision decision;
   match decision.action with
-  | Skip _ -> ()
+  | Skip _ -> log_decision decision
   | Order { side; qty; id } ->
-      let order =
-        match order_by_client_id mode id with
-        | Some order -> Some order
-        | None ->
-            let clock = clock mode in
-            if clock.is_open
-               && next_actions ~now:clock.timestamp ~next_close = `Decide
-            then
-              Some (submit_market mode ~symbol ~qty ~side ~client_order_id:id)
-            else begin
-              log "date=%s error=submit cutoff passed order=skip"
-                decision.provisional.date;
-              None
-            end
-      in
-      (match order with
-       | None -> ()
+      (match order_by_client_id mode id with
        | Some order ->
-           (match order.status with
-            | "rejected" -> failwith "Alpaca rejected the order"
-            | _ ->
-                finish_order mode next_close decision.provisional.date id
-                  order))
+           log_decision decision;
+           finish_order mode next_close decision.provisional.date id order
+       | None ->
+           let clock = clock mode in
+           log_decision decision;
+           if clock.is_open
+              && next_actions ~now:clock.timestamp ~next_close = `Decide
+           then
+             (try
+                match submit_market mode ~symbol ~qty ~side ~client_order_id:id with
+                | order ->
+                    (match
+                       if order.status = "rejected" then `Rejected
+                       else begin
+                         finish_order mode next_close decision.provisional.date id
+                           order;
+                         `Finished
+                       end
+                     with
+                     | `Rejected ->
+                         log "date=%s error=Alpaca rejected the order order=skip"
+                           decision.provisional.date
+                     | `Finished -> ()
+                     | exception error ->
+                         log "date=%s error=%s order=skip"
+                           decision.provisional.date (Printexc.to_string error))
+                | exception error ->
+                    log "date=%s error=order submission uncertain: %s order=skip"
+                      decision.provisional.date (Printexc.to_string error)
+              with _ -> ())
+           else
+             log "date=%s error=submit cutoff passed order=skip"
+               decision.provisional.date)
   | Orders _ -> failwith "TW order legs require Shioaji"
 
 let retry_clock ~clock ~sleep ~dispatch =
@@ -886,6 +897,69 @@ let retry_clock ~clock ~sleep ~dispatch =
     | recovered -> dispatch recovered
   in
   loop ()
+
+let us_step ~symbol ~lookup ~decide ~execute ~finish ~sleep_until ~retry
+    ~continue (clock : Alpaca.clock_t) =
+  if not clock.is_open then begin
+    sleep_until clock.next_open;
+    continue ()
+  end else
+    match next_actions ~now:clock.timestamp ~next_close:clock.next_close with
+    | `Sleep_until timestamp ->
+        sleep_until timestamp;
+        continue ()
+    | `Post_close ->
+        sleep_until clock.next_open;
+        continue ()
+    | (`Decide | `Cutoff_passed as phase) ->
+        let date = timestamp_date clock.timestamp in
+        let id = client_order_id ~symbol ~date in
+        let outcome =
+          match
+            let existing_order = lookup id in
+            match existing_order with
+            | Some order ->
+                log "date=%s order=existing:%s fill=pending" date id;
+                finish clock date id order;
+                sleep_until clock.next_open;
+                `Continue
+            | None when phase = `Cutoff_passed ->
+                log "date=%s error=submit cutoff passed order=skip" date;
+                sleep_until clock.next_open;
+                `Continue
+            | None ->
+                (match decide date with
+                 | decision ->
+                     (match execute clock decision with
+                      | () ->
+                          sleep_until clock.next_open;
+                          `Continue
+                      | exception error ->
+                          log "date=%s error=%s order=retry"
+                            decision.provisional.date
+                            (Printexc.to_string error);
+                          `Retry)
+                 | exception error ->
+                     log "date=%s error=%s order=retry" date
+                       (Printexc.to_string error);
+                     `Retry)
+          with
+          | outcome -> outcome
+          | exception error ->
+              if phase = `Cutoff_passed then begin
+                log "date=%s error=%s order=skip" date
+                  (Printexc.to_string error);
+                sleep_until clock.next_open;
+                `Continue
+              end else begin
+                log "date=%s error=%s order=retry" date
+                  (Printexc.to_string error);
+                `Retry
+              end
+        in
+        match outcome with
+        | `Continue -> continue ()
+        | `Retry -> retry ()
 
 let run_us mode ~strat_path ~data_dir =
   let ast = Dsl.parse_file strat_path in
@@ -913,58 +987,17 @@ let run_us mode ~strat_path ~data_dir =
           ~dispatch:step
     | clock -> step clock
   and step clock =
-        if not clock.is_open then begin
-          sleep_until clock.next_open;
-          cycle ()
-        end else
-          match next_actions ~now:clock.timestamp ~next_close:clock.next_close with
-          | `Sleep_until timestamp ->
-              sleep_until timestamp;
-              cycle ()
-          | `Post_close ->
-              sleep_until clock.next_open;
-              cycle ()
-          | (`Decide | `Cutoff_passed as phase) ->
-              let date = timestamp_date clock.timestamp in
-              let id = client_order_id ~symbol ~date in
-              (match
-                 let existing_order =
-                   Alpaca.order_by_client_id mode id
-                 in
-                 match existing_order with
-                 | Some order ->
-                     log "date=%s order=existing:%s fill=pending" date id;
-                     finish_order mode clock.next_close date id order;
-                     sleep_until clock.next_open
-                 | None when phase = `Cutoff_passed ->
-                     log "date=%s error=submit cutoff passed order=skip" date;
-                     sleep_until clock.next_open
-                 | None ->
-                     (match
-                        decide mode ~session_date:date ~strat_path ~data_dir
-                      with
-                      | decision ->
-                          (match
-                             execute_decision mode symbol clock.next_close
-                               decision
-                           with
-                           | () -> sleep_until clock.next_open
-                           | exception error ->
-                               log "date=%s error=%s order=skip"
-                                 decision.provisional.date
-                                 (Printexc.to_string error);
-                               sleep_until clock.next_open)
-                      | exception error ->
-                          log "date=%s error=%s order=skip" date
-                            (Printexc.to_string error);
-                          sleep_until clock.next_open)
-               with
-               | () -> ()
-               | exception error ->
-                   log "date=%s error=%s order=skip" date
-                     (Printexc.to_string error);
-                   sleep_until clock.next_open);
-              cycle ()
+    us_step ~symbol ~lookup:(Alpaca.order_by_client_id mode)
+      ~decide:(fun date -> decide mode ~session_date:date ~strat_path ~data_dir)
+      ~execute:(fun clock decision ->
+        execute_decision mode symbol clock.next_close decision)
+      ~finish:(fun clock date id order ->
+        finish_order mode clock.next_close date id order)
+      ~sleep_until
+      ~retry:(fun () ->
+        retry_clock ~clock:(fun () -> Alpaca.clock mode) ~sleep:Unix.sleepf
+          ~dispatch:step)
+      ~continue:cycle clock
   in
   cycle ()
 
@@ -1087,6 +1120,16 @@ let execute_tw_legs ~mode ~bid ~ask ~now ~sleep ~place_order ~orders_today
   let open_window () =
     let timestamp = now () in
     timestamp_date timestamp = date && taipei_phase ~now:timestamp = `Decide
+  in
+  let submission_window () =
+    let timestamp = now () in
+    let local =
+      Unix.gmtime (float_of_int (rfc3339_seconds timestamp + (8 * 60 * 60)))
+    in
+    timestamp_date timestamp = date
+    && taipei_phase ~now:timestamp = `Decide
+    && (local.tm_hour * 60 + local.tm_min) * 60 + local.tm_sec
+       < (13 * 60 + 24) * 60 + 30
   in
   let leg_shares (leg : leg) quantity =
     match leg.lot with
@@ -1295,10 +1338,6 @@ let execute_tw_legs ~mode ~bid ~ask ~now ~sleep ~place_order ~orders_today
               stop
                 (Printf.sprintf "insufficient confirmed cash for %s %s %d"
                    leg.action leg.cond leg.quantity) (leg :: rest)
-            else if not (open_window ()) then
-              stop
-                (Printf.sprintf "submission window closed before %s %s %d"
-                   leg.action leg.cond leg.quantity) (leg :: rest)
             else
               let submitted = { leg with quantity = available } in
               let shares = leg_shares submitted available in
@@ -1346,7 +1385,11 @@ let execute_tw_legs ~mode ~bid ~ask ~now ~sleep ~place_order ~orders_today
                         price = (if submitted.lot = Shioaji.Common then 0. else quote);
                         cond = submitted.cond; custom_field }
                     in
-                    match
+                    if not (submission_window ()) then
+                      stop
+                        (Printf.sprintf "submission window closed before %s %s %d"
+                           leg.action leg.cond leg.quantity) (leg :: rest)
+                    else match
                       try Ok (place_order request)
                       with error ->
                         Error

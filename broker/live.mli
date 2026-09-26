@@ -133,9 +133,10 @@ val next_actions :
   next_close:string ->
   [`Sleep_until of string | `Decide | `Cutoff_passed | `Post_close]
 
-(** Log a US decision and, unless today's client order ID already exists,
-    submit its market order only while the market is open and before the
-    submit cutoff 10 minutes before [next_close]; otherwise log
+(** Log a US decision after its pre-submit checks succeed. Submit an order
+    only while the market is open and before the cutoff 2 minutes before
+    [next_close]. A failed or rejected order request is logged with
+    [order=skip] and is not retried; after the cutoff, log
     [error=submit cutoff passed order=skip]. The broker calls default to
     [Alpaca]. *)
 val execute_decision :
@@ -149,6 +150,18 @@ val execute_decision :
      client_order_id:string ->
      Alpaca.order_t) ->
   mode -> string -> string -> decision -> unit
+
+(** Advance one US daemon clock with injected broker and scheduling actions. *)
+val us_step :
+  symbol:string ->
+  lookup:(string -> Alpaca.order_t option) ->
+  decide:(string -> decision) ->
+  execute:(Alpaca.clock_t -> decision -> unit) ->
+  finish:(Alpaca.clock_t -> string -> string -> Alpaca.order_t -> unit) ->
+  sleep_until:(string -> unit) ->
+  retry:(unit -> unit) ->
+  continue:(unit -> unit) ->
+  Alpaca.clock_t -> unit
 
 (** Extract the calendar date prefix from an RFC3339 timestamp. *)
 val timestamp_date : string -> string
