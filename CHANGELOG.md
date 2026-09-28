@@ -6,16 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-### Fixed
-
-- When a US daemon step fails before the submit cutoff and before the order request, the daemon logs `order=retry` and retries every 60 seconds. This covers the Alpaca clock request, a stale cache, fetch, snapshot, and evaluation errors, and the order lookup. Each retry looks up today's client order ID first, so it follows an existing order instead of submitting another. Before, the first such failure skipped the day, so a transient network error could skip the day's decision. At or after the cutoff, a failed order lookup logs `order=skip` and ends the day. Once the daemon sends the order request, the day ends with no retry, because the request may have reached Alpaca and a retry could submit twice: a failed request logs `order submission uncertain ... order=skip`, a `rejected` status logs `error=Alpaca rejected the order order=skip`, and a failure while following the submitted order logs `order=skip`. A failed attempt writes no decision line. For a new submission, the daemon writes it after the order lookup and the pre-submit clock check succeed; for an order already placed today, it writes it after the lookup alone.
-- `bt live` refuses to start while another daemon holds `$HOME/.bt/live-<market>-<mode>.lock`, so two daemons that share a `HOME`, market, and mode cannot both submit the day's order. The lock does not exclude daemons with different `HOME` values, even when they trade the same account.
+## [0.10.1] - 2026-09-28
 
 ### Changed
 
 - Each `bt live` log line starts with a UTC timestamp.
 - The US `bt live` submit cutoff moves from 10 minutes to 2 minutes before the close; the decision still runs 15 minutes before the close. The 10 minutes came from the market-on-close 3:50 pm rule, which does not apply to market day orders, and 2 minutes leave room for the 60-second curl timeout before the close.
 - TW `bt live` stops placing new orders at 13:24:30 Taipei instead of 13:25:00, and checks that cutoff as the last step before each order request. Continuous trading ends at 13:25, so the 30-second margin reduces the chance that a checked order reaches the broker in the closing call. Status polls still run until 13:25.
+
+### Fixed
+
+- When a US daemon step fails before the submit cutoff and before the order request, the daemon logs `order=retry` and retries every 60 seconds. This covers the Alpaca clock request, a stale cache, fetch, snapshot, and evaluation errors, and the order lookup. Each retry looks up today's client order ID first, so it follows an existing order instead of submitting another. Before, the first such failure skipped the day, so a transient network error could skip the day's decision. At or after the cutoff, a failed order lookup logs `order=skip` and ends the day. Once the daemon sends the order request, the day ends with no retry, because the request may have reached Alpaca and a retry could submit twice: a failed request logs `order submission uncertain ... order=skip`, a `rejected` status logs `error=Alpaca rejected the order order=skip`, and a failure while following the submitted order logs `order=skip`. A failed attempt writes no decision line. For a new submission, the daemon writes it after the order lookup and the pre-submit clock check succeed; for an order already placed today, it writes it after the lookup alone.
+- `bt live` refuses to start while another daemon holds `$HOME/.bt/live-<market>-<mode>.lock`, so two daemons that share a `HOME`, market, and mode cannot both submit the day's order. The lock does not exclude daemons with different `HOME` values, even when they trade the same account.
 
 ## [0.10.0] - 2026-09-24
 
@@ -210,7 +212,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Return-based engine with daily close-to-close signal prices.
 - TW dividend back-adjustment via FinMind factors.
 
-[Unreleased]: https://github.com/Forever-CodingNoob/bt/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/Forever-CodingNoob/bt/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/Forever-CodingNoob/bt/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/Forever-CodingNoob/bt/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/Forever-CodingNoob/bt/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/Forever-CodingNoob/bt/compare/v0.7.5...v0.8.0
