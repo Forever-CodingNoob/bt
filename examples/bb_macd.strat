@@ -1,4 +1,5 @@
 stock "tw/0050"
+rebalance on_change
 param n = 20
 param k = 2.0
 let hist = macd_hist(close, 12, 26, 9)

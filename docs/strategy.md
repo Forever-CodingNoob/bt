@@ -25,7 +25,7 @@ A strategy file is a small script. `bt run` compiles it to a target exposure ser
 target 0.5 * num(base) + 0.5 * num(base and boost)
 ```
 
-`target` sets the desired exposure for each bar. The expression must give a scalar or a numeric series, and a scalar applies to every bar. The engine fills only when the target value changes, so positions drift between fills.
+`target` sets the desired exposure for each bar. The expression must give a scalar or a numeric series, and a scalar applies to every bar. `rebalance daily` trades back toward the target every bar. `rebalance on_change` rebalances only on a bar where the effective target changes or dividend cash lands, so positions drift between those bars. Margin-call sales and TW maturity rollovers trade under either choice. A daily file without a rebalance declaration uses on_change, and `bt` prints a warning. [engine.md](./engine.md#targets-and-drift) defines the effective target.
 
 A target above 1.0 requests leveraged exposure. The engine then uses cash and margin inventories with lot-level loan tracking, refinancing, and dividend accounting. [engine.md](./engine.md) is the complete margin and dividend guide.
 
@@ -124,6 +124,7 @@ This is `examples/daytrade_orb.strat`. It compares the second 5-minute close wit
 file       ::= { statement }
 statement  ::= "stock" string [ "as" ident ]
              | "bars" positive-integer "m"
+             | "rebalance" ( "daily" | "on_change" )
              | "param" ident "=" number
              | "let" ident "=" expr
              | [ident "."] "entry" "when" expr [ "size" expr ]
@@ -158,6 +159,7 @@ Operator precedence, from low to high: `or`, `and`, `not`, comparisons, `+ -`, `
 
 - `stock "market/symbol" [as alias]` selects data for the strategy. Use market `tw` or `us`. An unaliased file must contain exactly one `stock` statement. An aliased file may contain one or more, all with aliases.
 - `bars <n>m` declares a timeframe of a positive integer number of minutes, once per file, for one unaliased US stock under `bt daytrade`.
+- `rebalance daily` trades toward the effective target every daily bar; `rebalance on_change` trades when that target changes. Declare at most one per file; it applies to every stock in the file. Without a declaration, a daily strategy uses on_change and bt warns. A `bars` strategy cannot declare rebalance. `rebalance`, `daily`, and `on_change` are reserved words, so you cannot use them as names.
 - `param name = number` declares a parameter. The CLI flag `-p name=value` can override it.
 - `let name = expr` binds the result of an expression to a name.
 - `entry when expr` and `exit when expr` set boolean conditions. Their dotted forms are `alias.entry when expr` and `alias.exit when expr`. The expression must give a boolean series. Partial orders can repeat these statements and add an inline `size expr`.

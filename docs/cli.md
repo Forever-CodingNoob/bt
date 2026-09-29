@@ -201,7 +201,7 @@ Minute fetches require `APCA_API_KEY_ID` and `APCA_API_SECRET_KEY`. Daily US fet
 | `--loan-term-months` | No term loans. |
 | `--dividend-tax` | No overnight dividend holdings. |
 
-`bt daytrade` treats these flags as usage errors (exit 2). It does not place live trades. `bt run`, `bt target`, and `bt live` reject `bars` strategies with `day trading strategies run under bt daytrade`.
+`bt daytrade` treats these flags as usage errors (exit 2). It does not place live trades. `bt run`, `bt target`, and `bt live` reject `bars` strategies with `day trading strategies run under bt daytrade`. `bt run` and `bt daytrade` reject a `bars` strategy that declares `rebalance` with `<file>: rebalance applies to daily strategies only`.
 
 ## `bt target`
 
@@ -238,6 +238,11 @@ Both market arms print these fields to standard output, one per line.
 > [!IMPORTANT]
 > `bt target` prints the proposed action but never submits an order, even with `--live`.
 
+A strategy without `rebalance daily` or `rebalance on_change` rebalances only when its effective target changes. TW maturity rollover pairs run either way. `bt target` prints `warning: <file> does not declare rebalance; trading only when the target changes` to standard error before the decision; standard output is unchanged.
+
+> [!IMPORTANT]
+> Under `rebalance on_change`, declared or by default, each decision compares today's effective target with the previous session's, which bt recomputes from that session's cached final close. When the two are equal, the decision places no rebalancing order, and the position keeps its gap from target until the target next changes. The gap can come from ordinary price drift, from a previous-session decision at a provisional price whose target the final close does not reproduce, from a missed session or rejected orders, or from a partial fill. `rebalance daily` re-plans toward the target from the held position every session. It can still leave a residual: US skips a buy under USD 1, and TW floors cash quantities to whole shares and margin quantities to 1000-share lots.
+
 ### US market
 
 #### Prerequisites
@@ -265,6 +270,8 @@ The Alpaca key variables must contain credentials for the selected account.
 #### Decision cycle
 
 The command fetches Tiingo history through Alpaca's previous daily bar, appends Alpaca's current snapshot as a provisional bar, and evaluates the strategy with the same DSL compiler as `bt run`. With `--provisional-close PRICE`, the command skips the Alpaca snapshot and treats the last cached date as the previous daily bar.
+
+Under `rebalance on_change`, or without a declaration, the command compares the effective target with the previous bar's effective target, or 0 on the first bar. When they are equal, it skips with the reason `target unchanged`. Under `rebalance daily`, or when the target changed, it sizes an order from the held position.
 
 Desired shares are `target x equity / provisional close`, a fractional quantity. The order quantity is the difference from the held position, rounded down to at most 9 decimal places. The command skips a buy below USD 1 notional with the reason `below $1 minimum order value`. A sell of any positive quantity, capped at the held position, becomes an order, so you can always close a position worth less than USD 1.
 
@@ -338,13 +345,15 @@ On TW, `--provisional-close PRICE` replaces only the snapshot. The command still
 
 The resulting plan preserves the cash and margin inventories. It can contain cash sells, margin sells, cash buys, margin buys, and paired sell/rebuy refinancing legs. When a dated `MarginTrading` position detail reaches the engine's 18-calendar-month, month-end-clamped maturity, the plan puts a sell/rebuy pair before the ordinary target legs. As in `bt run`, the engine floors cash quantities to whole shares and margin and refinance quantities to 1000-share lots. The plan prices commission at SinoPac's settlement-debit list rate of 14.25 bps, the rate the `bt live` daemon funds with, so printed buy quantities can be slightly lower than a `bt run` backtest's at the 2.85 bps default. The design is in [Design: share quantum and odd lots](./specs/share-quantum-and-odd-lots.md).
 
+Under `rebalance daily`, the planner plans back to the effective target every session, so it re-plans missed legs and partial fills. Under `rebalance on_change`, or without a declaration, it plans ordinary legs only when the effective target differs from the previous bar's, and otherwise preserves drift. Maturity rollover pairs do not depend on this choice.
+
 | Leg | Orders |
 |---|---|
 | Cash buy or sell of N shares | One `Common` order for N / 1000 lots when that is positive, then one `IntradayOdd` order for the N mod 1000 remaining shares when that is positive. |
 | Margin buy or sell | One `Common` order. N is already a multiple of 1000. |
 | Refinance or rollover sell and rebuy | One `Common` order per side. |
 
-Production requires exactly one settlement row for each of T+0, T+1, and T+2 and rejects missing, duplicate, or other T-day rows. Spendable cash is `acc_balance + T+1 + T+2`, using each signed amount. `bt` validates T+0 but does not add it again, because `acc_balance` already reflects it. Equity is spendable cash plus all positions, counted in shares, at broker `last_price`, minus margin loan principal and interest. A real-account probe tracked a TWD -107 purchase payable at T+2 on 2026-09-16 and T+1 on 2026-09-17 while `acc_balance` remained TWD 100,000, then at T+0 on 2026-09-18 when `acc_balance` fell to TWD 99,893. Pending T+1 and T+2 settlements change the daily cash budget without skipping the session.
+Production requires exactly one settlement row for each of T+0, T+1, and T+2 and rejects missing, duplicate, or other T-day rows. Spendable cash is `acc_balance + T+1 + T+2`, using each signed amount. `bt` validates T+0 but does not add it again, because `acc_balance` already reflects it. Equity is spendable cash plus all positions, counted in shares, at the provisional close, minus margin loan principal and interest. The decision fails when that equity is not positive. A real-account probe tracked a TWD -107 purchase payable at T+2 on 2026-09-16 and T+1 on 2026-09-17 while `acc_balance` remained TWD 100,000, then at T+0 on 2026-09-18 when `acc_balance` fell to TWD 99,893. Pending T+1 and T+2 settlements change the daily cash budget without skipping the session.
 
 #### Output
 
@@ -387,6 +396,11 @@ Both daemons print ASCII log lines to standard output. They record the session d
 
 Only one daemon can hold `$HOME/.bt/live-<market>-<mode>.lock` at a time (`paper` or `live` for US; `simulation` or `production` for TW), regardless of the data directory; another fails with `another bt live daemon holds <path>`. The lock excludes only daemons that share a `HOME`, market, and mode, so daemons with different `HOME` values can trade the same account at once.
 
+A strategy without `rebalance daily` or `rebalance on_change` rebalances only when its effective target changes. TW maturity rollover pairs run either way. The daemon logs `warning: <file> does not declare rebalance; trading only when the target changes` once, right after the `startup` line.
+
+> [!IMPORTANT]
+> Under `rebalance on_change`, declared or by default, each session compares today's effective target with the previous session's, which the daemon recomputes from that session's cached final close. When the two are equal, the session places no rebalancing order, and the position keeps its gap from target until the target next changes. The gap can come from ordinary price drift, from a previous-session decision at a provisional price whose target the final close does not reproduce, from a missed session or rejected orders, or from a partial fill. `rebalance daily` re-plans toward the target from the held position every session. It can still leave a residual: US skips a buy under USD 1, and TW floors cash quantities to whole shares and margin quantities to 1000-share lots.
+
 ### US market
 
 #### Prerequisites
@@ -422,7 +436,7 @@ The daemon derives every phase from Alpaca's `next_close`.
 | Reconcile | After the close | Poll the order every 15 seconds until it reaches a terminal status or 5 minutes pass after the close, then log the fill. |
 | Sleep | After reconciliation | Sleep until the next open. |
 
-The Submit phase ends 2 minutes before the close because Alpaca queues a day order sent after the close for the next session, and the order request can take up to its 60-second curl timeout. At or after that cutoff, the daemon logs `error=submit cutoff passed order=skip` and submits nothing. The desired-share, fractional-quantity, and USD 1 buy-minimum rules match `bt target`.
+The Submit phase ends 2 minutes before the close because Alpaca queues a day order sent after the close for the next session, and the order request can take up to its 60-second curl timeout. At or after that cutoff, the daemon logs `error=submit cutoff passed order=skip` and submits nothing. The `target unchanged` skip under on_change and the desired-share, fractional-quantity, and USD 1 buy-minimum rules match `bt target`; the skip logs `order=skip:target unchanged`.
 
 #### Output and logs
 
@@ -475,7 +489,7 @@ The Shioaji server may still need its own keys to log in. `bt` never fails becau
 | Phase | Taipei timing | Implemented TW action |
 |---|---|---|
 | Prepare | 13:05 | Check that a snapshot is dated today, query FinMind's independent trading calendar for the previous session, fetch prices through that session, refresh adjustment datasets through today, and require an exact price-cache end date. |
-| Decide | 13:20 | Request a fresh snapshot, validate its session and OHLCV values, append the provisional bar, evaluate the final and previous effective targets, read aggregate positions in shares and dated margin details, derive simulation or production cash and equity, prepend due 18-month rollover pairs, and plan ordinary cash, margin, and refinancing legs in absolute TWD. An unchanged effective target preserves drift; a changed target trades from current inventory. |
+| Decide | 13:20 | Request a fresh snapshot, validate its session and OHLCV values, append the provisional bar, evaluate the final and previous effective targets, read aggregate positions in shares and dated margin details, derive simulation or production cash and equity, prepend due 18-month rollover pairs, and plan ordinary cash, margin, and refinancing legs in absolute TWD. Under `rebalance daily`, the plan returns to the effective target every session. Under `rebalance on_change` or without a declaration, an unchanged effective target preserves drift, and a changed target trades from current inventory. |
 | Execute | New orders before 13:24:30; status polls before 13:25 | Split legs into `Common` and `IntradayOdd` orders as in `bt target` and submit them sequentially. Recheck the date and the 13:24:30 order cutoff immediately before every order, and the date and 13:25 during every status poll. Continuous trading ends at 13:25, so the 30-second margin reduces the chance that a checked order reaches the broker in the closing call. |
 | Reconcile | After 13:30 | Query and log today's resulting trades, including fill status, deal quantity, and weighted deal price. |
 
@@ -561,6 +575,8 @@ Pending T+1 and T+2 settlements never suppress a production session; their signe
 > [!NOTE]
 > The four margin options and `--dividend-tax` apply to every strategy and the baseline. US assets ignore `--loan-term-months`.
 
+A strategy without `rebalance daily` or `rebalance on_change` rebalances only on a bar where its effective target changes or dividend cash lands. Margin-call sales and TW maturity rollovers trade under either choice. `bt run` prints `warning: <file> does not declare rebalance; trading only when the target changes` to standard error once for each undeclared file; the report on standard output is unchanged. The `--baseline` run always trades on_change. See [Targets and drift](./engine.md#targets-and-drift).
+
 [engine.md](./engine.md) covers the margin and dividend engine in full.
 
 The engine floors Taiwan cash quantities to whole shares and Taiwan margin quantities to 1000-share lots; the floored remainder stays in cash. US quantities stay fractional. See [Share quantum](./engine.md#share-quantum).
@@ -591,7 +607,7 @@ An exposure increase pays the commission and slippage. An exposure decrease pays
 
 With `--fill close`, the target for a bar fills at the close of that bar. The old exposure earns the close-to-close return before the fill. The command applies fill costs at that close.
 
-With `--fill open`, the target for a bar fills at the next bar's open. The old exposure earns the return from the previous close to that open. The new exposure then earns the return from the open to the close. If the target does not change, the current exposure earns the full close-to-close return.
+With `--fill open`, the target for a bar fills at the next bar's open. The old exposure earns the return from the previous close to that open. The new exposure then earns the return from the open to the close. Under `rebalance on_change`, if the target does not change, the current exposure earns the full close-to-close return. Under `rebalance daily`, the engine re-plans at every open.
 
 The engine closes a final open exposure at the last close in both modes. It applies the fee, sell tax, and slippage to this close.
 

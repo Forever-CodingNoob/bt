@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Daily strategies can declare `rebalance daily` or `rebalance on_change`. The backtest, `bt target`, and both live daemons follow the declared rule. `rebalance daily` re-plans to the effective target every bar, including the bar of a simulated maintenance cure. An undeclared daily strategy trades on_change: `bt run` and `bt target` print a warning on standard error, and `bt live` logs it after the `startup` line. Every command rejects `rebalance` in a `bars` strategy.
+
+### Changed
+
+- US `bt live` and `bt target` skip a session with `target unchanged` when the effective target equals the previous bar's and the strategy declares `rebalance on_change` or nothing. Before, US live resized to the target every session; declare `rebalance daily` to keep that behavior.
+- TW decisions value production positions at the provisional close, the price the planner uses, instead of broker `last_price`, and fail the session when that equity is not positive.
+- `rebalance`, `daily`, and `on_change` are reserved words, so a strategy can no longer use them as names.
+
 ## [0.10.1] - 2026-09-28
 
 ### Changed

@@ -1,2 +1,3 @@
 stock "tw/00685L"
+rebalance on_change
 target 1.0

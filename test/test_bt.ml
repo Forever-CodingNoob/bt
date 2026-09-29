@@ -130,6 +130,14 @@ let test_parser () =
   ignore (Dsl.parse_file (sma_strategy_path ()));
   ignore (Dsl.parse_file (bb_strategy_path ()));
   ignore (Dsl.parse_file (buy_hold_strategy_path ()));
+  let () =
+    List.iter
+      (fun path ->
+        assert
+          (Dsl.rebalance_of ~filename:path (Dsl.parse_file path)
+           = Some false))
+      [sma_strategy_path (); bb_strategy_path (); buy_hold_strategy_path ()]
+  in
   with_temp_strategy "exit when close < 0\n" (fun path ->
     assert_failure (fun () -> ignore (Dsl.compile path ~params:[] sample_bars)));
   with_temp_strategy
@@ -166,6 +174,7 @@ let test_parser_aliases () =
   with_temp_strategy
     "stock \"tw/00685L\" as bull\n\
      stock \"tw/00632R\" as bear\n\
+     rebalance on_change\n\
      let crash = bull.close / lag(bull.close, 7) - 1 < -0.01\n\
      bull.target 2.0 * num(not crash)\n\
      bear.entry when crash size 0.5\n\
@@ -176,6 +185,7 @@ let test_parser_aliases () =
       match Dsl.parse_file path with
       | [ Ast.Stock ("tw/00685L", Some "bull");
           Ast.Stock ("tw/00632R", Some "bear");
+          Ast.Rebalance false;
           Ast.Let ("crash", _);
           Ast.Target (Some "bull", _);
           Ast.Entry (Some "bear", Ast.Var (None, "crash"), Some (Ast.Num 0.5));
@@ -185,20 +195,24 @@ let test_parser_aliases () =
       | _ -> assert false);
   with_temp_strategy
     "stock \"tw/0050\"\n\
+     rebalance on_change\n\
      entry when cross_above(close, sma(close, 5))\n\
      exit when cross_below(close, sma(close, 5))\n"
     (fun path ->
       match Dsl.parse_file path with
       | [ Ast.Stock ("tw/0050", None);
+          Ast.Rebalance false;
           Ast.Entry (None, _, None);
           Ast.Exit (None, _, None) ] -> ()
       | _ -> assert false);
   with_temp_strategy
     "stock \"tw/0050\" as etf\n\
+     rebalance on_change\n\
      etf.target etf.atr(14) / etf.close\n"
     (fun path ->
       match Dsl.parse_file path with
       | [ Ast.Stock (_, Some "etf");
+          Ast.Rebalance false;
           Ast.Target (Some "etf",
             Ast.Binop ("/",
               Ast.Call (Some "etf", "atr", [Ast.Num 14.]),
@@ -1684,7 +1698,7 @@ let dsl_bars =
 
 let test_stock_statement () =
   with_temp_strategy
-    "stock \"tw/00685L\"\ntarget 1.0\n"
+    "stock \"tw/00685L\"\nrebalance on_change\ntarget 1.0\n"
     (fun path ->
       let parsed = Dsl.parse_file path in
       assert
@@ -1699,10 +1713,10 @@ let test_stock_statement () =
         ignore (Dsl.stocks_of ~filename:path (Dsl.parse_file path))))
   in
   rejects "target 1.0\n";
-  rejects "stock \"tw/1\"\nstock \"tw/2\"\ntarget 1.0\n";
-  rejects "stock \"jp/7203\"\ntarget 1.0\n";
-  rejects "stock \"tw00685L\"\ntarget 1.0\n";
-  rejects "stock \"tw/0050/extra\"\ntarget 1.0\n"
+  rejects "stock \"tw/1\"\nstock \"tw/2\"\nrebalance on_change\ntarget 1.0\n";
+  rejects "stock \"jp/7203\"\nrebalance on_change\ntarget 1.0\n";
+  rejects "stock \"tw00685L\"\nrebalance on_change\ntarget 1.0\n";
+  rejects "stock \"tw/0050/extra\"\nrebalance on_change\ntarget 1.0\n"
 
 let test_target_style () =
   with_temp_strategy
@@ -1813,6 +1827,7 @@ let test_report_stem () =
 let test_multi_strat_fixture () =
   let sma_source =
     {|stock "tw/FIXTURE"
+rebalance on_change
 param fast = 50
 param slow = 200
 entry when cross_above(sma(close, fast), sma(close, slow))
@@ -1821,6 +1836,7 @@ exit  when cross_below(sma(close, fast), sma(close, slow))
   in
   let buy_hold_source =
     {|stock "tw/FIXTURE"
+rebalance on_change
 target 1.0
 |}
   in
@@ -2037,7 +2053,7 @@ let test_dividend_tax_cli () =
       in
       let strategy_path = Filename.concat root "tax.strat" in
       let () =
-        write strategy_path "stock \"tw/AA\"\ntarget 1.0\n"
+        write strategy_path "stock \"tw/AA\"\nrebalance on_change\ntarget 1.0\n"
       in
       let binary =
         locate ["_build/default/bin/bt.exe"; "../bin/bt.exe"]
@@ -2130,6 +2146,7 @@ let test_multi_stock_cli () =
       write strategy_path
         "stock \"tw/AA\" as a\n\
          stock \"tw/BB\" as b\n\
+         rebalance on_change\n\
          a.target 1.0\n\
          b.target 0.5\n";
       let stdout_path = Filename.concat root "stdout.txt" in
@@ -2240,6 +2257,7 @@ let test_margin_cli () =
       write strategy_path
         "stock \"tw/AA\" as a\n\
          stock \"tw/BB\" as b\n\
+         rebalance on_change\n\
          a.target 2.0\n\
          b.target 0.0\n";
       let stdout_path = Filename.concat root "stdout.txt" in
@@ -3080,6 +3098,7 @@ let test_multi_stock_compile () =
   with_temp_strategy
     "stock \"tw/00685L\" as bull\n\
      stock \"tw/00632R\" as bear\n\
+     rebalance on_change\n\
      let falling = bull.close < lag(bull.close, 1)\n\
      bull.target num(not falling)\n\
      bear.entry when falling size 0.5\n\
@@ -3117,33 +3136,33 @@ let test_multi_stock_errors () =
           ignore (Dsl.compile_ast ast ~params:[] ~assets)))
   in
   (* mixed aliased and unaliased stocks *)
-  expect "stock \"tw/A\" as a\nstock \"tw/B\"\na.target 1.0\n";
+  expect "stock \"tw/A\" as a\nstock \"tw/B\"\nrebalance on_change\na.target 1.0\n";
   (* two unaliased stocks *)
-  expect "stock \"tw/A\"\nstock \"tw/B\"\ntarget 1.0\n";
+  expect "stock \"tw/A\"\nstock \"tw/B\"\nrebalance on_change\ntarget 1.0\n";
   (* duplicate alias *)
-  expect "stock \"tw/A\" as a\nstock \"tw/B\" as a\na.target 1.0\n";
+  expect "stock \"tw/A\" as a\nstock \"tw/B\" as a\nrebalance on_change\na.target 1.0\n";
   (* alias collides with a builtin *)
-  expect "stock \"tw/A\" as sma\nsma.target 1.0\n";
+  expect "stock \"tw/A\" as sma\nrebalance on_change\nsma.target 1.0\n";
   (* alias collides with a predefined series *)
-  expect "stock \"tw/A\" as close\nclose.target 1.0\n";
+  expect "stock \"tw/A\" as close\nrebalance on_change\nclose.target 1.0\n";
   (* alias collides with a param *)
-  expect "stock \"tw/A\" as n\nparam n = 5\nn.target 1.0\n";
+  expect "stock \"tw/A\" as n\nrebalance on_change\nparam n = 5\nn.target 1.0\n";
   (* alias collides with a let *)
-  expect "stock \"tw/A\" as n\nlet n = 5\nn.target 1.0\n";
+  expect "stock \"tw/A\" as n\nrebalance on_change\nlet n = 5\nn.target 1.0\n";
   (* unknown alias in a statement *)
-  expect "stock \"tw/A\" as a\nb.target 1.0\n";
+  expect "stock \"tw/A\" as a\nrebalance on_change\nb.target 1.0\n";
   (* bare statement in an aliased file *)
-  expect "stock \"tw/A\" as a\ntarget 1.0\n";
+  expect "stock \"tw/A\" as a\nrebalance on_change\ntarget 1.0\n";
   (* bare series in an aliased file *)
-  expect "stock \"tw/A\" as a\na.target close\n";
+  expect "stock \"tw/A\" as a\nrebalance on_change\na.target close\n";
   (* bare atr in an aliased file *)
-  expect "stock \"tw/A\" as a\na.target atr(3)\n";
+  expect "stock \"tw/A\" as a\nrebalance on_change\na.target atr(3)\n";
   (* qualified non-atr builtin *)
-  expect "stock \"tw/A\" as a\na.target a.sma(a.close, 3)\n";
+  expect "stock \"tw/A\" as a\nrebalance on_change\na.target a.sma(a.close, 3)\n";
   (* declared stock without statements *)
-  expect "stock \"tw/A\" as a\nstock \"tw/B\" as b\na.target 1.0\n";
+  expect "stock \"tw/A\" as a\nstock \"tw/B\" as b\nrebalance on_change\na.target 1.0\n";
   (* alias qualification in an unaliased file *)
-  expect "stock \"tw/A\"\na.target 1.0\n"
+  expect "stock \"tw/A\"\nrebalance on_change\na.target 1.0\n"
 
 
 let test_duplicate_symbol_aliases () =
@@ -3158,6 +3177,7 @@ let test_duplicate_symbol_aliases () =
   with_temp_strategy
     "stock \"tw/0050\" as bull\n\
      stock \"tw/0050\" as bear\n\
+     rebalance on_change\n\
      bull.target 0.6\n\
      bear.target 0.4\n"
     (fun path ->
@@ -4028,15 +4048,15 @@ let test_mixed_market_rejection () =
     ~finally:(fun () -> if Sys.file_exists stderr_path then Sys.remove stderr_path)
     (fun () ->
       (* Two strats from different markets. *)
-      with_temp_strategy "stock \"tw/A\"\ntarget 1.0\n" (fun tw_path ->
-        with_temp_strategy "stock \"us/B\"\ntarget 1.0\n" (fun us_path ->
+      with_temp_strategy "stock \"tw/A\"\nrebalance on_change\ntarget 1.0\n" (fun tw_path ->
+        with_temp_strategy "stock \"us/B\"\nrebalance on_change\ntarget 1.0\n" (fun us_path ->
           let code = run_args
             [tw_path; us_path; "--capital"; "1";
              "--data-dir"; "nonexistent"; "--no-plot"] in
           assert (code = 2);
           assert (contains (read_file stderr_path) "all stocks must share one market")));
       (* TW strat with US baseline. *)
-      with_temp_strategy "stock \"tw/A\"\ntarget 1.0\n" (fun tw_path ->
+      with_temp_strategy "stock \"tw/A\"\nrebalance on_change\ntarget 1.0\n" (fun tw_path ->
         let code = run_args
           [tw_path; "--baseline"; "us/SPY"; "--capital"; "1";
            "--data-dir"; "nonexistent"; "--no-plot"] in
@@ -4466,6 +4486,7 @@ let test_alias_qualified_labels () =
   with_temp_strategy
     "stock \"tw/00685L\" as core\n\
      stock \"tw/00685L\" as trade\n\
+     rebalance on_change\n\
      core.target 0.6\n\
      trade.target 0.4\n"
     (fun path ->
@@ -4492,7 +4513,7 @@ let test_alias_qualified_labels () =
       assert (List.mem "tw/00685L#trade" fill_stocks));
   (* Single declaration: label stays bare *)
   with_temp_strategy
-    "stock \"tw/00685L\"\ntarget 0.6\n"
+    "stock \"tw/00685L\"\nrebalance on_change\ntarget 0.6\n"
     (fun path ->
       let ast = Dsl.parse_file path in
       let stocks = Dsl.stocks_of ~filename:path ast in
@@ -4502,6 +4523,7 @@ let test_alias_qualified_labels () =
   with_temp_strategy
     "stock \"tw/0050\" as etf50\n\
      stock \"tw/00632R\" as inverse\n\
+     rebalance on_change\n\
      etf50.target 0.6\n\
      inverse.target 0.4\n"
     (fun path ->
@@ -5142,7 +5164,7 @@ let test_live_commands_reject_tw () =
     ~finally:(fun () ->
       if Sys.file_exists stderr_path then Sys.remove stderr_path)
     (fun () ->
-      with_temp_strategy "stock \"tw/00685L\"\ntarget 1.0\n" (fun path ->
+      with_temp_strategy "stock \"tw/00685L\"\nrebalance on_change\ntarget 1.0\n" (fun path ->
         let command =
           String.concat " "
             [ Filename.quote binary;
@@ -5165,7 +5187,7 @@ let test_tw_live_rejects_production_equity () =
     ~finally:(fun () ->
       if Sys.file_exists stderr_path then Sys.remove stderr_path)
     (fun () ->
-      with_temp_strategy "stock \"tw/00685L\"\ntarget 1.0\n" (fun path ->
+      with_temp_strategy "stock \"tw/00685L\"\nrebalance on_change\ntarget 1.0\n" (fun path ->
         let command =
           String.concat " "
             [ Filename.quote binary;
@@ -5196,7 +5218,7 @@ let test_target_rejects_invalid_provisional_close () =
         ~finally:(fun () ->
           if Sys.file_exists stderr_path then Sys.remove stderr_path)
         (fun () ->
-          with_temp_strategy "stock \"us/SPY\"\ntarget 1.0\n" (fun path ->
+          with_temp_strategy "stock \"us/SPY\"\nrebalance on_change\ntarget 1.0\n" (fun path ->
             let command =
               String.concat " "
                 [ Filename.quote binary;
@@ -5235,7 +5257,7 @@ let test_target_rejects_invalid_provisional_close () =
     ~finally:(fun () ->
       if Sys.file_exists stderr_path then Sys.remove stderr_path)
     (fun () ->
-      with_temp_strategy "stock \"us/SPY\"\ntarget 1.0\n" (fun path ->
+      with_temp_strategy "stock \"us/SPY\"\nrebalance on_change\ntarget 1.0\n" (fun path ->
         let command =
           String.concat " "
             [ Filename.quote binary;
@@ -5447,7 +5469,7 @@ let test_daytrade_cli () =
           (* These are run errors, not unknown-subcommand usage errors. *)
           let () = assert (invoke [path; "--capital"; "1"; "--no-plot"] = 1) in
           assert (read_file stderr_path = message ^ "\n")))
-        ["stock \"us/SPY\"\ntarget 1\n", "bt daytrade requires a bars declaration";
+        ["stock \"us/SPY\"\nrebalance on_change\ntarget 1\n", "bt daytrade requires a bars declaration";
          "stock \"tw/0050\"\nbars 5m\ntarget 1\n", "day trading supports us only";
          "stock \"us/SPY\" as a\nstock \"us/QQQ\" as b\nbars 5m\na.target 1\nb.target 0\n",
          "day trading strategies declare exactly one stock"]
@@ -6757,7 +6779,7 @@ let test_tw_live_decide_override () =
       write (Filename.concat symbol_dir "2330.cashdiv.csv")
         "ex_date,cash_per_share,pay_date\n"
     in
-    with_temp_strategy "stock \"tw/2330\"\ntarget 1.0\n" (fun strat_path ->
+    with_temp_strategy "stock \"tw/2330\"\nrebalance on_change\ntarget 1.0\n" (fun strat_path ->
       let all_positions =
         Shioaji.parse_positions (shioaji_fixture "positions.json")
       in
@@ -6813,7 +6835,8 @@ let test_tw_live_decide_override () =
       in
       (* The prior and provisional bars both target 0.5. The TWD 2,000,000
          holding has drifted above TWD 1,500,000, but an unchanged target
-         preserves that drift and submits no order. *)
+         preserves that drift and submits no order. This fixture stays
+         undeclared to pin the on_change default. *)
       let () = assert (unchanged.Live.action = Live.Orders []) in
       let unchanged_below =
         decide_drift "stock \"tw/2330\"\nrebalance on_change\ntarget 0.8\n"
@@ -6875,7 +6898,7 @@ let test_tw_live_decide_override () =
       in
       let dropped =
         decide_drift
-          "stock \"tw/2330\"\ntarget 0.5 * num(close > 1000.0)\n"
+          "stock \"tw/2330\"\nrebalance on_change\ntarget 0.5 * num(close > 1000.0)\n"
       in
       (* The prior close of TWD 1,980 targets 0.5, while the provisional
          close of TWD 200 targets zero. Selling 10,000 shares closes the
@@ -6889,7 +6912,7 @@ let test_tw_live_decide_override () =
 
       let minimum_commission =
         with_temp_strategy
-          "stock \"tw/2330\"\ntarget num(close < 1000.0)\n"
+          "stock \"tw/2330\"\nrebalance on_change\ntarget num(close < 1000.0)\n"
           (fun minimum_strat_path ->
             Live.decide ~provisional_close:10.
               ~previous_session:"2026-05-22" ~equity:10002.
@@ -6910,7 +6933,7 @@ let test_tw_live_decide_override () =
 
       let cash_bound =
         with_temp_strategy
-          "stock \"tw/2330\"\ntarget num(close < 1000.0)\n"
+          "stock \"tw/2330\"\nrebalance on_change\ntarget num(close < 1000.0)\n"
           (fun cash_bound_strat_path ->
             Live.decide ~provisional_close:100.
               ~previous_session:"2026-05-22" ~equity:1000500.

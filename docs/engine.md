@@ -34,7 +34,9 @@ This guide explains how the bt engine simulates trades, computes equity, and app
 
 ### Targets and drift
 
-A strategy states a target exposure for each bar. The engine trades only when the clamped target differs from the previous bar's. Between fills, positions drift with the market price, and the engine does not rebalance them back to target each day.
+A strategy states a target exposure for each bar. The engine clamps each target and, when the bar's combined down payments would exceed equity at the fresh-loan financing ratios, scales every target down to fit. The result is the effective target.
+
+A daily strategy declares `rebalance daily` to plan toward its effective target each bar, or `rebalance on_change` to rebalance only when that target changes. An undeclared daily strategy defaults to on_change and prints a warning. Under on_change, positions drift with the market price until a target change or a dividend-cash fill pass. After a next-open maintenance cure, an on_change position stays below target until the target changes. Under daily, the cure bar buys back toward the target on margin, within the financing that the effective target already fits. With `--fill close`, that rebuy happens at the bar's close; with `--fill open`, it happens at the same open, right after the cure. `--fill close` re-plans at each bar's close, and `--fill open` re-plans at the next bar's open. Intraday `bars` strategies cannot declare rebalance.
 
 ### Fill planner
 
@@ -124,7 +126,7 @@ The required margin is the sum, over long positions, of each position's tier rat
 
 `--maintenance-ratio PCT` replaces the whole table with one flat rate. Use it for leveraged ETFs with house requirements (2x ETFs at 50%, 3x ETFs at 75%).
 
-A breach at the close schedules a minimum cure at the next open. The engine sells the smallest proportional fraction of margin inventory whose proceeds, after the matching loan repayment and costs, bring equity back to at least the required margin. Positions survive in part. This matches Alpaca's policy of liquidating only enough to meet the margin requirement.
+A breach at the close schedules a minimum cure at the next open. The engine sells the smallest proportional fraction of margin inventory whose proceeds, after the matching loan repayment and costs, bring equity back to at least the required margin. Positions survive in part. This matches Alpaca's policy of liquidating only enough to meet the margin requirement. Under `rebalance daily`, the same bar then buys back toward the target; see [Targets and drift](#targets-and-drift).
 
 If equity is zero or less at any close, the solvency guard sells all inventories, keeps any unpaid debt as a residual liability, and freezes the account. TW shares the same bankruptcy and solvency-guard logic.
 
@@ -137,6 +139,8 @@ A US dividend becomes cash on its ex-date, with no receivable period. When divid
 #### Live trading fidelity
 
 The live daemon evaluates a provisional bar 15 minutes before the close and submits a fractional `market` order with `time_in_force: day` before a cutoff 2 minutes before the close. A failed evaluation retries every 60 seconds until that cutoff. The order fills near the decision price rather than at the official close, and `--slip-bps` models that gap in the backtest. Live and backtest quantities are both fractional.
+
+Under `rebalance on_change` or without a declaration, the daemon skips a session whose effective target equals the previous bar's, with the reason `target unchanged`. Under `rebalance daily`, it sizes the difference between desired and held shares every session. A daily backtest trades any drift, while the daemon skips buys under USD 1 and truncates quantities to 9 decimal places, so small drift can differ.
 
 #### Gaps between simulation and the real market
 
@@ -181,7 +185,7 @@ Financing interest accrues as a liability at 6.35% per year by default (`--finan
 
 TW loan lots mature after 18 calendar months by default (`--loan-term-months`). The maturity date keeps the origination day of the month and clamps to the month end when needed. On the first bar at or after maturity, the engine sells the lot's margin inventory and buys back the fundable part on margin. Both legs pay normal costs. Appreciation can free cash. An underwater lot draws its deficit from available cash; any part the engine cannot fund stays sold, and the fills record the exposure drop. Each rollover increments `refinances`. Use `--loan-term-months 0` to disable the TW term.
 
-Maintenance is total margin inventory value divided by total loan principal. A new margin entry starts at 166.7% on both TWSE and TPEX. When maintenance falls below 130% by default (`--maintenance-ratio`), the engine sells all margin inventories at the next open and repays loans and accrued interest from the proceeds. Cash inventories remain.
+Maintenance is total margin inventory value divided by total loan principal. A new margin entry starts at 166.7% on both TWSE and TPEX. When maintenance falls below 130% by default (`--maintenance-ratio`), the engine sells all margin inventories at the next open and repays loans and accrued interest from the proceeds. Cash inventories remain. Under `rebalance daily`, the same bar then buys back toward the target; see [Targets and drift](#targets-and-drift).
 
 If equity is zero or less at any close, the solvency guard sells all inventories, keeps any unpaid debt as a residual liability, and freezes the account.
 
@@ -195,7 +199,7 @@ On a TW ex-date, the engine books net cash dividends as receivables for the shar
 - The margin-inventory receivable repays that asset's loan lots pro rata with matching accrued interest. Any excess becomes cash.
 - A frozen account still applies paid receivables to residual debt.
 
-If TW data omits a pay date, the loader uses one calendar month after the ex-date. Cash-side dividends, plus any margin-side excess left after loan paydown, trigger one normal cost-bearing fill pass toward the current targets. A margin dividend that loan paydown consumes in full preserves drift and triggers no fill. `--dividend-tax` defaults to 0%.
+If TW data omits a pay date, the loader uses one calendar month after the ex-date. Cash-side dividends, plus any margin-side excess left after loan paydown, trigger one normal cost-bearing fill pass toward the current targets. Under `rebalance on_change`, a margin dividend that loan paydown consumes in full preserves drift and triggers no fill. `--dividend-tax` defaults to 0%.
 
 Stock-dividend and share-count factors restate per-share cash amounts and volume.
 
@@ -204,9 +208,9 @@ Stock-dividend and share-count factors restate per-share cash amounts and volume
 The TW daemon runs the unchanged daily engine planner inside a Shioaji execution path, in simulation or production.
 
 - At 13:05 Taipei, the daemon validates a same-session Shioaji snapshot and asks FinMind's independent `TaiwanStockTradingDate` calendar for the previous session. It refreshes prices only through that date and refreshes dividend and corporate-action data through the current session. It rejects any price cache that does not end exactly at the previous session.
-- At 13:20, it validates a fresh per-decision snapshot and builds today's provisional OHLCV bar. It then runs the same strategy compiler, target normalization, financing ratio, share quantum, and fill planner as the daily backtest, with the 14.25 bps settlement-debit commission in place of the backtest's 2.85 bps default. The planner compares the final effective target with the previous bar's effective target, so an unchanged target preserves drift instead of rebalancing. Live account values are already in absolute TWD, so planner capital is 1 and the TWD 1 minimum commission stays TWD 1.
+- At 13:20, it validates a fresh per-decision snapshot and builds today's provisional OHLCV bar. It then runs the same strategy compiler, target normalization, financing ratio, share quantum, and fill planner as the daily backtest, with the 14.25 bps settlement-debit commission in place of the backtest's 2.85 bps default. Under `rebalance daily`, the planner plans back to the effective target every session, so it re-plans missed legs and partial fills. Under `rebalance on_change` or without a declaration, the planner compares the final effective target with the previous bar's effective target, so an unchanged target preserves drift. Maturity rollover legs run under either choice. Live account values are already in absolute TWD, so planner capital is 1 and the TWD 1 minimum commission stays TWD 1.
 - Simulation requires `--equity TWD` as total account equity. For the supported one-stock account, the daemon infers cash as equity minus cash and margin inventory value, plus loan principal and interest. It rejects a nonzero holding in any other symbol.
-- Production requires exactly one broker settlement row for each of T+0, T+1, and T+2, and rejects missing, duplicate, or other T-day rows. Spendable cash is `acc_balance + T+1 + T+2`. `acc_balance` already reflects T+0, so the daemon validates and logs T+0 but leaves it out of the sum. Equity adds positions, read in shares with `unit: Share` and valued at broker `last_price`, then subtracts loans and interest. Pending T+1 and T+2 settlements change the cash budget but do not skip the session.
+- Production requires exactly one broker settlement row for each of T+0, T+1, and T+2, and rejects missing, duplicate, or other T-day rows. Spendable cash is `acc_balance + T+1 + T+2`. `acc_balance` already reflects T+0, so the daemon validates and logs T+0 but leaves it out of the sum. Decision equity adds positions, read in shares with `unit: Share` and valued at the provisional close the planner uses, then subtracts loans and interest; a non-positive result fails the session before planning. The startup log values positions at broker `last_price`. Pending T+1 and T+2 settlements change the cash budget but do not skip the session.
 - The client reads the dated Shioaji `position_detail` of each margin position. A lot due under the engine's TW rule (18 calendar months, clamped to month end) adds a margin sell and rebuy pair ahead of the ordinary planner legs.
 - The planner already floors cash quantities to whole shares and margin quantities to 1000-share lots. Each cash leg becomes one `Common` order for the whole lots plus one `IntradayOdd` order for the remaining 1 to 999 shares. Margin, refinance, and rollover legs use `Common` orders only.
 - `Common` orders use `MKT` + `IOC` during continuous trading. `IntradayOdd` orders are limit `ROD` orders at the snapshot ask for a buy and the snapshot bid for a sell, the only order form TWSE accepts for intraday odd lots. The simulation server does not support odd lots, so simulation skips them. Before every submission, the executor rechecks the Taipei date and the 13:24:30 order cutoff; before every status poll, it rechecks the date and the 13:25 end of continuous trading. It submits nothing at or after 13:24:30, so the 30-second margin reduces the chance that a checked order reaches the broker in the closing call.

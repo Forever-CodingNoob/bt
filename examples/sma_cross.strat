@@ -1,4 +1,5 @@
 stock "tw/0050"
+rebalance on_change
 param fast = 50
 param slow = 200
 entry when cross_above(sma(close, fast), sma(close, slow))
