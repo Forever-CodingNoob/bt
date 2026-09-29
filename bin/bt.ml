@@ -146,8 +146,8 @@ let load_asset ~market ~symbol ~from_ ~to_ ~data_dir =
   Data.load_asset ~market ~symbol ~from_ ~to_ ~data_dir
 
 type strategy_input = {
-  path : string;
   name : string;
+  rebalance : bool;
   stocks : (string option * string * string) list;
   ast : Ast.file;
   declarations : (string * float) list;
@@ -302,12 +302,13 @@ let run argv =
               path
         in
         let stocks = Dsl.stocks_of ~filename:path ast in
-        (path, name, ast, stocks, Dsl.declared_params_ast ast))
+        (name, ast, stocks, Dsl.declared_params_ast ast,
+         Option.value rebalance ~default:false))
       strategy_files names
   in
   let all_markets =
     List.concat_map
-      (fun (_, _, _, stocks, _) ->
+      (fun (_, _, stocks, _, _) ->
         List.map (fun (_, market, _) -> market) stocks)
       parsed
   in
@@ -349,13 +350,13 @@ let run argv =
   in
   let inputs =
     List.map
-      (fun (path, name, ast, stocks, declarations) ->
+      (fun (name, ast, stocks, declarations, rebalance) ->
         let assets =
           List.map
             (fun (_, market, symbol) -> load_cached ~market ~symbol)
             stocks
         in
-        { path; name; stocks; ast; declarations; assets })
+        { name; stocks; ast; declarations; rebalance; assets })
       parsed
   in
   let baseline_asset =
@@ -481,9 +482,7 @@ let run argv =
             ~dividend_tax:(!dividend_tax /. 100.)
             engine_assets strategy costs
             ~profile ~margin:margin_config ~capital ~fill:!fill
-            ~rebalance:(Option.value
-              (Dsl.rebalance_of ~filename:input.path input.ast)
-              ~default:false)
+            ~rebalance:input.rebalance
         in
         (input.name, String.concat "+" labels, result))
       inputs
@@ -769,6 +768,7 @@ let live_command_args command extra_options argv =
         usage_error (Printf.sprintf "%s: one STRAT file is required" command)
   in
   let ast = Dsl.parse_file strat_path in
+  let rebalance = Dsl.rebalance_of ~filename:strat_path ast in
   let () =
     if List.exists (function Ast.Bars _ -> true | _ -> false) ast then
       failwith "day trading strategies run under bt daytrade"
@@ -785,7 +785,7 @@ let live_command_args command extra_options argv =
   match market with
   | "us" ->
       (match !equity with
-       | None -> strat_path, market, mode, None, !data_dir
+       | None -> strat_path, market, mode, None, !data_dir, rebalance
        | Some _ -> usage_error "--equity is only available for tw")
   | "tw" ->
       (match mode, !equity with
@@ -793,7 +793,7 @@ let live_command_args command extra_options argv =
        | Live.Live, Some _ ->
            usage_error "--equity is not allowed in production"
        | Live.Paper, Some _ | Live.Live, None ->
-           strat_path, market, mode, !equity, !data_dir)
+           strat_path, market, mode, !equity, !data_dir, rebalance)
   | _ -> usage_error "live trading supports us and tw only"
 
 let taipei_date () =
@@ -815,12 +815,11 @@ let target argv =
                   "--provisional-close must be a positive float")),
        "override the provisional close with a positive price") ]
   in
-  let strat_path, market, mode, equity, data_dir =
+  let strat_path, market, mode, equity, data_dir, rebalance =
     live_command_args "target" extra_options argv
   in
-  let ast = Dsl.parse_file strat_path in
   let () =
-    if Dsl.rebalance_of ~filename:strat_path ast = None then
+    if rebalance = None then
       Printf.eprintf
         "warning: %s does not declare rebalance; trading only when the target changes\n"
         strat_path
@@ -846,7 +845,7 @@ let target argv =
   print_decision !provisional_close decision
 
 let live argv =
-  let strat_path, _, mode, equity, data_dir =
+  let strat_path, _, mode, equity, data_dir, _ =
     live_command_args "live" [] argv
   in
   Live.run ?equity mode ~strat_path ~data_dir

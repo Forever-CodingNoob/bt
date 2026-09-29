@@ -335,6 +335,33 @@ let test_engine_rebalance_constant () =
       assert_close 0.5 fill.Engine.to_e
   | _ -> assert false
 
+let test_engine_rebalance_open_next () =
+  let bars =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 100. 110.;
+       bar "2020-01-03" 120. 120. |]
+  in
+  let run rebalance =
+    Engine.run ~rebalance ~profile:tw_profile [| "tw/TEST", bars |]
+      { Engine.targets = [| [| 0.5; 0.5; 0.5 |] |] } [| zero_costs |]
+      ~margin:(no_margin 1) ~capital:1. ~fill:Engine.Open_next
+  in
+  let second_open_fills result =
+    List.filter
+      (fun (fill : Engine.fill_event) ->
+        fill.date = "2020-01-03" && fill.to_e <> 0.)
+      result.Engine.fills
+  in
+  (* Entry at the Jan 2 open holds 0.5 of equity; 110 close to 120
+     next open drifts position to 0.6 and equity to 1.1. The daily
+     target trims exposure 0.6 / 1.1 to 0.5 at the Jan 3 open. *)
+  assert (second_open_fills (run false) = []);
+  match second_open_fills (run true) with
+  | [fill] ->
+      assert_close (0.6 /. 1.1) fill.Engine.from_e;
+      assert_close 0.5 fill.Engine.to_e
+  | _ -> assert false
+
 let test_engine_rebalance_after_cure () =
   let bars =
     [| bar "2020-01-02" 10. 10.;
@@ -3909,7 +3936,7 @@ let test_rebalance_cli_warning () =
         (fun () -> output_string output text)
     in
     write (Filename.concat stock_dir "AA.csv")
-      "date,open,high,low,close,volume\n2020-01-01,100,100,100,100,1000\n2020-01-02,100,100,100,100,1000\n";
+      "date,open,high,low,close,volume\n2020-01-01,100,100,100,100,1000\n2020-01-02,200,200,200,200,1000\n2020-01-03,200,200,200,200,1000\n";
     write (Filename.concat stock_dir "AA.div.csv") "date,factor\n";
     write (Filename.concat stock_dir "AA.events.csv") "date,factor\n";
     write (Filename.concat stock_dir "AA.cashdiv.csv")
@@ -3921,29 +3948,42 @@ let test_rebalance_cli_warning () =
       let command =
         String.concat " "
           [Filename.quote binary; "run"; Filename.quote path;
-           "--capital"; "100000"; "--financing-ratio"; "60";
+           "--capital"; "1000000"; "--financing-ratio"; "60";
            "--data-dir"; Filename.quote data_dir;
            "--out-dir"; Filename.quote data_dir; "--out-name"; "same";
            "--no-plot"; ">" ^ Filename.quote stdout_path;
            "2>" ^ Filename.quote stderr_path]
       in
       assert (Sys.command command = 0);
-      read_file stdout_path, read_file stderr_path
+      read_file stdout_path, read_file stderr_path,
+      read_file (Filename.concat data_dir "same.trades.csv")
     in
     let strategy = Filename.concat data_dir "same.strat" in
     let write_strategy text = write strategy text in
     write_strategy "stock \"tw/AA\"\ntarget 0.5\n";
-    let implicit_stdout, implicit_stderr = run strategy "implicit" in
+    let implicit_stdout, implicit_stderr, implicit_trades =
+      run strategy "implicit"
+    in
     write_strategy "stock \"tw/AA\"\nrebalance on_change\ntarget 0.5\n";
-    let explicit_stdout, explicit_stderr = run strategy "explicit" in
-    (* Both strategies have the same basename and target, so report bytes match. *)
+    let explicit_stdout, explicit_stderr, explicit_trades =
+      run strategy "explicit"
+    in
+    (* The same basename and on-change target produce identical reports and fills. *)
     assert (implicit_stdout = explicit_stdout);
+    assert (implicit_trades = explicit_trades);
     assert (explicit_stderr = "");
     assert
       (implicit_stderr =
        Printf.sprintf
          "warning: %s does not declare rebalance; trading only when the target changes\n"
-         strategy))
+         strategy);
+    write_strategy "stock \"tw/AA\"\nrebalance daily\ntarget 0.5\n";
+    let daily_stdout, daily_stderr, daily_trades = run strategy "daily" in
+    (* The doubled second close drifts a 0.5 position above its target;
+       daily must trim before the last bar, unlike on_change. *)
+    assert (daily_stderr = "");
+    assert (daily_stdout <> explicit_stdout);
+    assert (daily_trades <> explicit_trades))
 
 let test_capital_required () =
   let binary = locate ["_build/default/bin/bt.exe"; "../bin/bt.exe"] in
@@ -5376,6 +5416,20 @@ let test_bars_run_routing () =
           assert (read_file stderr_path =
             "day trading strategies run under bt daytrade\n"))))
     ["run", ["--capital"; "1"]; "target", []; "live", []]
+
+let test_bars_rebalance_target_routing () =
+  let binary = locate ["_build/default/bin/bt.exe"; "../bin/bt.exe"] in
+  with_temp_strategy "stock \"us/SPY\"\nbars 5m\nrebalance daily\ntarget 1\n"
+    (fun path ->
+      let stderr_path = Filename.temp_file "bt-test-bars-rebalance-" ".txt" in
+      Fun.protect ~finally:(fun () -> Sys.remove stderr_path) (fun () ->
+        let invocation = String.concat " "
+          [Filename.quote binary; "target"; Filename.quote path;
+           ">/dev/null"; "2>" ^ Filename.quote stderr_path] in
+        (* Validation rejects the invalid pair before contacting a broker. *)
+        assert (Sys.command invocation = 1);
+        assert (read_file stderr_path =
+          path ^ ": rebalance applies to daily strategies only\n")))
 
 let test_daytrade_cli () =
   let binary = locate ["_build/default/bin/bt.exe"; "../bin/bt.exe"] in
@@ -7687,6 +7741,7 @@ let () =
   let () = test_bars_declaration () in
   let () = test_session_series () in
   let () = test_bars_run_routing () in
+  let () = test_bars_rebalance_target_routing () in
   let () = test_minute_data () in
   test_alpaca_base_urls ();
   test_alpaca_clock_parse ();
@@ -7730,6 +7785,7 @@ let () =
   test_style_errors ();
   test_engine_drift ();
   test_engine_rebalance_constant ();
+  test_engine_rebalance_open_next ();
   test_engine_rebalance_after_cure ();
   test_inventory_split ();
   test_maintenance_at_entry ();
