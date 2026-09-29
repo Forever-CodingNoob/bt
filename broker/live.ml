@@ -78,6 +78,13 @@ let decide_action ~symbol ~date ~target ~equity ~price ~held =
   else
     Order { side; qty; id = client_order_id ~symbol ~date }
 
+let us_rebalance_action ~rebalance ~target ~previous_target
+    ~symbol ~date ~equity ~price ~held =
+  if not rebalance && target = previous_target then
+    Skip "target unchanged"
+  else
+    decide_action ~symbol ~date ~target ~equity ~price ~held
+
 let int_field value offset length =
   int_of_string (String.sub value offset length)
 
@@ -579,25 +586,32 @@ let decide ?provisional_close ?previous_session ?equity ?tw_balance
       let strategy =
         Dsl.compile_ast ast ~params:[] ~assets:[alias, bars]
       in
-      let target =
+      let profile = Engine.profile_of_market "us" in
+      let effective_target raw =
+        let effective, _ =
+          Engine.effective_targets
+            ~financing_ratios:[| profile.default_financing_ratio |]
+            [| raw |]
+        in
+        effective.(0)
+      in
+      let target, previous_target =
         match strategy.Engine.targets with
         | [| targets |] when Array.length targets > 0 ->
-            let raw = targets.(Array.length targets - 1) in
-            let profile = Engine.profile_of_market "us" in
-            let effective, _ =
-              Engine.effective_targets
-                ~financing_ratios:[| profile.default_financing_ratio |]
-                [| raw |]
+            let last = Array.length targets - 1 in
+            let target = effective_target targets.(last) in
+            let previous =
+              if last = 0 then 0. else effective_target targets.(last - 1)
             in
-            effective.(0)
+            target, previous
         | _ -> failwith "live trading requires exactly one stock target"
       in
       let account = Alpaca.account mode in
       let equity = account.equity in
       let held = Alpaca.position_qty mode symbol in
       let action =
-        decide_action ~symbol ~date:provisional.date ~target ~equity
-          ~price:provisional.c ~held
+        us_rebalance_action ~rebalance ~target ~previous_target ~symbol
+          ~date:provisional.date ~equity ~price:provisional.c ~held
       in
       { fetched_through; provisional; target; equity; held; action }
   | [alias, "tw", symbol] ->

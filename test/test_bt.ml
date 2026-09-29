@@ -4696,6 +4696,22 @@ let test_us_live_fractional () =
           ~client_order_id:"bt-SPY-2025-06-24")
      = {|{"type":"market","time_in_force":"day","qty":"1.666666666"}|})
 
+let test_us_live_rebalance_action () =
+  let choose rebalance ~target ~previous_target =
+    Live.us_rebalance_action ~rebalance ~target ~previous_target
+      ~symbol:"SPY" ~date:"2025-06-24" ~equity:1000.
+      ~price:100. ~held:4.
+  in
+  (* 0.5 * 1000 / 100 = 5 shares; held 4; the order is a 1-share buy. *)
+  let buy = Live.Order
+    { side = `Buy; qty = 1.; id = "bt-SPY-2025-06-24" } in
+  assert (choose true ~target:0.5 ~previous_target:0.5 = buy);
+  assert
+    (choose false ~target:0.5 ~previous_target:0.5
+     = Live.Skip "target unchanged");
+  assert (choose true ~target:0.5 ~previous_target:0.2 = buy);
+  assert (choose false ~target:0.5 ~previous_target:0.2 = buy)
+
 let test_us_live_quantity_limit () =
   let held =
     Alpaca.parse_position_qty ~http_code:200
@@ -7681,6 +7697,7 @@ let () =
   test_engine_effective_targets ();
   test_live_pure_decisions ();
   test_us_live_fractional ();
+  test_us_live_rebalance_action ();
   test_us_live_quantity_limit ();
   test_live_schedule ();
   test_us_live_submit_cutoff ();

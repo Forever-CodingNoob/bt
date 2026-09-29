@@ -71,6 +71,12 @@ val decide_action :
   held:float ->
   action
 
+(** Choose change-only skip or existing US share sizing without broker I/O. *)
+val us_rebalance_action :
+  rebalance:bool -> target:float -> previous_target:float ->
+  symbol:string -> date:string -> equity:float -> price:float ->
+  held:float -> action
+
 
 (** Resolve a TW symbol to Shioaji's [TSE] or [OTC] exchange name. *)
 val exchange_of_symbol : data_dir:string -> string -> string
