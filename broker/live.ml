@@ -785,6 +785,12 @@ let log format =
         utc.tm_hour utc.tm_min utc.tm_sec (printable_ascii line);
       flush stdout)
     format
+let log_rebalance_warning strat_path = function
+  | Some _ -> ()
+  | None ->
+      log "warning: %s does not declare rebalance; trading only when the target changes"
+        strat_path
+
 
 let mode_name = function
   | Paper -> "paper"
@@ -982,7 +988,7 @@ let us_step ~symbol ~lookup ~decide ~execute ~finish ~sleep_until ~retry
         | `Continue -> continue ()
         | `Retry -> retry ()
 
-let run_us mode ~strat_path ~data_dir =
+let run_us mode ~strat_path ~data_dir ~rebalance_choice =
   let ast = Dsl.parse_file strat_path in
   let symbol =
     match Dsl.stocks_of ~filename:strat_path ast with
@@ -999,6 +1005,7 @@ let run_us mode ~strat_path ~data_dir =
   in
   log "startup mode=%s account=%s equity=%.10g" (mode_name mode)
     account.account_number account.equity;
+  let () = log_rebalance_warning strat_path rebalance_choice in
   let rec cycle () =
     match Alpaca.clock mode with
     | exception error ->
@@ -1523,7 +1530,7 @@ let execute_tw_legs ~mode ~bid ~ask ~now ~sleep ~place_order ~orders_today
                                  (trade :: trades))
   in
   submit cash cash_shares margin_lots loans interests None [] legs
-let run_tw mode ~equity ~symbol ~strat_path ~data_dir =
+let run_tw mode ~equity ~symbol ~strat_path ~data_dir ~rebalance_choice =
   let info = Shioaji.info () in
   let () =
     match tw_startup_ok mode ~equity info with
@@ -1558,6 +1565,7 @@ let run_tw mode ~equity ~symbol ~strat_path ~data_dir =
         equity
     | Paper, None | Live, Some _ -> assert false
   in
+  let () = log_rebalance_warning strat_path rebalance_choice in
   let exchange = exchange_of_symbol ~data_dir symbol in
   let costs = tw_live_debit_costs symbol in
   let financing_ratio =
@@ -1747,6 +1755,7 @@ let lock_daemon ~directory ~market mode =
 
 let run ?equity mode ~strat_path ~data_dir =
   let ast = Dsl.parse_file strat_path in
+  let rebalance_choice = Dsl.rebalance_of ~filename:strat_path ast in
   let directory =
     match Sys.getenv_opt "HOME" with
     | Some home when home <> "" -> Filename.concat home ".bt"
@@ -1756,10 +1765,11 @@ let run ?equity mode ~strat_path ~data_dir =
   | [_, "us", _] ->
       let fd = lock_daemon ~directory ~market:"us" mode in
       Fun.protect ~finally:(fun () -> Unix.close fd)
-        (fun () -> run_us mode ~strat_path ~data_dir)
+        (fun () -> run_us mode ~strat_path ~data_dir ~rebalance_choice)
   | [_, "tw", symbol] ->
       let fd = lock_daemon ~directory ~market:"tw" mode in
       Fun.protect ~finally:(fun () -> Unix.close fd)
-        (fun () -> run_tw mode ~equity ~symbol ~strat_path ~data_dir)
+        (fun () -> run_tw mode ~equity ~symbol ~strat_path ~data_dir
+          ~rebalance_choice)
   | [_, _, _] -> failwith "live trading supports us and tw only"
   | _ -> failwith "live trading requires exactly one stock"
