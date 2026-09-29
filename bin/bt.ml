@@ -146,6 +146,7 @@ let load_asset ~market ~symbol ~from_ ~to_ ~data_dir =
   Data.load_asset ~market ~symbol ~from_ ~to_ ~data_dir
 
 type strategy_input = {
+  path : string;
   name : string;
   stocks : (string option * string * string) list;
   ast : Ast.file;
@@ -289,17 +290,18 @@ let run argv =
     List.map2
       (fun path name ->
         let ast = Dsl.parse_file path in
+        let () = ignore (Dsl.rebalance_of ~filename:path ast) in
         let () =
           if List.exists (function Ast.Bars _ -> true | _ -> false) ast then
             failwith "day trading strategies run under bt daytrade"
         in
         let stocks = Dsl.stocks_of ~filename:path ast in
-        (name, ast, stocks, Dsl.declared_params_ast ast))
+        (path, name, ast, stocks, Dsl.declared_params_ast ast))
       strategy_files names
   in
   let all_markets =
     List.concat_map
-      (fun (_, _, stocks, _) ->
+      (fun (_, _, _, stocks, _) ->
         List.map (fun (_, market, _) -> market) stocks)
       parsed
   in
@@ -341,13 +343,13 @@ let run argv =
   in
   let inputs =
     List.map
-      (fun (name, ast, stocks, declarations) ->
+      (fun (path, name, ast, stocks, declarations) ->
         let assets =
           List.map
             (fun (_, market, symbol) -> load_cached ~market ~symbol)
             stocks
         in
-        { name; stocks; ast; declarations; assets })
+        { path; name; stocks; ast; declarations; assets })
       parsed
   in
   let baseline_asset =
@@ -473,6 +475,9 @@ let run argv =
             ~dividend_tax:(!dividend_tax /. 100.)
             engine_assets strategy costs
             ~profile ~margin:margin_config ~capital ~fill:!fill
+            ~rebalance:(Option.value
+              (Dsl.rebalance_of ~filename:input.path input.ast)
+              ~default:false)
         in
         (input.name, String.concat "+" labels, result))
       inputs
@@ -502,7 +507,7 @@ let run argv =
              [| (market ^ "/" ^ symbol, bars) |]
              (baseline_strategy (Array.length bars)) [| costs |]
              ~profile ~margin:margin_config
-             ~capital ~fill:!fill)
+             ~capital ~fill:!fill ~rebalance:false)
   in
   let columns =
     List.map (fun (name, _, result) -> name, result) runs
@@ -584,6 +589,7 @@ let daytrade argv =
     usage_error "daytrade: strat basename \"baseline\" conflicts with --baseline" in
   let parsed = List.map2 (fun path name ->
     let ast = Dsl.parse_file path in
+    let () = ignore (Dsl.rebalance_of ~filename:path ast) in
     let minutes = match Dsl.timeframe ast with
       | None -> failwith "bt daytrade requires a bars declaration"
       | Some minutes -> minutes in
@@ -662,7 +668,7 @@ let daytrade argv =
         loan_term_months = None } in
     Engine.run ~dividends:[|asset.Data.dividends|]
       [|"us/" ^ symbol, bars|] (baseline_strategy (Array.length bars)) [|costs symbol|]
-      ~profile ~margin ~capital ~fill:!fill) baseline_asset in
+      ~profile ~margin ~capital ~fill:!fill ~rebalance:false) baseline_asset in
   let stem = Report.stem ~names ~out_name:!out_name in
   let () = Report.print_intraday ~columns ~baseline:baseline_result ~fill:!fill in
   let () = Report.write_intraday_outputs ~out_dir:!out_dir ~stem ~columns ~baseline:baseline_result in

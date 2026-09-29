@@ -983,7 +983,7 @@ let market_of_label label =
 let run ?dividends ?(dividend_tax = 0.)
     (assets : (string * Data.bar array) array) (strategy : strategy)
     (costs : costs array) ~(profile : market_profile) ~(margin : margin)
-    ~capital:(capital : float) ~fill =
+    ~capital:(capital : float) ~fill ~rebalance =
   let () =
     if not (Float.is_finite capital && capital > 0.) then
       invalid_arg "Engine.run: capital must be positive and finite"
@@ -2111,9 +2111,9 @@ let run ?dividends ?(dividend_tax = 0.)
               if not !bankrupt then
                 let eff, clamped = effective t in
                 let () =
-                  if cash_landed || differs eff then
+                  if rebalance || cash_landed || differs eff then
                     apply_fills ~bar_index:t ~date ~eff ~clamped
-                      ~force:cash_landed (fun i -> close_at i t)
+                      ~force:(rebalance || cash_landed) (fun i -> close_at i t)
                 in
                 if not !bankrupt then
                   rollover_matured ~bar_index:t ~date
@@ -2148,9 +2148,9 @@ let run ?dividends ?(dividend_tax = 0.)
                     (fun i -> open_at i t)
                 in
                 let () =
-                  if not !bankrupt && (cash_landed || scheduled) then
+                  if not !bankrupt && (rebalance || cash_landed || scheduled) then
                     apply_fills ~bar_index:t ~date ~eff ~clamped
-                      ~force:cash_landed (fun i -> open_at i t)
+                      ~force:(rebalance || cash_landed) (fun i -> open_at i t)
                 in
                 let () =
                   if not !bankrupt then

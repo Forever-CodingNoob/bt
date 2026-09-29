@@ -178,4 +178,5 @@ val run :
   margin:margin ->
   capital:float ->
   fill:fill ->
+  rebalance:bool ->
   result
