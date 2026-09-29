@@ -290,10 +290,16 @@ let run argv =
     List.map2
       (fun path name ->
         let ast = Dsl.parse_file path in
-        let () = ignore (Dsl.rebalance_of ~filename:path ast) in
+        let rebalance = Dsl.rebalance_of ~filename:path ast in
         let () =
           if List.exists (function Ast.Bars _ -> true | _ -> false) ast then
             failwith "day trading strategies run under bt daytrade"
+        in
+        let () =
+          if rebalance = None then
+            Printf.eprintf
+              "warning: %s does not declare rebalance; trading only when the target changes\n"
+              path
         in
         let stocks = Dsl.stocks_of ~filename:path ast in
         (path, name, ast, stocks, Dsl.declared_params_ast ast))
@@ -811,6 +817,13 @@ let target argv =
   in
   let strat_path, market, mode, equity, data_dir =
     live_command_args "target" extra_options argv
+  in
+  let ast = Dsl.parse_file strat_path in
+  let () =
+    if Dsl.rebalance_of ~filename:strat_path ast = None then
+      Printf.eprintf
+        "warning: %s does not declare rebalance; trading only when the target changes\n"
+        strat_path
   in
   let decision =
     match market with

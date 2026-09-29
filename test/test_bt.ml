@@ -3899,6 +3899,52 @@ let test_profile_of_market () =
   (try ignore (Engine.profile_of_market "xx"); assert false
    with Invalid_argument _ -> ())
 
+let test_rebalance_cli_warning () =
+  with_temp_market "tw" (fun data_dir tw_dir ->
+    let stock_dir = Filename.concat tw_dir "AA" in
+    let () = Unix.mkdir stock_dir 0o700 in
+    let write path text =
+      let output = open_out path in
+      Fun.protect ~finally:(fun () -> close_out output)
+        (fun () -> output_string output text)
+    in
+    write (Filename.concat stock_dir "AA.csv")
+      "date,open,high,low,close,volume\n2020-01-01,100,100,100,100,1000\n2020-01-02,100,100,100,100,1000\n";
+    write (Filename.concat stock_dir "AA.div.csv") "date,factor\n";
+    write (Filename.concat stock_dir "AA.events.csv") "date,factor\n";
+    write (Filename.concat stock_dir "AA.cashdiv.csv")
+      "ex_date,cash_per_share,pay_date\n";
+    let binary = locate ["_build/default/bin/bt.exe"; "../bin/bt.exe"] in
+    let run path label =
+      let stdout_path = Filename.concat data_dir (label ^ ".stdout") in
+      let stderr_path = Filename.concat data_dir (label ^ ".stderr") in
+      let command =
+        String.concat " "
+          [Filename.quote binary; "run"; Filename.quote path;
+           "--capital"; "100000"; "--financing-ratio"; "60";
+           "--data-dir"; Filename.quote data_dir;
+           "--out-dir"; Filename.quote data_dir; "--out-name"; "same";
+           "--no-plot"; ">" ^ Filename.quote stdout_path;
+           "2>" ^ Filename.quote stderr_path]
+      in
+      assert (Sys.command command = 0);
+      read_file stdout_path, read_file stderr_path
+    in
+    let strategy = Filename.concat data_dir "same.strat" in
+    let write_strategy text = write strategy text in
+    write_strategy "stock \"tw/AA\"\ntarget 0.5\n";
+    let implicit_stdout, implicit_stderr = run strategy "implicit" in
+    write_strategy "stock \"tw/AA\"\nrebalance on_change\ntarget 0.5\n";
+    let explicit_stdout, explicit_stderr = run strategy "explicit" in
+    (* Both strategies have the same basename and target, so report bytes match. *)
+    assert (implicit_stdout = explicit_stdout);
+    assert (explicit_stderr = "");
+    assert
+      (implicit_stderr =
+       Printf.sprintf
+         "warning: %s does not declare rebalance; trading only when the target changes\n"
+         strategy))
+
 let test_capital_required () =
   let binary = locate ["_build/default/bin/bt.exe"; "../bin/bt.exe"] in
   List.iter
@@ -7705,6 +7751,7 @@ let () =
   test_nested_cache_layout ();
   test_event_transform ();
   test_mixed_market_rejection ();
+  test_rebalance_cli_warning ();
   let () = test_capital_required () in
   test_us_interest_day_count ();
   test_us_default_costs ();
