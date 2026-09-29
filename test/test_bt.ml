@@ -141,6 +141,27 @@ let test_parser () =
     | [Ast.Let ("result", expression)] -> assert_close 7. (scalar_value expression)
     | _ -> assert false)
 
+let test_rebalance_declaration () =
+  let check source expected =
+    with_temp_strategy source (fun path ->
+      assert (Dsl.rebalance_of ~filename:path (Dsl.parse_file path) = expected))
+  in
+  check "stock \"tw/0050\"\nrebalance daily\ntarget 1.0\n" (Some true);
+  check "stock \"tw/0050\"\nrebalance on_change\ntarget 1.0\n" (Some false);
+  check "stock \"tw/0050\"\ntarget 1.0\n" None;
+  let rejects source suffix =
+    with_temp_strategy source (fun path ->
+      match Dsl.rebalance_of ~filename:path (Dsl.parse_file path) with
+      | _ -> assert false
+      | exception Failure message -> assert (message = path ^ suffix))
+  in
+  rejects "rebalance daily\nrebalance on_change\n"
+    ": duplicate rebalance declaration";
+  rejects "stock \"us/SPY\"\nbars 5m\nrebalance daily\ntarget 1.0\n"
+    ": rebalance applies to daily strategies only";
+  with_temp_strategy "rebalance on-change\n" (fun path ->
+    assert_failure (fun () -> ignore (Dsl.parse_file path)))
+
 let test_parser_aliases () =
   with_temp_strategy
     "stock \"tw/00685L\" as bull\n\
@@ -7515,6 +7536,7 @@ let () =
   test_target_rejects_invalid_provisional_close ();
   test_profile_of_market ();
   test_parser ();
+  test_rebalance_declaration ();
   test_default_costs ();
   test_parser_aliases ();
   test_filter_dates ();

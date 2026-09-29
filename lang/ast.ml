@@ -15,5 +15,6 @@ type stmt =
   | Cap of string option * float
   | Stock of string * string option
   | Bars of int
+  | Rebalance of bool
 
 type file = stmt list

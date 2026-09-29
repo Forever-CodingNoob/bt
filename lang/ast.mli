@@ -17,6 +17,7 @@ type stmt =
   | Cap of string option * float
   | Stock of string * string option
   | Bars of int
+  | Rebalance of bool
 
 (** A parsed strategy file. *)
 type file = stmt list

@@ -466,6 +466,27 @@ let timeframe statements =
       | _ -> found)
     None statements
 
+let rebalance_of ~filename statements =
+  let chosen =
+    List.fold_left
+      (fun chosen -> function
+        | Rebalance value ->
+            (match chosen with
+             | None -> Some value
+             | Some _ ->
+                 failwith
+                   (Printf.sprintf "%s: duplicate rebalance declaration" filename))
+        | _ -> chosen)
+      None statements
+  in
+  let () =
+    if chosen <> None
+       && List.exists (function Bars _ -> true | _ -> false) statements
+    then failwith
+      (Printf.sprintf "%s: rebalance applies to daily strategies only" filename)
+  in
+  chosen
+
 let compile_ast ?extra statements ~params ~assets =
   let declarations = declared_params_ast statements in
   let () = validate_overrides declarations params in
@@ -593,7 +614,7 @@ let compile_ast ?extra statements ~params ~assets =
         | Bars _ ->
             let () = ignore (timeframe statements) in
             environment
-        | Stock _ -> environment)
+        | Stock _ | Rebalance _ -> environment)
       initial_environment statements
   in
   let () = ignore environment in
@@ -757,6 +778,7 @@ let compile_ast ?extra statements ~params ~assets =
 
 let compile ?extra source ~params bars =
   let ast = parse_file source in
+  let () = ignore (rebalance_of ~filename:source ast) in
   if not (List.exists (function Stock _ -> true | _ -> false) ast) then
     compile_ast ?extra ast ~params ~assets:[ (None, bars) ]
   else

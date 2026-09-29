@@ -5,6 +5,10 @@ val parse_file : string -> Ast.file
     A second declaration fails with [duplicate bars declaration]. *)
 val timeframe : Ast.file -> int option
 
+(** Return the daily rebalance choice, or [None] for change-only files.
+    Duplicate declarations and use with [bars] name [filename]. *)
+val rebalance_of : filename:string -> Ast.stmt list -> bool option
+
 (** Extract declared parameter names and defaults in source order. *)
 val declared_params_ast : Ast.stmt list -> (string * float) list
 

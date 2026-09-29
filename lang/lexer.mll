@@ -9,6 +9,9 @@ let keyword = function
   | "size" -> SIZE
   | "stock" -> STOCK
   | "bars" -> BARS
+  | "rebalance" -> REBALANCE
+  | "daily" -> DAILY
+  | "on_change" -> ON_CHANGE
   | "as" -> AS
   | "target" -> TARGET
   | "cap" -> CAP
