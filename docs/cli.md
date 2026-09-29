@@ -201,7 +201,7 @@ Minute fetches require `APCA_API_KEY_ID` and `APCA_API_SECRET_KEY`. Daily US fet
 | `--loan-term-months` | No term loans. |
 | `--dividend-tax` | No overnight dividend holdings. |
 
-`bt daytrade` treats these flags as usage errors (exit 2). It does not place live trades. `bt run`, `bt target`, and `bt live` reject `bars` strategies with `day trading strategies run under bt daytrade`. `bt run` and `bt daytrade` reject a `bars` strategy that declares `rebalance` with `<file>: rebalance applies to daily strategies only`.
+`bt daytrade` treats these flags as usage errors (exit 2). It does not place live trades. `bt run`, `bt target`, and `bt live` reject `bars` strategies with `day trading strategies run under bt daytrade`. `bt run`, `bt target`, `bt live`, and `bt daytrade` reject a `bars` strategy that declares `rebalance` with `<file>: rebalance applies to daily strategies only`.
 
 ## `bt target`
 
