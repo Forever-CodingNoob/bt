@@ -6745,6 +6745,64 @@ let test_tw_live_decide_override () =
          holding has drifted above TWD 1,500,000, but an unchanged target
          preserves that drift and submits no order. *)
       let () = assert (unchanged.Live.action = Live.Orders []) in
+      let unchanged_below =
+        decide_drift "stock \"tw/2330\"\nrebalance on_change\ntarget 0.8\n"
+      in
+      let daily_below =
+        decide_drift "stock \"tw/2330\"\nrebalance daily\ntarget 0.8\n"
+      in
+      (* TWD 2,000,000 held versus TWD 2,400,000 desired; at TWD 200
+         the daily plan needs a positive 2,000-share cash purchase. *)
+      let () = assert (unchanged_below.Live.action = Live.Orders []) in
+      let () =
+        match daily_below.Live.action with
+        | Live.Orders legs ->
+            assert (List.exists (fun (leg : Live.leg) ->
+              leg.action = "Buy" && leg.quantity > 0) legs)
+        | Live.Skip _ | Live.Order _ -> assert false
+      in
+      let stale_price =
+        with_temp_strategy
+          "stock \"tw/2330\"\nrebalance daily\ntarget 0.8\n"
+          (fun daily_strat_path ->
+            Live.decide ~provisional_close:200.
+              ~previous_session:"2026-05-22" ~tw_balance:500000.
+              ~tw_settlements:
+                [{ amount = 0.; day = 0 };
+                 { amount = 0.; day = 1 };
+                 { amount = 0.; day = 2 }]
+              ~tw_positions:[{ drift_position with last_price = 180. }]
+              ~tw_position_details:[] Live.Live
+              ~session_date:"2026-05-26" ~strat_path:daily_strat_path
+              ~data_dir)
+      in
+      (* At the provisional TWD 200 price, 10,000 shares plus TWD 500,000
+         cash give TWD 2,500,000 equity and exactly 0.8 exposure. The stale
+         TWD 180 position mark must not produce a spurious sell. *)
+      let () = assert (stale_price.Live.action = Live.Orders []) in
+      let () = assert_close 2500000. stale_price.Live.equity in
+      (* TWD 2,000,000 in margin shares plus TWD 500,000 spendable cash,
+         less TWD 2,600,000 loan and TWD 10,000 interest, is
+         TWD -110,000 equity. Planning must fail closed before a trade. *)
+      let () =
+        with_temp_strategy
+          "stock \"tw/2330\"\nrebalance daily\ntarget 0.8\n"
+          (fun daily_strat_path ->
+            match
+              Live.decide ~provisional_close:200.
+                ~previous_session:"2026-05-22" ~tw_balance:500107.
+                ~tw_settlements:production_settlements
+                ~tw_positions:
+                  [{ drift_position with cond = "MarginTrading";
+                     loan_amount = 2600000.; interest = 10000. }]
+                ~tw_position_details:[] Live.Live
+                ~session_date:"2026-05-26" ~strat_path:daily_strat_path
+                ~data_dir
+            with
+            | _ -> assert false
+            | exception Failure message ->
+                assert (message = "TW account equity is not positive"))
+      in
       let dropped =
         decide_drift
           "stock \"tw/2330\"\ntarget 0.5 * num(close > 1000.0)\n"

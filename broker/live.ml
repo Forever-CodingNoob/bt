@@ -524,6 +524,9 @@ let decide ?provisional_close ?previous_session ?equity ?tw_balance
     ?tw_settlements ?tw_positions ?tw_position_details ?tw_snapshot mode
     ~session_date ~strat_path ~data_dir =
   let ast = Dsl.parse_file strat_path in
+  let rebalance =
+    Option.value (Dsl.rebalance_of ~filename:strat_path ast) ~default:false
+  in
   match Dsl.stocks_of ~filename:strat_path ast with
   | [alias, "us", symbol] ->
       let snapshot =
@@ -720,12 +723,16 @@ let decide ?provisional_close ?previous_session ?equity ?tw_balance
               | None -> Shioaji.settlements ()
             in
             let cash = tw_production_cash ~balance ~settlements in
-            cash, equity_of ~cash ~positions
+            cash, cash +. cash_value +. margin_value -. loans -. interests
         | Paper, None | Live, Some _ -> assert false
       in
       let () =
         if not (Float.is_finite cash) then
           failwith "TW inferred cash balance is not finite"
+      in
+      let () =
+        if not (Float.is_finite equity) || equity <= 0. then
+          failwith "TW account equity is not positive"
       in
       let costs = tw_live_debit_costs symbol in
       let plan =
@@ -738,7 +745,7 @@ let decide ?provisional_close ?previous_session ?equity ?tw_balance
               interests = [| interests |]; tail_interests = [| 0. |];
               debt = 0.; receivables = 0.;
               previous_targets = [| previous_target |] }
-          ~prices:[| provisional.c |] ~targets:[| target |] ~force:false
+          ~prices:[| provisional.c |] ~targets:[| target |] ~force:rebalance
       in
       let action =
         Orders
