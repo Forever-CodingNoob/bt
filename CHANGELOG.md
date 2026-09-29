@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-29
+
 ### Added
 
 - Daily strategies can declare `rebalance daily` or `rebalance on_change`. The backtest, `bt target`, and both live daemons follow the declared rule. `rebalance daily` re-plans to the effective target every bar, including the bar of a simulated maintenance cure. An undeclared daily strategy trades on_change: `bt run` and `bt target` print a warning on standard error, and `bt live` logs it after the `startup` line. Every command rejects `rebalance` in a `bars` strategy.
@@ -222,7 +224,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Return-based engine with daily close-to-close signal prices.
 - TW dividend back-adjustment via FinMind factors.
 
-[Unreleased]: https://github.com/Forever-CodingNoob/bt/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/Forever-CodingNoob/bt/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/Forever-CodingNoob/bt/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/Forever-CodingNoob/bt/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/Forever-CodingNoob/bt/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/Forever-CodingNoob/bt/compare/v0.8.0...v0.9.0
