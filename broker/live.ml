@@ -68,6 +68,10 @@ let client_order_id ~symbol ~date =
   Printf.sprintf "bt-%s-%s" symbol date
 
 let us_plan_state ~cash ~held ~price ~ratio ~previous_target =
+  let () =
+    if not (Float.is_finite ratio) || ratio <= 0. then
+      failwith "US financing ratio is not positive"
+  in
   let value = held *. price in
   let debit = Float.max 0. (-. cash) in
   let margin_value = Float.min value (debit /. ratio) in
@@ -78,6 +82,63 @@ let us_plan_state ~cash ~held ~price ~ratio ~previous_target =
     interests = [| 0. |]; tail_interests = [| 0. |];
     debt = 0.; receivables = 0.;
     previous_targets = [| previous_target |] }
+
+let us_plan_action ~rebalance ~symbol ~date
+    ~(account : Alpaca.account_t) ~held ~price ~target ~previous_target =
+  let profile = Engine.profile_of_market "us" in
+  let ratio = profile.default_financing_ratio in
+  let state =
+    us_plan_state ~cash:account.cash ~held ~price ~ratio ~previous_target
+  in
+  let value = held *. price in
+  let () =
+    if not (Float.is_finite account.cash) then
+      failwith "US account cash is not finite"
+  in
+  let () =
+    if account.short_market_value <> 0. || held < 0. then
+      failwith "US account holds a short position"
+  in
+  let () =
+    (* ponytail: 1% tolerance for Alpaca's mark versus provisional close;
+       list /v2/positions if false positives start skipping sessions. *)
+    if not (Float.is_finite account.long_market_value)
+       || abs_float (account.long_market_value -. value)
+          > 0.01 *. account.long_market_value
+    then failwith "US account holds other symbols"
+  in
+  let () =
+    if not (Float.is_finite state.equity) || state.equity <= 0. then
+      failwith "US account equity is not positive"
+  in
+  if not rebalance && target = previous_target then
+    state, Skip "target unchanged"
+  else
+    let plan =
+      Engine.plan_fills
+        ~costs:[| Engine.default_costs ~market:"us" ~symbol |]
+        ~capital:1. ~profile ~financing_ratios:[| ratio |] ~state
+        ~prices:[| price |] ~targets:[| target |] ~force:rebalance
+    in
+    let item = plan.planned_assets.(0) in
+    let net =
+      item.plan_buy_cash +. item.plan_buy_margin
+      -. item.plan_sell_cash -. item.plan_sell_margin
+    in
+    if net = 0. then state, Skip "no trade planned"
+    else
+      let side, shares =
+        if net > 0. then `Buy, net /. price
+        else
+          `Sell,
+          (if item.plan_final_value = 0. then held
+           else Float.min (-. net /. price) held)
+      in
+      let qty = float_of_string (Alpaca.qty_string shares) in
+      if qty = 0. || (side = `Buy && qty *. price < 1.) then
+        state, Skip "below $1 minimum order value"
+      else
+        state, Order { side; qty; id = client_order_id ~symbol ~date }
 
 let decide_action ~symbol ~date ~target ~equity ~price ~held =
   let delta = (target *. equity /. price) -. held in

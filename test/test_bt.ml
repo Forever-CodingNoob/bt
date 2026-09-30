@@ -4704,6 +4704,20 @@ let test_live_pure_decisions () =
      = `Proceed)
 
 let test_us_plan_state () =
+  let rejects ratio =
+    assert_failure (fun () ->
+      match
+        Live.us_plan_state ~cash:500. ~held:5. ~price:100. ~ratio
+          ~previous_target:0.5
+      with
+      | _ -> assert false
+      | exception Failure message ->
+          assert (message = "US financing ratio is not positive");
+          failwith message)
+  in
+  (* Zero divides the debit by zero; NaN poisons inventory before planning. *)
+  rejects 0.;
+  rejects Float.nan;
   let state cash held =
     Live.us_plan_state ~cash ~held ~price:100. ~ratio:0.5
       ~previous_target:1.5
@@ -4729,6 +4743,187 @@ let test_us_plan_state () =
   (* 40000 / 0.5 = 80000 exceeds value 60000; clamp margin to 60000. *)
   check (-40000.) 600. ~free:0. ~inventory:0. ~margin:60000.
     ~loan:40000. ~equity:20000.
+
+let test_us_plan_action_checks () =
+  let base : Alpaca.account_t =
+    { equity = 999999.; cash = 500.; long_market_value = 500.;
+      short_market_value = 0.; status = "ACTIVE";
+      trading_blocked = false; account_number = "paper-account" }
+  in
+  let choose account held =
+    Live.us_plan_action ~rebalance:false ~symbol:"SPY" ~date:"2025-06-24"
+      ~account ~held ~price:100. ~target:0.5 ~previous_target:0.5
+  in
+  let fails expected account held =
+    assert_failure (fun () ->
+      match choose account held with
+      | _ -> assert false
+      | exception Failure message ->
+          assert (message = expected);
+          failwith message)
+  in
+  (* Cash is checked before short, mark mismatch, and nonpositive equity. *)
+  fails "US account cash is not finite"
+    { base with cash = Float.nan; short_market_value = -100. } 5.;
+  fails "US account cash is not finite" { base with cash = Float.infinity } 5.;
+  (* Shorts win over mark mismatch and nonpositive equity. *)
+  fails "US account holds a short position"
+    { base with cash = -600.; short_market_value = -100.;
+      long_market_value = 510. } 5.;
+  fails "US account holds a short position"
+    { base with long_market_value = 0. } (-1.);
+  (* 502.5 and 497.5 differ from 500 by 2.5, below 1% of either mark.
+     Planner equity stays 500 cash + 5 * 100 = 1000, not account.equity. *)
+  List.iter
+    (fun long_market_value ->
+      let state, action = choose { base with long_market_value } 5. in
+      assert_close 1000. state.Engine.equity;
+      assert (action = Live.Skip "target unchanged"))
+    [502.5; 497.5];
+  (* 510 and 490 differ by 10, above 1% of either mark; mark mismatch
+     wins over the nonpositive equity from -600 cash + 500 stock. *)
+  List.iter
+    (fun long_market_value ->
+      fails "US account holds other symbols"
+        { base with cash = -600.; long_market_value } 5.)
+    [510.; 490.];
+  (* A non-finite account mark cannot verify the single-symbol inventory. *)
+  fails "US account holds other symbols"
+    { base with long_market_value = Float.nan } 5.;
+  (* -500 + 500 = 0; -600 + 500 = -100 cannot fund a plan. *)
+  fails "US account equity is not positive" { base with cash = -500. } 5.;
+  fails "US account equity is not positive" { base with cash = -600. } 5.;
+  (* A NaN holding bypasses comparisons but still cannot fund a plan. *)
+  fails "US account equity is not positive" base Float.nan
+
+let test_us_plan_action_orders () =
+  let account ~cash ~held ~price : Alpaca.account_t =
+    { equity = 1.; cash; long_market_value = held *. price;
+      short_market_value = 0.; status = "ACTIVE";
+      trading_blocked = false; account_number = "paper-account" }
+  in
+  let choose ~rebalance ~cash ~held ~price ~target ~previous_target =
+    Live.us_plan_action ~rebalance ~symbol:"SPY" ~date:"2025-06-24"
+      ~account:(account ~cash ~held ~price) ~held ~price ~target
+      ~previous_target
+  in
+  let _, unchanged =
+    choose ~rebalance:false ~cash:600. ~held:4. ~price:100.
+      ~target:0.5 ~previous_target:0.5
+  in
+  assert (unchanged = Live.Skip "target unchanged");
+  let state, changed =
+    choose ~rebalance:false ~cash:600. ~held:4. ~price:100.
+      ~target:0.5 ~previous_target:0.2
+  in
+  (* 600 free + 400 held = 1000; 0.5 exposure means 500 / 100 = 5
+     shares, hence one more than the four held. The account.equity is 1. *)
+  assert_close 1000. state.Engine.equity;
+  assert
+    (changed = Live.Order
+      { side = `Buy; qty = 1.; id = "bt-SPY-2025-06-24" });
+  let _, daily =
+    choose ~rebalance:true ~cash:600. ~held:4. ~price:100.
+      ~target:0.5 ~previous_target:0.5
+  in
+  assert (daily = changed);
+  let _, idle =
+    choose ~rebalance:true ~cash:1000. ~held:0. ~price:100.
+      ~target:0. ~previous_target:0.
+  in
+  assert (idle = Live.Skip "no trade planned");
+  let _, tiny =
+    choose ~rebalance:true ~cash:0.6 ~held:1. ~price:300.
+      ~target:1. ~previous_target:0.
+  in
+  (* 300.6 equity wants 1.002 shares; 0.002 more costs USD 0.60. *)
+  assert (tiny = Live.Skip "below $1 minimum order value");
+  let _, close =
+    choose ~rebalance:true ~cash:999.4 ~held:0.002 ~price:300.
+      ~target:0. ~previous_target:0.002
+  in
+  (* The full-close plan sets final value to zero: sell all 0.002 shares. *)
+  assert (close = Live.Order
+    { side = `Sell; qty = 0.002; id = "bt-SPY-2025-06-24" });
+  let _, exact_close =
+    choose ~rebalance:true ~cash:699.9144748 ~held:1.000285084 ~price:300.
+      ~target:0. ~previous_target:0.3
+  in
+  (* The full-close rule avoids dividing 1.000285084 * 300 by 300,
+     which can round below the nine-decimal holding before formatting. *)
+  assert (exact_close = Live.Order
+    { side = `Sell; qty = 1.000285084; id = "bt-SPY-2025-06-24" })
+
+let test_us_plan_action_matches_run () =
+  let price = 100. in
+  let capital = 1000. in
+  let ratio = (Engine.profile_of_market "us").default_financing_ratio in
+  let margin : Engine.margin =
+    { financing_rate = 0.; maintenance_override = None;
+      ratios = [| ratio |]; loan_term_months = None }
+  in
+  (* The third unchanged bar preserves bar-2 equity before terminal close. *)
+  let bars =
+    [| bar "2025-06-23" price price;
+       bar "2025-06-24" price price;
+       bar "2025-06-25" price price |]
+  in
+  let check ~refinance t0 t1 =
+    let result =
+      Engine.run [| "us/SPY", bars |]
+        { Engine.targets = [| [| t0; t1; t1 |] |] }
+        [| Engine.default_costs ~market:"us" ~symbol:"SPY" |]
+        ~profile:(Engine.profile_of_market "us") ~margin ~capital
+        ~fill:Engine.Close_same ~rebalance:false
+    in
+    let e1 = List.assoc "2025-06-23" result.equity_curve *. capital in
+    let e2 = List.assoc "2025-06-24" result.equity_curve *. capital in
+    let fill =
+      List.find
+        (fun (fill : Engine.fill_event) ->
+          fill.date = "2025-06-24" && fill.from_e <> fill.to_e)
+        result.fills
+    in
+    (* A levered increase can refinance cash inventory for its down payment;
+       these equal-exposure legs must not become separate Alpaca orders. *)
+    assert
+      (List.exists
+        (fun (fill : Engine.fill_event) ->
+          fill.date = "2025-06-24" && fill.from_e = fill.to_e)
+        result.fills = refinance);
+    let held = fill.from_e *. e1 /. price in
+    let cash = e1 -. held *. price in
+    let account : Alpaca.account_t =
+      { equity = 1.; cash; long_market_value = held *. price;
+        short_market_value = 0.; status = "ACTIVE";
+        trading_blocked = false; account_number = "paper-account" }
+    in
+    let state, action =
+      Live.us_plan_action ~rebalance:false ~symbol:"SPY"
+        ~date:"2025-06-24" ~account ~held ~price ~target:t1
+        ~previous_target:t0
+    in
+    let expected = (fill.to_e *. e2 -. fill.from_e *. e1) /. price in
+    (* The flat mark makes bar-1 account cash plus stock equal E1;
+       bar-2 target value is to_e * E2 after the planner's sell costs. *)
+    assert_close ~tolerance:1e-9 e1 state.Engine.equity;
+    match action with
+    | Live.Order { side; qty; id } ->
+        assert (id = "bt-SPY-2025-06-24");
+        assert (side = if expected > 0. then `Buy else `Sell);
+        assert_close ~tolerance:1.01e-9 (abs_float expected) qty
+    | Live.Skip _ | Live.Orders _ -> assert false
+  in
+  (* Cash buy/sell, then a margin-funded buy/sell at ratio 0.5. *)
+  check ~refinance:false 0.3 0.6;
+  check ~refinance:false 0.6 0.3;
+  (* At 1.5 exposure, 500 cash inventory and no free cash require
+     refinancing to fund the scale-in's 150 down payment. *)
+  check ~refinance:true 1.5 1.8;
+  check ~refinance:false 1.5 1.2;
+  (* At 0.8 exposure, 200 cash cannot fund the 700 scale-in's 350
+     down payment: refinance cash inventory while sending only the buy. *)
+  check ~refinance:true 0.8 1.5
 
 let test_us_live_fractional () =
   let order_fields body =
@@ -7809,6 +8004,9 @@ let () =
   test_engine_effective_targets ();
   test_live_pure_decisions ();
   test_us_plan_state ();
+  test_us_plan_action_checks ();
+  test_us_plan_action_orders ();
+  test_us_plan_action_matches_run ();
   test_us_live_fractional ();
   test_us_live_rebalance_action ();
   test_us_live_quantity_limit ();

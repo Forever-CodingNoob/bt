@@ -61,10 +61,18 @@ val snapshot_session :
 val client_order_id : symbol:string -> date:string -> string
 
 (** Map Alpaca signed cash and one holding at the provisional price to one
-    engine margin lot; unposted interest is unavailable and stays zero. *)
+    engine margin lot; unposted interest is unavailable and stays zero.
+    Raise [Failure] if [ratio] is non-finite or not positive. *)
 val us_plan_state :
   cash:float -> held:float -> price:float -> ratio:float ->
   previous_target:float -> Engine.plan_state
+
+(** Fail closed on unsupported US account states, then plan one Alpaca order
+    or skip without broker I/O; return the state used for the decision. *)
+val us_plan_action :
+  rebalance:bool -> symbol:string -> date:string ->
+  account:Alpaca.account_t -> held:float -> price:float ->
+  target:float -> previous_target:float -> Engine.plan_state * action
 
 (** Size a decision and return its order or minimum-value skip. Quantities are
     truncated to Alpaca's 9 decimals; sells never exceed [held]. *)
