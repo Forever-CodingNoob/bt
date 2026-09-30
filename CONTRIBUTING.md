@@ -73,7 +73,7 @@ dune test --root . --force   # all asserts must pass
 
 - Use the OCaml standard library and `unix` only. Do not add opam package dependencies.
 - No `for` or `while` loops. Sequence side effects with `let () = e in`.
-- Branch on the market with `match` arms (`| "tw" -> ... | "us" -> ...`), never `if market = ...`. A new market must slot in as a new arm.
+- Branch on the market with `match` arms (`| "tw" -> ... | "us" -> ...`) plus an error or default `_` arm, never `if market = ...`. A new market must slot in as a new arm.
 - Make list recursion tail-recursive with an accumulator and `List.rev`. Use `Array` index loops for series math.
 - Preserve floating-point operation order. Do not rewrite arithmetic in a way that changes rounding.
 - A numeric series is a `float array`. Warmup values are `Float.nan`. Any comparison with NaN gives `false`.
@@ -90,7 +90,7 @@ dune test --root . --force   # all asserts must pass
 - Use tables for enumerable content. Option tables in `docs/cli.md` include a `Default` column; never hide a default inside a description.
 - Keep a full-depth table of contents in every document that covers every header level.
 - Use ASCII-only typography. Never hard-wrap mid-sentence.
-- Follow Keep a Changelog 1.1.0 in `CHANGELOG.md`. Each behavior-changing commit adds an entry under `[Unreleased]`. A release is a git tag plus a GitHub pre-release.
+- Follow Keep a Changelog 1.1.0 in `CHANGELOG.md`. Each notable commit adds an entry under `[Unreleased]`: every behavior change, and also a structural change a builder or contributor would notice (a source-tree restructure gets an entry even with zero behavior change). A release is a git tag plus a GitHub pre-release.
 - Put design specs in `docs/specs/` and implementation plans in `docs/plans/`. Give them simple undated filenames that state the content.
 
 ## Tests
