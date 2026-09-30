@@ -232,7 +232,9 @@ Both market arms print these fields to standard output, one per line.
 | `provisional-close` | Show the provisional bar's close. |
 | `provisional-volume` | Show the provisional bar's volume. |
 | `target` | Show the strategy's effective target exposure after the engine clamps it. |
-| `equity` | Show the account equity used to size the decision. |
+| `equity` | Show the equity the planner sizes from. US: Alpaca's signed cash plus the held position at the provisional close. TW: the simulation `--equity` or the broker-derived production equity. |
+| `cash` | Show the free cash passed to the planner. US: Alpaca's cash when positive, otherwise 0. TW: the inferred simulation cash or the production spendable cash. |
+| `debit` | Show the margin loan passed to the planner. US: the negative part of Alpaca's cash, mapped into one loan. TW: the total loan principal of the held margin positions. |
 | `held` | Show the current share position. |
 
 > [!IMPORTANT]
@@ -271,9 +273,11 @@ The Alpaca key variables must contain credentials for the selected account.
 
 The command fetches Tiingo history through Alpaca's previous daily bar, appends Alpaca's current snapshot as a provisional bar, and evaluates the strategy with the same DSL compiler as `bt run`. With `--provisional-close PRICE`, the command skips the Alpaca snapshot and treats the last cached date as the previous daily bar.
 
-Under `rebalance on_change`, or without a declaration, the command compares the effective target with the previous bar's effective target, or 0 on the first bar. When they are equal, it skips with the reason `target unchanged`. Under `rebalance daily`, or when the target changed, it sizes an order from the held position.
+Under `rebalance on_change`, or without a declaration, the command compares the effective target with the previous bar's effective target, or 0 on the first bar. When they are equal, it skips with the reason `target unchanged`. Under `rebalance daily`, or when the target changed, it plans an order from the account and the held position.
 
-Desired shares are `target x equity / provisional close`, a fractional quantity. The order quantity is the difference from the held position, rounded down to at most 9 decimal places. The command skips a buy below USD 1 notional with the reason `below $1 minimum order value`. A sell of any positive quantity, capped at the held position, becomes an order, so you can always close a position worth less than USD 1.
+The command maps the account into one engine state. A negative Alpaca cash balance becomes one margin loan. The position, valued at the provisional close, becomes margin inventory up to `loan / 0.5`, the value that loan finances at the US financing ratio; the rest is cash inventory. `Engine.plan_fills` then plans the fill with the US default costs, as `bt run` does. Alpaca's `equity` field does not size the order.
+
+The command nets the planned ordinary buys and sells into one order. Refinancing pairs need no Alpaca order, so the net ignores them. A net of 0 skips with the reason `no trade planned`. The command truncates the quantity to at most 9 decimal places, caps a sell at the held position, and sells every held share when the plan closes the position. A buy below USD 1 notional, or a quantity that truncates to 0, skips with the reason `below $1 minimum order value`. A sell of any positive quantity becomes an order, so you can always close a position worth less than USD 1.
 
 #### Output
 
@@ -289,7 +293,16 @@ The US arm adds these fields to the shared output.
 
 #### Failure handling
 
-An unavailable account, stale cache or snapshot, failed history fetch, or strategy evaluation error fails the decision without submitting an order.
+An unavailable account, stale cache or snapshot, failed history fetch, or strategy evaluation error fails the decision without submitting an order. These account states also fail it, checked in this order before the `target unchanged` skip:
+
+| Message | Condition |
+|---|---|
+| `US account cash is not finite` | Alpaca's `cash` is NaN or infinite. |
+| `US account holds a short position` | `short_market_value` is not 0, or the held quantity is negative. |
+| `US account holds other symbols` | `long_market_value` is not finite, or differs from the held position at the provisional close by more than 1% of `long_market_value`. |
+| `US account equity is not positive` | The mapped equity is NaN, infinite, or at most 0. |
+
+A `--provisional-close` price more than about 1% away from Alpaca's mark trips the other-symbols check on an account that holds the stock.
 
 > [!WARNING]
 > The free Alpaca IEX feed can produce a provisional price that differs from the consolidated tape. Alpaca paper accounts also do not simulate dividends, so paper cash and equity can diverge from a live account.
@@ -436,7 +449,7 @@ The daemon derives every phase from Alpaca's `next_close`.
 | Reconcile | After the close | Poll the order every 15 seconds until it reaches a terminal status or 5 minutes pass after the close, then log the fill. |
 | Sleep | After reconciliation | Sleep until the next open. |
 
-The Submit phase ends 2 minutes before the close because Alpaca queues a day order sent after the close for the next session, and the order request can take up to its 60-second curl timeout. At or after that cutoff, the daemon logs `error=submit cutoff passed order=skip` and submits nothing. The `target unchanged` skip under on_change and the desired-share, fractional-quantity, and USD 1 buy-minimum rules match `bt target`; the skip logs `order=skip:target unchanged`.
+The Submit phase ends 2 minutes before the close because Alpaca queues a day order sent after the close for the next session, and the order request can take up to its 60-second curl timeout. At or after that cutoff, the daemon logs `error=submit cutoff passed order=skip` and submits nothing. The account checks, the planner sizing, the `target unchanged` and `no trade planned` skips, the 9-decimal fractional quantity, and the USD 1 buy minimum match `bt target`. The `target unchanged` skip logs `order=skip:target unchanged`.
 
 #### Output and logs
 
@@ -446,6 +459,8 @@ Each daemon line starts with a UTC timestamp in `YYYY-MM-DDTHH:MM:SSZ` format. E
 
 The daemon refuses to start with an inactive or trading-blocked account. If the Alpaca clock request at the start of a daemon cycle fails, the daemon logs `order=retry`, retries every 60 seconds, and continues the same session once a request succeeds. Before the cutoff, a stale cache, a fetch, snapshot, or evaluation error, a failed order lookup, or a failed clock check just before submission also logs `order=retry`, and the daemon retries every 60 seconds. Each retry looks up today's client order ID first, so a day that already has an order gets no second one. At or after the cutoff, a failed order lookup logs `order=skip` and ends the US action for the day. Once the daemon sends the order request, the day ends there with no retry, because the request may have reached Alpaca and a retry could submit the order twice. A failed request logs `error=order submission uncertain: REASON order=skip`, a `rejected` status logs `error=Alpaca rejected the order order=skip`, and a failure while following the submitted order logs `error=REASON order=skip`.
 
+A failed [account check](#failure-handling) before the cutoff logs `error=Failure("MESSAGE") order=retry`, and the daemon retries every 60 seconds. If the account stays invalid until the cutoff, the daemon logs `error=submit cutoff passed order=skip` and places no order.
+
 > [!CAUTION]
 > `bt live --live` submits real-money fractional market orders. Confirm the credentials, account, and strategy before starting it.
 
@@ -453,7 +468,7 @@ The daemon refuses to start with an inactive or trading-blocked account. If the 
 > The free Alpaca IEX feed can produce a provisional price that differs from the consolidated tape. The market order fills near the decision time, about 15 minutes before the official close; model that gap in `bt run` with `--slip-bps`. Alpaca paper accounts also do not simulate dividends, so paper cash and equity can diverge from a live account.
 
 > [!IMPORTANT]
-> The US path recomputes desired shares from the account on every attempt. It retries a failed prerequisite until the cutoff but never retries after it sends the order request.
+> The US path re-plans the order from the account on every attempt. It retries a failed prerequisite until the cutoff but never retries after it sends the order request.
 
 > [!NOTE]
 > The US path queries the deterministic client order ID before submission. This reduces duplicate risk but is not an exactly-once guarantee for concurrent processes.

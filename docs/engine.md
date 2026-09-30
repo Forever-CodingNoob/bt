@@ -140,14 +140,14 @@ A US dividend becomes cash on its ex-date, with no receivable period. When divid
 
 The live daemon evaluates a provisional bar 15 minutes before the close and submits a fractional `market` order with `time_in_force: day` before a cutoff 2 minutes before the close. A failed evaluation retries every 60 seconds until that cutoff. The order fills near the decision price rather than at the official close, and `--slip-bps` models that gap in the backtest. Live and backtest quantities are both fractional.
 
-Under `rebalance on_change` or without a declaration, the daemon skips a session whose effective target equals the previous bar's, with the reason `target unchanged`. Under `rebalance daily`, it sizes the difference between desired and held shares every session. A daily backtest trades any drift, while the daemon skips buys under USD 1 and truncates quantities to 9 decimal places, so small drift can differ.
+Under `rebalance on_change` or without a declaration, the daemon skips a session whose effective target equals the previous bar's, with the reason `target unchanged`. Under `rebalance daily`, or when the target changed, it calls `Engine.plan_fills` with Alpaca's signed cash and the held stock at the provisional close, mapping the account debit into one margin lot. The planner's net ordinary buy or sell becomes one fractional Alpaca order; refinancing pairs place no order. The daemon skips buys under USD 1 and truncates quantities to 9 decimal places, so small fills can differ from the backtest. The live mapping carries no unposted margin interest; posted interest reaches it through cash.
 
 #### Gaps between simulation and the real market
 
 - The engine does not auto-classify leveraged-ETF house requirements (2x 50%, 3x 75%) or short tiers. Use `--maintenance-ratio` to set the correct rate.
 - The engine does not model the concentration rule, under which a single position at 70% of equities value with a margin balance of $100,000 or more has its requirement raised to 50%.
 - Intraday buying power (4x) and the intraday margin framework are out of scope because the engine works end-of-day.
-- Elite-tier margin pricing (4.75%) is a `--financing-rate` override rather than a default.
+- Alpaca's margin rates (6.50% non-elite, 5.00% elite) differ from the 6.25% backtest default; use `--financing-rate` to select either rate for a backtest. Live account data includes posted interest but not the unposted accrual.
 - The engine does not model CAT fee pass-throughs.
 - The engine models neither short selling nor borrow costs.
 - The engine does not model pattern-day-trader rules.

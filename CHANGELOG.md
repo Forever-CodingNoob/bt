@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- `bt target` prints `cash` and `debit` after `equity` for US and TW decisions: the free cash and margin loan the fill planner sizes from.
+
+### Changed
+
+- US `bt live` and `bt target` size orders through the backtest fill planner, as `bt run` does. They map Alpaca's signed cash and the one held stock, valued at the provisional close, into one margin lot, so leveraged targets trade the planner's quantities. Alpaca's `equity` field no longer sizes orders; the `startup` line still logs it. `Live.us_plan_action` replaces `Live.decide_action` and `Live.us_rebalance_action`.
+- US decisions fail with `US account cash is not finite`, `US account holds a short position`, `US account holds other symbols`, or `US account equity is not positive` before planning. `bt target` places no order, and `bt live` retries until its submit cutoff. The on_change skip text `target unchanged` does not change.
+
 ## [0.11.0] - 2026-09-29
 
 ### Added

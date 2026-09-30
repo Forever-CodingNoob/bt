@@ -192,14 +192,14 @@ Gates: the build and the full suite exit 0. `engine/` does not change.
 Run a paper session on `/sandbox/research/strategies/us/paper_probe/main.strat`. The file declares `stock "us/TQQQ"` and `target 0.2`. The paper account must hold no symbol other than TQQQ.
 
 1. Add `rebalance daily` to the file.
-2. Run `bt live main.strat` on paper for at least three sessions: target 0.2, then 1.5 for one session, then 0.2 again.
+2. Run `bt live main.strat` on paper for at least three sessions: target 0.2, then 1.25 for one session, then 0.2 again.
 3. Before each session's decision, run `bt target main.strat`. Check that it prints `cash:` and `debit:` right after `equity:`.
 4. From each session's decision line, compute the post-trade exposure `(held + signed quantity) x provisional close / equity`.
 5. After the session's bar lands in the cache, run `bt run main.strat --capital 100000 --fill close` on the same cached bars. Read that date's `to_exposure` from `main.trades.csv`, skipping refinance rows, whose `from_exposure` equals `to_exposure`. It must match the post-trade exposure from step 4 to 4 decimal places.
-6. In the session after the 1.5 fill, `bt target` must print `cash: 0` and a `debit` equal to `held x provisional close - equity`, about 0.5 x equity. The sell back to 0.2 must reach 0.2 exposure by step 5.
+6. In the session after the 1.25 fill, `bt target` must print `cash: 0` and a `debit` equal to `held x provisional close - equity`, about 0.25 x equity. The sell back to 0.2 must reach 0.2 exposure by step 5.
 
 > [!WARNING]
-> TQQQ is a 3x leveraged ETF, and Alpaca's overnight maintenance for 3x ETFs is 75% of market value. At exposure 1.5 the requirement is `0.75 x 1.5 = 1.125 x equity`, above equity, so holding overnight can draw a margin call the next morning. Hold 1.5 for one session only. A paper margin call does not invalidate the sizing checks.
+> TQQQ is a 3x leveraged ETF, and Alpaca's overnight maintenance for 3x ETFs is 75% of market value. At exposure 1.5 the requirement would be 1.125 x equity, a deficit at the fill, so the acceptance uses 1.25 (requirement 0.9375 x equity). The sell back to 0.2 comes at about 15:45 ET the next session. If paper liquidates the position in between, step 6 is void and the run must be repeated. Revert the file to 0.2 before the third session's decision.
 
 > [!NOTE]
 > `docs/specs/live-trading.md:42` records that paper accounts do not simulate dividends. This spec assumes paper posts no margin interest either, so the acceptance makes no interest check.
