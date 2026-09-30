@@ -60,6 +60,12 @@ val snapshot_session :
 (** Build the deterministic daily Alpaca client order identifier. *)
 val client_order_id : symbol:string -> date:string -> string
 
+(** Map Alpaca signed cash and one holding at the provisional price to one
+    engine margin lot; unposted interest is unavailable and stays zero. *)
+val us_plan_state :
+  cash:float -> held:float -> price:float -> ratio:float ->
+  previous_target:float -> Engine.plan_state
+
 (** Size a decision and return its order or minimum-value skip. Quantities are
     truncated to Alpaca's 9 decimals; sells never exceed [held]. *)
 val decide_action :

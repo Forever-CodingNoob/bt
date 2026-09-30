@@ -4703,6 +4703,33 @@ let test_live_pure_decisions () =
        ~provisional_date:override.day_date
      = `Proceed)
 
+let test_us_plan_state () =
+  let state cash held =
+    Live.us_plan_state ~cash ~held ~price:100. ~ratio:0.5
+      ~previous_target:1.5
+  in
+  let check cash held ~free ~inventory ~margin ~loan ~equity =
+    let actual = state cash held in
+    assert_close free actual.Engine.cash;
+    assert_close inventory actual.cash_values.(0);
+    assert_close margin actual.margin_values.(0);
+    assert_close loan actual.loans.(0);
+    assert_close equity actual.equity;
+    assert (actual.interests = [| 0. |]);
+    assert (actual.tail_interests = [| 0. |]);
+    assert (actual.debt = 0. && actual.receivables = 0.);
+    assert (actual.previous_targets = [| 1.5 |])
+  in
+  (* 100 shares * 100 = 10000; no debit; 50000 + 10000 = 60000. *)
+  check 50000. 100. ~free:50000. ~inventory:10000. ~margin:0.
+    ~loan:0. ~equity:60000.;
+  (* 600 * 100 = 60000; debit 20000 funds 40000 of margin inventory. *)
+  check (-20000.) 600. ~free:0. ~inventory:20000. ~margin:40000.
+    ~loan:20000. ~equity:40000.;
+  (* 40000 / 0.5 = 80000 exceeds value 60000; clamp margin to 60000. *)
+  check (-40000.) 600. ~free:0. ~inventory:0. ~margin:60000.
+    ~loan:40000. ~equity:20000.
+
 let test_us_live_fractional () =
   let order_fields body =
     let input =
@@ -7781,6 +7808,7 @@ let () =
   test_alpaca_snapshot_parse ();
   test_engine_effective_targets ();
   test_live_pure_decisions ();
+  test_us_plan_state ();
   test_us_live_fractional ();
   test_us_live_rebalance_action ();
   test_us_live_quantity_limit ();

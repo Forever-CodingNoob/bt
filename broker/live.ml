@@ -67,6 +67,18 @@ let snapshot_session ~session_date ~provisional_date =
 let client_order_id ~symbol ~date =
   Printf.sprintf "bt-%s-%s" symbol date
 
+let us_plan_state ~cash ~held ~price ~ratio ~previous_target =
+  let value = held *. price in
+  let debit = Float.max 0. (-. cash) in
+  let margin_value = Float.min value (debit /. ratio) in
+  let cash = Float.max cash 0. in
+  { Engine.equity = cash +. value -. debit; cash;
+    cash_values = [| value -. margin_value |];
+    margin_values = [| margin_value |]; loans = [| debit |];
+    interests = [| 0. |]; tail_interests = [| 0. |];
+    debt = 0.; receivables = 0.;
+    previous_targets = [| previous_target |] }
+
 let decide_action ~symbol ~date ~target ~equity ~price ~held =
   let delta = (target *. equity /. price) -. held in
   let side, shares =
