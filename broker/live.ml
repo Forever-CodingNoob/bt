@@ -23,6 +23,8 @@ type decision = {
   provisional : Data.bar;
   target : float;
   equity : float;
+  cash : float;
+  debit : float;
   held : float;
   action : action;
 }
@@ -139,24 +141,6 @@ let us_plan_action ~rebalance ~symbol ~date
         state, Skip "below $1 minimum order value"
       else
         state, Order { side; qty; id = client_order_id ~symbol ~date }
-
-let decide_action ~symbol ~date ~target ~equity ~price ~held =
-  let delta = (target *. equity /. price) -. held in
-  let side, shares =
-    if delta > 0. then (`Buy, delta) else (`Sell, Float.min (-. delta) held)
-  in
-  let qty = float_of_string (Alpaca.qty_string shares) in
-  if qty = 0. || (side = `Buy && qty *. price < 1.) then
-    Skip "below $1 minimum order value"
-  else
-    Order { side; qty; id = client_order_id ~symbol ~date }
-
-let us_rebalance_action ~rebalance ~target ~previous_target
-    ~symbol ~date ~equity ~price ~held =
-  if not rebalance && target = previous_target then
-    Skip "target unchanged"
-  else
-    decide_action ~symbol ~date ~target ~equity ~price ~held
 
 let int_field value offset length =
   int_of_string (String.sub value offset length)
@@ -680,13 +664,14 @@ let decide ?provisional_close ?previous_session ?equity ?tw_balance
         | _ -> failwith "live trading requires exactly one stock target"
       in
       let account = Alpaca.account mode in
-      let equity = account.equity in
       let held = Alpaca.position_qty mode symbol in
-      let action =
-        us_rebalance_action ~rebalance ~target ~previous_target ~symbol
-          ~date:provisional.date ~equity ~price:provisional.c ~held
+      let state, action =
+        us_plan_action ~rebalance ~symbol ~date:provisional.date ~account
+          ~held ~price:provisional.c ~target ~previous_target
       in
-      { fetched_through; provisional; target; equity; held; action }
+      { fetched_through; provisional; target;
+        equity = state.equity; cash = state.cash; debit = state.loans.(0);
+        held; action }
   | [alias, "tw", symbol] ->
       let () = validate_date "session" session_date in
       let () =
@@ -839,7 +824,8 @@ let decide ?provisional_close ?previous_session ?equity ?tw_balance
           (maturity_rollover_legs ~session_date ~symbol position_details
            @ legs_of_plan ~price:provisional.c plan)
       in
-      { fetched_through; provisional; target; equity; held; action }
+      { fetched_through; provisional; target; equity; cash;
+        debit = loans; held; action }
   | [_, _, _] -> failwith "live trading supports us and tw only"
   | _ -> failwith "live trading requires exactly one stock"
 

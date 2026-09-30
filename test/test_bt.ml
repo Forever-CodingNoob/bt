@@ -4937,8 +4937,15 @@ let test_us_live_fractional () =
     line
   in
   let order ~target ~equity ~held =
-    Live.decide_action ~symbol:"SPY" ~date:"2025-06-24" ~target ~equity
-      ~price:300. ~held
+    let account : Alpaca.account_t =
+      { equity; cash = equity -. held *. 300.;
+        long_market_value = held *. 300.; short_market_value = 0.;
+        status = "ACTIVE"; trading_blocked = false;
+        account_number = "paper-account" }
+    in
+    snd (Live.us_plan_action ~rebalance:true ~symbol:"SPY"
+      ~date:"2025-06-24" ~account ~held ~price:300.
+      ~target:(Float.max 0. target) ~previous_target:0.)
   in
   let sell qty = Live.Order { side = `Sell; qty; id = "bt-SPY-2025-06-24" } in
   (* Held 0: the whole 1.66666666666... delta is bought, truncated toward
@@ -4966,8 +4973,7 @@ let test_us_live_fractional () =
   let () =
     assert (order ~target:0. ~equity:1000. ~held:1.000285084 = sell 1.000285084)
   in
-  (* -1 * 1,000 / 300 = -3.333... desired; delta -3.333... - 1 = -4.333...;
-     the sell is capped at the 1 held share. *)
+  (* Raw target -1 normalizes to effective target 0, closing the 1 held share. *)
   let () = assert (order ~target:(-1.) ~equity:1000. ~held:1. = sell 1.) in
   let () =
     assert
@@ -4983,11 +4989,15 @@ let test_us_live_fractional () =
           ~client_order_id:"bt-SPY-2025-06-24")
      = {|{"type":"market","time_in_force":"day","qty":"1.666666666"}|})
 
-let test_us_live_rebalance_action () =
+let test_us_live_plan_policy () =
   let choose rebalance ~target ~previous_target =
-    Live.us_rebalance_action ~rebalance ~target ~previous_target
-      ~symbol:"SPY" ~date:"2025-06-24" ~equity:1000.
-      ~price:100. ~held:4.
+    let account : Alpaca.account_t =
+      { equity = 1000.; cash = 600.; long_market_value = 400.;
+        short_market_value = 0.; status = "ACTIVE";
+        trading_blocked = false; account_number = "paper-account" }
+    in
+    snd (Live.us_plan_action ~rebalance ~target ~previous_target
+      ~symbol:"SPY" ~date:"2025-06-24" ~account ~price:100. ~held:4.)
   in
   (* 0.5 * 1000 / 100 = 5 shares; held 4; the order is a 1-share buy. *)
   let buy = Live.Order
@@ -5013,8 +5023,17 @@ let test_us_live_quantity_limit () =
     Queue.add body posted
   in
   let decide held =
-    Live.decide_action ~symbol:"SPY" ~date:"2025-06-24"
-      ~target:0. ~equity:1. ~price:300. ~held
+    (* Holding worth value and cash 1 - value give positive mapped equity 1;
+       daily planning forces a full close even though both targets are zero. *)
+    let value = held *. 300. in
+    let account : Alpaca.account_t =
+      { equity = 1.; cash = 1. -. value; long_market_value = value;
+        short_market_value = 0.; status = "ACTIVE";
+        trading_blocked = false; account_number = "paper-account" }
+    in
+    snd (Live.us_plan_action ~rebalance:true ~symbol:"SPY"
+      ~date:"2025-06-24" ~account ~held ~price:300.
+      ~target:0. ~previous_target:0.)
   in
   let rejected =
     match decide held with
@@ -5087,6 +5106,9 @@ let test_us_live_submit_cutoff () =
         { date = "2025-06-24"; o = 300.; h = 300.; l = 300.; c = 300.; v = 0. };
       target = 0.5;
       equity = 1000.;
+      (* No position: all 1000 equity is free cash and there is no debit. *)
+      cash = 1000.;
+      debit = 0.;
       held = 0.;
       action =
         Live.Order { side = `Buy; qty = 1.666666666; id = "bt-SPY-2025-06-24" } }
@@ -5119,7 +5141,12 @@ let test_us_uncertain_submission_stops () =
     { fetched_through = "2025-06-23";
       provisional =
         { date = "2025-06-24"; o = 300.; h = 300.; l = 300.; c = 300.; v = 0. };
-      target = 0.5; equity = 1000.; held = 0.;
+      target = 0.5;
+      equity = 1000.;
+      (* No position: all 1000 equity is free cash and there is no debit. *)
+      cash = 1000.;
+      debit = 0.;
+      held = 0.;
       action =
         Live.Order { side = `Buy; qty = 1.; id = "bt-SPY-2025-06-24" } }
   in
@@ -5145,7 +5172,12 @@ let test_us_rejected_submission_stops () =
     { fetched_through = "2025-06-23";
       provisional =
         { date = "2025-06-24"; o = 300.; h = 300.; l = 300.; c = 300.; v = 0. };
-      target = 0.5; equity = 1000.; held = 0.;
+      target = 0.5;
+      equity = 1000.;
+      (* No position: all 1000 equity is free cash and there is no debit. *)
+      cash = 1000.;
+      debit = 0.;
+      held = 0.;
       action =
         Live.Order { side = `Buy; qty = 1.; id = "bt-SPY-2025-06-24" } }
   in
@@ -5172,7 +5204,12 @@ let test_us_rejected_log_failure_stops () =
     { fetched_through = "2025-06-23";
       provisional =
         { date = "2025-06-24"; o = 300.; h = 300.; l = 300.; c = 300.; v = 0. };
-      target = 0.5; equity = 1000.; held = 0.;
+      target = 0.5;
+      equity = 1000.;
+      (* No position: all 1000 equity is free cash and there is no debit. *)
+      cash = 1000.;
+      debit = 0.;
+      held = 0.;
       action =
         Live.Order { side = `Buy; qty = 1.; id = "bt-SPY-2025-06-24" } }
   in
@@ -5210,7 +5247,12 @@ let test_us_decision_logs_after_preflight () =
     { fetched_through = "2025-06-23";
       provisional =
         { date = "2025-06-24"; o = 300.; h = 300.; l = 300.; c = 300.; v = 0. };
-      target = 0.5; equity = 1000.; held = 0.;
+      target = 0.5;
+      equity = 1000.;
+      (* No position: all 1000 equity is free cash and there is no debit. *)
+      cash = 1000.;
+      debit = 0.;
+      held = 0.;
       action = Live.Order { side = `Buy; qty = 1.; id = "bt-SPY-2025-06-24" } }
   in
   let close = "2025-06-24T16:00:00-04:00" in
@@ -5248,7 +5290,13 @@ let test_us_step_routing () =
     { fetched_through = "2025-06-23";
       provisional =
         { date = "2025-06-24"; o = 300.; h = 300.; l = 300.; c = 300.; v = 0. };
-      target = 0.5; equity = 1000.; held = 0.; action = Live.Skip "no trade" }
+      target = 0.5;
+      equity = 1000.;
+      (* No position: all 1000 equity is free cash and there is no debit. *)
+      cash = 1000.;
+      debit = 0.;
+      held = 0.;
+      action = Live.Skip "no trade" }
   in
   let existing : Alpaca.order_t =
     { id = "existing"; status = "filled";
@@ -8008,7 +8056,7 @@ let () =
   test_us_plan_action_orders ();
   test_us_plan_action_matches_run ();
   test_us_live_fractional ();
-  test_us_live_rebalance_action ();
+  test_us_live_plan_policy ();
   test_us_live_quantity_limit ();
   test_live_schedule ();
   test_us_live_submit_cutoff ();

@@ -26,6 +26,8 @@ type decision = {
   provisional : Data.bar;
   target : float;
   equity : float;
+  cash : float;
+  debit : float;
   held : float;
   action : action;
 }
@@ -73,23 +75,6 @@ val us_plan_action :
   rebalance:bool -> symbol:string -> date:string ->
   account:Alpaca.account_t -> held:float -> price:float ->
   target:float -> previous_target:float -> Engine.plan_state * action
-
-(** Size a decision and return its order or minimum-value skip. Quantities are
-    truncated to Alpaca's 9 decimals; sells never exceed [held]. *)
-val decide_action :
-  symbol:string ->
-  date:string ->
-  target:float ->
-  equity:float ->
-  price:float ->
-  held:float ->
-  action
-
-(** Choose change-only skip or existing US share sizing without broker I/O. *)
-val us_rebalance_action :
-  rebalance:bool -> target:float -> previous_target:float ->
-  symbol:string -> date:string -> equity:float -> price:float ->
-  held:float -> action
 
 
 (** Resolve a TW symbol to Shioaji's [TSE] or [OTC] exchange name. *)

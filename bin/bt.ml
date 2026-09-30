@@ -695,6 +695,8 @@ let print_decision provisional_close (decision : Live.decision) =
   Printf.printf "provisional-volume: %.10g\n" bar.v;
   Printf.printf "target: %.10g\n" decision.target;
   Printf.printf "equity: %.10g\n" decision.equity;
+  Printf.printf "cash: %.10g\n" decision.cash;
+  Printf.printf "debit: %.10g\n" decision.debit;
   Printf.printf "held: %.10g\n" decision.held;
   match decision.action with
   | Live.Order { side; qty; id } ->
