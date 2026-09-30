@@ -4550,9 +4550,12 @@ let test_alpaca_clock_parse () =
 
 let test_alpaca_account_parse () =
   let actual = Alpaca.parse_account (alpaca_fixture "account.json") in
-  (* "103820.56" parses exactly to the expected decimal float. *)
+  (* Fixture equity = -23140.2 + 126960.76 + 0. = 103820.56. *)
   let expected : Alpaca.account_t =
     { equity = 103820.56;
+      cash = -23140.2;
+      long_market_value = 126960.76;
+      short_market_value = 0.;
       status = "ACTIVE";
       trading_blocked = false;
       account_number = "010203ABCD" }
@@ -5143,8 +5146,12 @@ let test_live_daemon_lock () =
     fork_expect true)
 
 let test_live_startup_guard () =
+  (* No position and no debit imply equity = cash = 10000. *)
   let account : Alpaca.account_t =
     { equity = 10000.;
+      cash = 10000.;
+      long_market_value = 0.;
+      short_market_value = 0.;
       status = "ACTIVE";
       trading_blocked = false;
       account_number = "paper-account" }

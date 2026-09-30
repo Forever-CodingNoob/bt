@@ -12,6 +12,9 @@ type clock_t = {
 (** Alpaca account fields used by live sizing and safety checks. *)
 type account_t = {
   equity : float;
+  cash : float;
+  long_market_value : float;
+  short_market_value : float;
   status : string;
   trading_blocked : bool;
   account_number : string;

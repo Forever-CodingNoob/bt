@@ -9,6 +9,9 @@ type clock_t = {
 
 type account_t = {
   equity : float;
+  cash : float;
+  long_market_value : float;
+  short_market_value : float;
   status : string;
   trading_blocked : bool;
   account_number : string;
@@ -102,11 +105,15 @@ let parse_clock raw =
 let parse_account raw =
   match
     jq_fields "account"
-      "[.equity, .status, (.trading_blocked | tostring), .account_number] | @tsv"
+      "[.equity, .cash, .long_market_value, .short_market_value, .status, (.trading_blocked | tostring), .account_number] | @tsv"
       raw
   with
-  | [equity; status; trading_blocked; account_number] ->
+  | [equity; cash; long_market_value; short_market_value; status;
+     trading_blocked; account_number] ->
       { equity = float_field "account equity" equity;
+        cash = float_field "account cash" cash;
+        long_market_value = float_field "account long_market_value" long_market_value;
+        short_market_value = float_field "account short_market_value" short_market_value;
         status;
         trading_blocked = bool_field "account trading_blocked" trading_blocked;
         account_number }
