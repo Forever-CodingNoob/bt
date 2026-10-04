@@ -69,78 +69,80 @@ let snapshot_session ~session_date ~provisional_date =
 let client_order_id ~symbol ~date =
   Printf.sprintf "bt-%s-%s" symbol date
 
-let us_plan_state ~cash ~held ~price ~ratio ~previous_target =
-  let () =
-    if not (Float.is_finite ratio) || ratio <= 0. then
-      failwith "US financing ratio is not positive"
-  in
-  let value = held *. price in
+let us_plan_state ~cash ~held ~prices ~ratio ~previous_targets =
+  let count = Array.length held in
+  let () = if Array.length prices <> count || Array.length previous_targets <> count then
+    invalid_arg "US plan arrays differ in length" in
+  let () = if not (Float.is_finite ratio) || ratio <= 0. then
+    failwith "US financing ratio is not positive" in
+  let values = Array.mapi (fun i shares -> shares *. prices.(i)) held in
+  let total = Array.fold_left ( +. ) 0. values in
   let debit = Float.max 0. (-. cash) in
-  let margin_value = Float.min value (debit /. ratio) in
+  let loans = Array.map (fun value ->
+    if total = 0. then debit /. float_of_int count
+    else debit *. (value /. total)) values in
+  let margin_values = Array.mapi (fun i value ->
+    Float.min value (loans.(i) /. ratio)) values in
   let cash = Float.max cash 0. in
-  { Engine.equity = cash +. value -. debit; cash;
-    cash_values = [| value -. margin_value |];
-    margin_values = [| margin_value |]; loans = [| debit |];
-    interests = [| 0. |]; tail_interests = [| 0. |];
-    debt = 0.; receivables = 0.;
-    previous_targets = [| previous_target |] }
+  { Engine.equity = cash +. total -. debit; cash;
+    cash_values = Array.mapi (fun i value -> value -. margin_values.(i)) values;
+    margin_values; loans; interests = Array.make count 0.;
+    tail_interests = Array.make count 0.; debt = 0.; receivables = 0.;
+    previous_targets }
 
-let us_plan_action ~rebalance ~symbol ~date
-    ~(account : Alpaca.account_t) ~held ~price ~target ~previous_target =
+let us_plan_action ~rebalance ~symbols ~date ~(account : Alpaca.account_t)
+    ~position_symbols ~held ~prices ~targets ~previous_targets =
+  let count = Array.length symbols in
+  let () = if Array.length held <> count || Array.length prices <> count
+    || Array.length targets <> count || Array.length previous_targets <> count then
+    invalid_arg "US plan arrays differ in length" in
   let profile = Engine.profile_of_market "us" in
   let ratio = profile.default_financing_ratio in
-  let state =
-    us_plan_state ~cash:account.cash ~held ~price ~ratio ~previous_target
-  in
-  let value = held *. price in
+  let state = us_plan_state ~cash:account.cash ~held ~prices ~ratio ~previous_targets in
+  let rec held_value index value =
+    if index = Array.length held then value
+    else held_value (index + 1) (value +. held.(index) *. prices.(index)) in
+  let value = held_value 0 0. in
+  let () = if not (Float.is_finite account.cash) then
+    failwith "US account cash is not finite" in
+  let () = if account.short_market_value <> 0. || Array.exists (fun h -> h < 0.) held then
+    failwith "US account holds a short position" in
+  let () = List.iter (fun symbol ->
+    if not (Array.exists (( = ) symbol) symbols) then
+      failwith ("US account holds unsupported symbol " ^ symbol)) position_symbols in
   let () =
-    if not (Float.is_finite account.cash) then
-      failwith "US account cash is not finite"
-  in
-  let () =
-    if account.short_market_value <> 0. || held < 0. then
-      failwith "US account holds a short position"
-  in
-  let () =
-    (* ponytail: 1% tolerance for Alpaca's mark versus provisional close;
-       list /v2/positions if false positives start skipping sessions. *)
+    (* ponytail: 1% tolerance for broker marks versus provisional prices;
+       retain alongside the positions-list check for valuation consistency. *)
     if not (Float.is_finite account.long_market_value)
-       || abs_float (account.long_market_value -. value)
-          > 0.01 *. account.long_market_value
-    then failwith "US account holds other symbols"
-  in
-  let () =
-    if not (Float.is_finite state.equity) || state.equity <= 0. then
-      failwith "US account equity is not positive"
-  in
-  if not rebalance && target = previous_target then
-    state, Skip "target unchanged"
+      || abs_float (account.long_market_value -. value) > 0.01 *. account.long_market_value
+    then failwith "US account holds other symbols" in
+  let () = if not (Float.is_finite state.equity) || state.equity <= 0. then
+    failwith "US account equity is not positive" in
+  if not rebalance && targets = previous_targets then
+    state, Array.make (Array.length symbols) (Skip "target unchanged")
   else
-    let plan =
-      Engine.plan_fills
-        ~costs:[| Engine.default_costs ~market:"us" ~symbol |]
-        ~capital:1. ~profile ~financing_ratios:[| ratio |] ~state
-        ~prices:[| price |] ~targets:[| target |] ~force:rebalance
-    in
-    let item = plan.planned_assets.(0) in
-    let net =
-      item.plan_buy_cash +. item.plan_buy_margin
-      -. item.plan_sell_cash -. item.plan_sell_margin
-    in
-    if net = 0. then state, Skip "no trade planned"
-    else
-      let side, shares =
-        if net > 0. then `Buy, net /. price
-        else
-          `Sell,
-          (if item.plan_final_value = 0. then held
-           else Float.min (-. net /. price) held)
-      in
-      let qty = float_of_string (Alpaca.qty_string shares) in
-      if qty = 0. || (side = `Buy && qty *. price < 1.) then
-        state, Skip "below $1 minimum order value"
+    let plan = Engine.plan_fills
+      ~costs:(Array.map (fun symbol -> Engine.default_costs ~market:"us" ~symbol) symbols)
+      ~capital:1. ~profile ~financing_ratios:(Array.make (Array.length symbols) ratio)
+      ~state ~prices ~targets ~force:rebalance in
+    let actions = Array.mapi (fun i (item : Engine.planned_asset) ->
+      if not rebalance && targets.(i) = previous_targets.(i) then Skip "target unchanged"
       else
-        state, Order { side; qty; id = client_order_id ~symbol ~date }
+        let net = item.plan_buy_cash +. item.plan_buy_margin
+          -. item.plan_sell_cash -. item.plan_sell_margin in
+        if net = 0. then Skip "no trade planned"
+        else
+          let price = prices.(i) in
+          let side, shares =
+            if net > 0. then `Buy, net /. price
+            else `Sell, (if item.plan_final_value = 0. then held.(i)
+              else Float.min (-. net /. price) held.(i)) in
+          let qty = float_of_string (Alpaca.qty_string shares) in
+          if qty = 0. || (side = `Buy && qty *. price < 1.) then
+            Skip "below $1 minimum order value"
+          else Order { side; qty; id = client_order_id ~symbol:symbols.(i) ~date })
+      plan.planned_assets in
+    state, actions
 
 let int_field value offset length =
   int_of_string (String.sub value offset length)
@@ -665,13 +667,15 @@ let decide ?provisional_close ?previous_session ?equity ?tw_balance
       in
       let account = Alpaca.account mode in
       let held = Alpaca.position_qty mode symbol in
-      let state, action =
-        us_plan_action ~rebalance ~symbol ~date:provisional.date ~account
-          ~held ~price:provisional.c ~target ~previous_target
+      let position_symbols = Alpaca.positions mode in
+      let state, actions =
+        us_plan_action ~rebalance ~symbols:[|symbol|] ~date:provisional.date
+          ~account ~position_symbols ~held:[|held|] ~prices:[|provisional.c|]
+          ~targets:[|target|] ~previous_targets:[|previous_target|]
       in
       { fetched_through; provisional; target;
         equity = state.equity; cash = state.cash; debit = state.loans.(0);
-        held; action }
+        held; action = actions.(0) }
   | [alias, "tw", symbol] ->
       let () = validate_date "session" session_date in
       let () =

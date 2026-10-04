@@ -62,19 +62,23 @@ val snapshot_session :
 (** Build the deterministic daily Alpaca client order identifier. *)
 val client_order_id : symbol:string -> date:string -> string
 
-(** Map Alpaca signed cash and one holding at the provisional price to one
-    engine margin lot; unposted interest is unavailable and stays zero.
-    Raise [Failure] if [ratio] is non-finite or not positive. *)
+(** Map Alpaca signed cash and holdings at provisional prices to engine
+    margin lots with value-proportional debit; unposted interest stays zero.
+    Raise [Failure] if [ratio] is non-finite or not positive.
+    Raise [Invalid_argument] if the input arrays differ in length. *)
 val us_plan_state :
-  cash:float -> held:float -> price:float -> ratio:float ->
-  previous_target:float -> Engine.plan_state
+  cash:float -> held:float array -> prices:float array -> ratio:float ->
+  previous_targets:float array -> Engine.plan_state
 
-(** Fail closed on unsupported US account states, then plan one Alpaca order
-    or skip without broker I/O; return the state used for the decision. *)
+(** Fail closed on unsupported US account states, then jointly plan Alpaca
+    orders or skips without broker I/O; return the state used for the decision.
+    Raise [Invalid_argument] if the input arrays differ in length. *)
 val us_plan_action :
-  rebalance:bool -> symbol:string -> date:string ->
-  account:Alpaca.account_t -> held:float -> price:float ->
-  target:float -> previous_target:float -> Engine.plan_state * action
+  rebalance:bool -> symbols:string array -> date:string ->
+  account:Alpaca.account_t -> position_symbols:string list ->
+  held:float array -> prices:float array ->
+  targets:float array -> previous_targets:float array ->
+  Engine.plan_state * action array
 
 
 (** Resolve a TW symbol to Shioaji's [TSE] or [OTC] exchange name. *)

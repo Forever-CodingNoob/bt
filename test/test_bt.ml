@@ -4730,12 +4730,127 @@ let test_live_pure_decisions () =
        ~provisional_date:override.day_date
      = `Proceed)
 
+let test_us_plan_state_split () =
+  (* One holding cannot map two prices and previous targets. *)
+  assert (match Live.us_plan_state ~cash:500. ~held:[|5.|]
+    ~prices:[|100.; 100.|] ~ratio:0.5 ~previous_targets:[|0.5; 0.|] with
+    | _ -> false
+    | exception Invalid_argument message ->
+        message = "US plan arrays differ in length");
+  let state = Live.us_plan_state ~cash:(-30000.) ~held:[|600.; 300.|]
+    ~prices:[|100.; 100.|] ~ratio:0.5 ~previous_targets:[|0.8; 0.4|] in
+  (* Values 60000+30000 split debit 30000 as 20000+10000;
+     margin 40000+20000, cash inventory 20000+10000, equity 60000. *)
+  assert (state.Engine.loans = [|20000.; 10000.|]);
+  assert (state.margin_values = [|40000.; 20000.|]);
+  assert (state.cash_values = [|20000.; 10000.|]);
+  assert (state.cash = 0. && state.equity = 60000.);
+  let empty = Live.us_plan_state ~cash:(-6.) ~held:[|0.; 0.|]
+    ~prices:[|100.; 100.|] ~ratio:0.5 ~previous_targets:[|0.; 0.|] in
+  (* Zero total value splits debit equally, 6/2 = 3 per entry. *)
+  assert (empty.loans = [|3.; 3.|]);
+  List.iter (fun (cash, held) ->
+    let value = held *. 100. in
+    let debit = Float.max 0. (-. cash) in
+    let margin = Float.min value (debit /. 0.5) in
+    let free = Float.max cash 0. in
+    let expected : Engine.plan_state =
+      { equity = free +. value -. debit; cash = free;
+        cash_values = [|value -. margin|]; margin_values = [|margin|];
+        loans = [|debit|]; interests = [|0.|]; tail_interests = [|0.|];
+        debt = 0.; receivables = 0.; previous_targets = [|1.5|] } in
+    let actual = Live.us_plan_state ~cash ~held:[|held|] ~prices:[|100.|]
+      ~ratio:0.5 ~previous_targets:[|1.5|] in
+    (* This is the previous scalar operation order, not a tolerance check. *)
+    assert (Marshal.to_bytes expected [] = Marshal.to_bytes actual []))
+    [50000., 100.; -20000., 600.; -40000., 600.]
+
+let test_us_plan_action_foreign_symbol () =
+  let account : Alpaca.account_t =
+    { equity = 1.; cash = -600.; long_market_value = 999.;
+      short_market_value = 0.; status = "ACTIVE";
+      trading_blocked = false; account_number = "fixture" } in
+  (* A short holding array must not silently drop QQQ under on_change. *)
+  assert (match Live.us_plan_action ~rebalance:false ~symbols:[|"SPY"; "QQQ"|]
+    ~date:"2025-06-24" ~account:{ account with cash = 500.; long_market_value = 500. }
+    ~position_symbols:["SPY"; "QQQ"]
+    ~held:[|5.|] ~prices:[|100.; 100.|]
+    ~targets:[|0.5; 0.|] ~previous_targets:[|0.5; 0.|] with
+    | _ -> false
+    | exception Invalid_argument message ->
+        message = "US plan arrays differ in length"
+    | exception Failure _ -> false);
+  match Live.us_plan_action ~rebalance:false ~symbols:[|"SPY"; "QQQ"|]
+    ~date:"2025-06-24" ~account ~position_symbols:["SPY"; "FOREIGN"]
+    ~held:[|5.; 0.|] ~prices:[|100.; 100.|]
+    ~targets:[|0.5; 0.|] ~previous_targets:[|0.5; 0.|] with
+  | _ -> assert false
+  (* Foreign membership check wins over mark mismatch and nonpositive equity. *)
+  | exception Failure message ->
+      assert (message = "US account holds unsupported symbol FOREIGN")
+
+let test_us_plan_action_pair_matches_run () =
+  let symbols = [|"SPY"; "QQQ"|] in
+  let price = 100. and capital = 1000. in
+  let bars = [|bar "2025-06-23" price price;
+    bar "2025-06-24" price price; bar "2025-06-25" price price|] in
+  let profile = Engine.profile_of_market "us" in
+  let costs = Array.map (fun symbol -> Engine.default_costs ~market:"us" ~symbol) symbols in
+  let margin : Engine.margin =
+    { financing_rate = 0.; maintenance_override = None;
+      ratios = [|0.5; 0.5|]; loan_term_months = None } in
+  let check refinance t0 t1 =
+    let result = Engine.run
+      (Array.map (fun symbol -> "us/" ^ symbol, bars) symbols)
+      { Engine.targets = Array.mapi (fun i first -> [|first; t1.(i); t1.(i)|]) t0 }
+      costs ~profile ~margin ~capital ~fill:Engine.Close_same ~rebalance:false in
+    let e1 = List.assoc "2025-06-23" result.equity_curve *. capital in
+    let e2 = List.assoc "2025-06-24" result.equity_curve *. capital in
+    let ordinary = List.filter (fun (f : Engine.fill_event) ->
+      f.date = "2025-06-24" && f.from_e <> f.to_e) result.fills in
+    let () = assert (List.exists (fun (f : Engine.fill_event) ->
+      f.date = "2025-06-24" && f.from_e = f.to_e) result.fills = refinance) in
+    let held = Array.mapi (fun i _ ->
+      let label = "us/" ^ symbols.(i) in
+      match List.find_opt (fun (f : Engine.fill_event) -> f.stock = label) ordinary with
+      | Some f -> f.from_e *. e1 /. price
+      | None -> t0.(i) *. e1 /. price) symbols in
+    let value = Array.fold_left (fun sum shares -> sum +. shares *. price) 0. held in
+    let account : Alpaca.account_t =
+      { equity = 1.; cash = e1 -. value; long_market_value = value;
+        short_market_value = 0.; status = "ACTIVE";
+        trading_blocked = false; account_number = "fixture" } in
+    let state, actions = Live.us_plan_action ~rebalance:false ~symbols
+      ~date:"2025-06-24" ~account ~position_symbols:["SPY"; "QQQ"]
+      ~held ~prices:[|price; price|] ~targets:t1 ~previous_targets:t0 in
+    let () = assert_close e1 state.Engine.equity in
+    Array.iteri (fun i action ->
+      match List.find_opt (fun (f : Engine.fill_event) ->
+        f.stock = "us/" ^ symbols.(i)) ordinary with
+      | None -> assert (action = Live.Skip "target unchanged")
+      | Some fill ->
+          (* Exposure times equity yields absolute position value;
+             delta/100 is the signed ordinary quantity, before 9-digit truncation. *)
+          let expected = (fill.to_e *. e2 -. fill.from_e *. e1) /. price in
+          match action with
+          | Live.Order { side; qty; _ } ->
+              assert (side = if expected > 0. then `Buy else `Sell);
+              assert (abs_float (qty -. abs_float expected) <= 1e-9)
+          | Live.Skip _ | Live.Orders _ -> assert false) actions
+  in
+  (* Cash sell/buy; levered sell repays half its proceeds, so the sibling
+     buy needs a refinance; unlevered exit; cross-asset refinance scale-in. *)
+  check false [|0.8; 0.|] [|0.3; 0.5|];
+  check true [|1.5; 0.|] [|1.2; 0.3|];
+  check false [|1.5; 0.|] [|0.6; 0.4|];
+  check true [|0.8; 0.|] [|0.8; 0.7|]
+
 let test_us_plan_state () =
   let rejects ratio =
     assert_failure (fun () ->
       match
-        Live.us_plan_state ~cash:500. ~held:5. ~price:100. ~ratio
-          ~previous_target:0.5
+        Live.us_plan_state ~cash:500. ~held:[|5.|] ~prices:[|100.|] ~ratio
+          ~previous_targets:[|0.5|]
       with
       | _ -> assert false
       | exception Failure message ->
@@ -4746,8 +4861,8 @@ let test_us_plan_state () =
   rejects 0.;
   rejects Float.nan;
   let state cash held =
-    Live.us_plan_state ~cash ~held ~price:100. ~ratio:0.5
-      ~previous_target:1.5
+    Live.us_plan_state ~cash ~held:[|held|] ~prices:[|100.|] ~ratio:0.5
+      ~previous_targets:[|1.5|]
   in
   let check cash held ~free ~inventory ~margin ~loan ~equity =
     let actual = state cash held in
@@ -4778,8 +4893,11 @@ let test_us_plan_action_checks () =
       trading_blocked = false; account_number = "paper-account" }
   in
   let choose account held =
-    Live.us_plan_action ~rebalance:false ~symbol:"SPY" ~date:"2025-06-24"
-      ~account ~held ~price:100. ~target:0.5 ~previous_target:0.5
+    let state, actions = Live.us_plan_action ~rebalance:false ~symbols:[|"SPY"|]
+      ~date:"2025-06-24" ~account ~position_symbols:["SPY"]
+      ~held:[|held|] ~prices:[|100.|] ~targets:[|0.5|]
+      ~previous_targets:[|0.5|] in
+    state, actions.(0)
   in
   let fails expected account held =
     assert_failure (fun () ->
@@ -4830,9 +4948,11 @@ let test_us_plan_action_orders () =
       trading_blocked = false; account_number = "paper-account" }
   in
   let choose ~rebalance ~cash ~held ~price ~target ~previous_target =
-    Live.us_plan_action ~rebalance ~symbol:"SPY" ~date:"2025-06-24"
-      ~account:(account ~cash ~held ~price) ~held ~price ~target
-      ~previous_target
+    let state, actions = Live.us_plan_action ~rebalance ~symbols:[|"SPY"|]
+      ~date:"2025-06-24" ~account:(account ~cash ~held ~price)
+      ~position_symbols:["SPY"] ~held:[|held|] ~prices:[|price|]
+      ~targets:[|target|] ~previous_targets:[|previous_target|] in
+    state, actions.(0)
   in
   let _, unchanged =
     choose ~rebalance:false ~cash:600. ~held:4. ~price:100.
@@ -4925,11 +5045,13 @@ let test_us_plan_action_matches_run () =
         short_market_value = 0.; status = "ACTIVE";
         trading_blocked = false; account_number = "paper-account" }
     in
-    let state, action =
-      Live.us_plan_action ~rebalance:false ~symbol:"SPY"
-        ~date:"2025-06-24" ~account ~held ~price ~target:t1
-        ~previous_target:t0
+    let state, actions =
+      Live.us_plan_action ~rebalance:false ~symbols:[|"SPY"|]
+        ~date:"2025-06-24" ~account ~position_symbols:["SPY"]
+        ~held:[|held|] ~prices:[|price|] ~targets:[|t1|]
+        ~previous_targets:[|t0|]
     in
+    let action = actions.(0) in
     let expected = (fill.to_e *. e2 -. fill.from_e *. e1) /. price in
     (* The flat mark makes bar-1 account cash plus stock equal E1;
        bar-2 target value is to_e * E2 after the planner's sell costs. *)
@@ -4970,9 +5092,11 @@ let test_us_live_fractional () =
         status = "ACTIVE"; trading_blocked = false;
         account_number = "paper-account" }
     in
-    snd (Live.us_plan_action ~rebalance:true ~symbol:"SPY"
-      ~date:"2025-06-24" ~account ~held ~price:300.
-      ~target:(Float.max 0. target) ~previous_target:0.)
+    let _, actions = Live.us_plan_action ~rebalance:true ~symbols:[|"SPY"|]
+      ~date:"2025-06-24" ~account ~position_symbols:["SPY"]
+      ~held:[|held|] ~prices:[|300.|] ~targets:[|Float.max 0. target|]
+      ~previous_targets:[|0.|] in
+    actions.(0)
   in
   let sell qty = Live.Order { side = `Sell; qty; id = "bt-SPY-2025-06-24" } in
   (* Held 0: the whole 1.66666666666... delta is bought, truncated toward
@@ -5023,8 +5147,11 @@ let test_us_live_plan_policy () =
         short_market_value = 0.; status = "ACTIVE";
         trading_blocked = false; account_number = "paper-account" }
     in
-    snd (Live.us_plan_action ~rebalance ~target ~previous_target
-      ~symbol:"SPY" ~date:"2025-06-24" ~account ~price:100. ~held:4.)
+    let _, actions = Live.us_plan_action ~rebalance ~symbols:[|"SPY"|]
+      ~date:"2025-06-24" ~account ~position_symbols:["SPY"]
+      ~prices:[|100.|] ~held:[|4.|] ~targets:[|target|]
+      ~previous_targets:[|previous_target|] in
+    actions.(0)
   in
   (* 0.5 * 1000 / 100 = 5 shares; held 4; the order is a 1-share buy. *)
   let buy = Live.Order
@@ -5058,9 +5185,11 @@ let test_us_live_quantity_limit () =
         short_market_value = 0.; status = "ACTIVE";
         trading_blocked = false; account_number = "paper-account" }
     in
-    snd (Live.us_plan_action ~rebalance:true ~symbol:"SPY"
-      ~date:"2025-06-24" ~account ~held ~price:300.
-      ~target:0. ~previous_target:0.)
+    let _, actions = Live.us_plan_action ~rebalance:true ~symbols:[|"SPY"|]
+      ~date:"2025-06-24" ~account ~position_symbols:["SPY"]
+      ~held:[|held|] ~prices:[|300.|] ~targets:[|0.|]
+      ~previous_targets:[|0.|] in
+    actions.(0)
   in
   let rejected =
     match decide held with
@@ -8187,6 +8316,9 @@ let () =
   test_engine_effective_targets ();
   test_live_pure_decisions ();
   test_us_plan_state ();
+  test_us_plan_state_split ();
+  test_us_plan_action_foreign_symbol ();
+  test_us_plan_action_pair_matches_run ();
   test_us_plan_action_checks ();
   test_us_plan_action_orders ();
   test_us_plan_action_matches_run ();
