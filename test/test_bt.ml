@@ -83,6 +83,16 @@ let test_filter_dates () =
     (Array.map (fun (bar : Data.bar) -> bar.date) filtered =
      [| "2020-01-02"; "2020-01-04" |])
 
+let test_common_dates () =
+  let bars dates = Array.of_list (List.map (fun date -> bar date 100. 100.) dates) in
+  let left = bars ["2026-05-22"; "2026-05-14"; "2026-05-15"; "2026-05-15"] in
+  let right = bars ["2026-05-15"; "2026-05-21"; "2026-05-22"] in
+  (* Intersection retains 15 and 22 once each, sorted, irrespective of order. *)
+  assert (Data.common_dates [left; right] = ["2026-05-15"; "2026-05-22"]);
+  assert (Data.common_dates [left] = ["2026-05-14"; "2026-05-15"; "2026-05-22"]);
+  assert (Data.common_dates [] = []);
+  assert (Data.common_dates [left; [||]] = [])
+
 let fill_bars =
   [| bar "2020-01-01" 100. 100.;
      bar "2020-01-02" 102. 104.;
@@ -8161,6 +8171,7 @@ let () =
   test_default_costs ();
   test_parser_aliases ();
   test_filter_dates ();
+  let () = test_common_dates () in
   test_stock_statement ();
   test_multi_stock_compile ();
   test_multi_stock_errors ();

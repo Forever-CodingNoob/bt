@@ -1565,6 +1565,26 @@ let filter_dates ~keep bars =
   |> List.rev
   |> Array.of_list
 
+let common_dates = function
+  | [] -> []
+  | first :: rest ->
+      let initial =
+        Array.to_list
+          (Array.map
+             (fun (bar : bar) -> bar.date)
+             first)
+        |> List.sort_uniq String.compare
+      in
+      List.fold_left
+        (fun common bars ->
+          let present = Hashtbl.create (Array.length bars) in
+          Array.iter
+            (fun (bar : bar) ->
+              Hashtbl.replace present bar.date ())
+            bars;
+          List.filter (fun date -> Hashtbl.mem present date) common)
+        initial rest
+
 let load_asset ~market ~symbol ~from_ ~to_ ~data_dir =
   let market = market_name market in
   let () = check_symbol symbol in

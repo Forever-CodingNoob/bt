@@ -157,26 +157,6 @@ type strategy_input = {
 let strategy_name path =
   Filename.remove_extension (Filename.basename path)
 
-let common_dates = function
-  | [] -> []
-  | first :: rest ->
-      let initial =
-        Array.to_list
-          (Array.map
-             (fun (bar : Data.bar) -> bar.date)
-             first)
-        |> List.sort_uniq String.compare
-      in
-      List.fold_left
-        (fun common bars ->
-          let present = Hashtbl.create (Array.length bars) in
-          Array.iter
-            (fun (bar : Data.bar) ->
-              Hashtbl.replace present bar.date ())
-            bars;
-          List.filter (fun date -> Hashtbl.mem present date) common)
-        initial rest
-
 let baseline_strategy length : Engine.strategy =
   { targets = [| Array.make length 1. |] }
 
@@ -380,7 +360,7 @@ let run argv =
     | None -> arrays
     | Some (_, _, asset) -> arrays @ [asset.Data.signal]
   in
-  let dates = common_dates arrays in
+  let dates = Data.common_dates arrays in
   if List.length dates < 2 then
     failwith "strats have fewer than 2 common trading dates";
   let keep = Hashtbl.create (List.length dates) in
@@ -635,7 +615,7 @@ let daytrade argv =
   let arrays = match baseline_asset with
     | None -> arrays
     | Some (_, asset) -> arrays @ [asset.Data.money] in
-  let dates = common_dates arrays in
+  let dates = Data.common_dates arrays in
   let () = if List.length dates < 2 then
     failwith "strats have fewer than 2 common trading dates" in
   let keep = Hashtbl.create (List.length dates) in

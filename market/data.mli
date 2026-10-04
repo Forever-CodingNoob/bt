@@ -68,6 +68,9 @@ val load_asset :
 (** Retain bars whose dates satisfy the supplied predicate. *)
 val filter_dates : keep:(string -> bool) -> bar array -> bar array
 
+(** Sorted common trading dates, with duplicates removed. *)
+val common_dates : bar array list -> string list
+
 (** Return the latest dated stockinfo type for a TW symbol, if present.
     Raises [End_of_file] for an empty cache. *)
 val stockinfo_kind : data_dir:string -> symbol:string -> string option
