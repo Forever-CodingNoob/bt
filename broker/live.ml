@@ -901,7 +901,8 @@ let execute_decision ?(existing = []) ?(sleep = Unix.sleepf) ?finish
   let error_text = function
     | Failure message -> message
     | error -> Printexc.to_string error in
-  let posted = ref (existing <> []) in
+  let posted = ref false in
+  let stopped = ref false in
   let placed = ref existing in
   let finish_all () = List.iter (fun (symbol, order) ->
     try finish next_close date symbol order with error ->
@@ -921,7 +922,6 @@ let execute_decision ?(existing = []) ?(sleep = Unix.sleepf) ?finish
       | None -> true
       | Some order ->
           let () = placed := (symbol, order) :: !placed in
-          let () = posted := true in
           let () = log "date=%s symbol=%s order=existing:%s fill=pending" date symbol id in
           false) orders in
     let preflight () =
@@ -950,11 +950,12 @@ let execute_decision ?(existing = []) ?(sleep = Unix.sleepf) ?finish
       match submit request with
       | () -> ()
       | exception error ->
-          let () = (try log "date=%s symbol=%s error=%s order=skip"
-            date symbol (error_text error) with _ -> ()) in
           if not !posted then raise error
-          else if side = `Sell && !sell_failure = None then
-            sell_failure := Some error in
+          else
+            let () = (try log "date=%s symbol=%s error=%s order=skip"
+              date symbol (error_text error) with _ -> ()) in
+            if side = `Sell && !sell_failure = None then
+              sell_failure := Some error in
     let sells, buys = List.partition (fun (_, side, _, _) -> side = `Sell) pending in
     let has_sell = sells <> [] || List.exists
       (fun (_, (o : Alpaca.order_t)) -> o.side = "sell") !placed in
@@ -981,22 +982,24 @@ let execute_decision ?(existing = []) ?(sleep = Unix.sleepf) ?finish
               else if !open_sell = None then open_sell := Some symbol in
             symbol, current) !placed in
         match !stop, !open_sell with
-        | Some reason, _ -> failwith reason
+        | Some reason, _ -> let () = stopped := true in failwith reason
         | None, None -> ()
         | None, Some symbol ->
             let c = clock mode in
             if not c.is_open || next_actions ~now:c.timestamp ~next_close <> `Decide then
+              let () = stopped := true in
               failwith ("sell " ^ symbol ^ " open at cutoff")
             else let () = sleep 15. in wait_sells () in
       let () = wait_sells () in
       List.iter submit_checked buys in
   match execute () with
   | () -> (try finish_all () with _ -> ())
-  | exception error when !posted ->
+  | exception error when !posted || !stopped ->
       let () = (try log "date=%s error=%s order=skip" date (error_text error) with _ -> ()) in
       (try finish_all () with _ -> ())
   | exception Failure message when message = "submit cutoff passed" ->
-      log "date=%s error=submit cutoff passed order=skip" date
+      let () = (try log "date=%s error=submit cutoff passed order=skip" date with _ -> ()) in
+      (try finish_all () with _ -> ())
   | exception error -> raise error
 
 let retry_clock ~clock ~sleep ~dispatch =

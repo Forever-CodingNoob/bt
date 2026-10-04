@@ -8528,8 +8528,10 @@ let test_us_pair_execution () =
   assert (events = ["post:SPY"; "finish:SPY"]);
   let existing = ["SPY", us_fixture_order "SPY" "sell" "accepted"] in
   let events, output = run "accepted" true existing decision in
-  (* A restarted sell counts as a sell and blocks the remaining buy at cutoff. *)
+  (* A restarted sell blocks the buy at cutoff. This deterministic barrier
+     stop ends the day and finishes the sell even without a new POST. *)
   assert (not (List.mem "post:SPY" events || List.mem "post:QQQ" events));
+  assert (events = ["poll:accepted"; "finish:SPY"]);
   assert (contains output "sell SPY open at cutoff");
   let events, _ = run "filled" false existing decision in
   assert (not (List.mem "post:SPY" events));
@@ -8553,6 +8555,146 @@ let test_us_pair_execution () =
     (* Both known orders need reconciliation. A SPY lookup failure, and
        a failure logging it on broken stdout, must leave QQQ reachable. *)
     assert (finished = ["SPY"; "QQQ"])) [false; true]
+
+let test_us_restart_failure_before_post_retries () =
+  let date = "2025-06-24" and close = "2025-06-24T16:00:00-04:00" in
+  let decision = us_pair_decision
+    [|Live.Order { side = `Sell; qty = 1.; id = "bt-SPY-2025-06-24" };
+      Live.Order { side = `Buy; qty = 1.; id = "bt-QQQ-2025-06-24" }|] in
+  let sell = us_fixture_order "SPY" "sell" "filled" in
+  List.iter (fun (known, fail_lookup) ->
+    let posted = ref [] and finished = ref [] and propagated = ref false in
+    let transient = Failure "restart preflight unavailable" in
+    let output = capture_stdout (fun () ->
+      match Live.execute_decision
+        ~existing:(if known then ["SPY", sell] else [])
+        ~order_by_client_id:(fun _ id ->
+          if id = "bt-SPY-2025-06-24" then Some sell
+          else if fail_lookup then raise transient else None)
+        ~clock:(fun _ -> raise transient)
+        ~submit_market:(fun _ ~symbol ~qty:_ ~side:_ ~client_order_id:_ ->
+          let () = posted := symbol :: !posted in
+          us_fixture_order symbol "buy" "filled")
+        ~finish:(fun _ _ symbol _ -> finished := symbol :: !finished)
+        Live.Paper date close decision with
+      | () -> ()
+      | exception error -> propagated := error == transient) in
+    (* An existing sell, supplied or found by dedupe, is not a new POST.
+       Clock/lookup failure must escape to us_step's retry without finishing. *)
+    assert (!propagated);
+    assert (!posted = [] && !finished = []);
+    assert (not (contains output "order=skip")))
+    [true, false; false, false; true, true; false, true]
+
+let test_us_restart_buy_post_failure_finishes () =
+  let date = "2025-06-24" in
+  let clock : Alpaca.clock_t =
+    { timestamp = date ^ "T15:45:00-04:00"; is_open = true;
+      next_open = "2025-06-25T09:30:00-04:00";
+      next_close = date ^ "T16:00:00-04:00" } in
+  let decision = us_pair_decision
+    [|Live.Order { side = `Sell; qty = 1.; id = "bt-SPY-2025-06-24" };
+      Live.Order { side = `Buy; qty = 1.; id = "bt-QQQ-2025-06-24" }|] in
+  let sell = us_fixture_order "SPY" "sell" "filled" in
+  let events = ref [] in
+  let record event = events := event :: !events in
+  let lookup id = if id = "bt-SPY-2025-06-24" then Some sell else None in
+  let output = capture_stdout (fun () ->
+    Live.us_step ~symbols:[|"SPY"; "QQQ"|] ~lookup
+      ~decide:(fun _ -> decision)
+      ~execute:(fun existing c d ->
+        Live.execute_decision ~existing
+          ~order_by_client_id:(fun _ id ->
+            let () = if id = "bt-SPY-2025-06-24" then record "sell barrier" in
+            lookup id)
+          ~clock:(fun _ -> let () = record "preflight" in c)
+          ~submit_market:(fun _ ~symbol ~qty:_ ~side:_ ~client_order_id:_ ->
+            let () = record ("post:" ^ symbol) in
+            failwith "buy POST response unavailable")
+          ~finish:(fun _ _ symbol _ -> record ("finish:" ^ symbol))
+          Live.Paper date c.next_close d)
+      ~finish:(fun _ _ _ _ -> assert false)
+      ~sleep_until:(fun timestamp -> record ("sleep:" ^ timestamp))
+      ~retry:(fun () -> record "retry")
+      ~continue:(fun () -> record "continue") clock) in
+  (* The sell barrier and clock pass before the only buy POST. Its uncertain
+     result ends the day, but the existing sell still gets a finish pass. *)
+  assert (List.rev !events = ["sell barrier"; "preflight"; "post:QQQ";
+    "finish:SPY"; "sleep:2025-06-25T09:30:00-04:00"; "continue"]);
+  assert (contains output "order submission uncertain");
+  assert (contains output "order=skip");
+  assert (not (contains output "order=retry"))
+
+let test_us_restart_cutoff_finishes_existing () =
+  let date = "2025-06-24" and close = "2025-06-24T16:00:00-04:00" in
+  let sell = us_fixture_order "SPY" "sell" "filled" in
+  List.iter (fun (known, side, broken_log) ->
+    let decision = us_pair_decision
+      [|Live.Order { side = `Sell; qty = 1.; id = "bt-SPY-2025-06-24" };
+        Live.Order { side; qty = 1.; id = "bt-QQQ-2025-06-24" }|] in
+    let posted = ref [] and finished = ref [] in
+    let output = capture_stdout (fun () ->
+      let saved = Unix.dup Unix.stdout in
+      let read_only = Unix.openfile "/dev/null" [Unix.O_RDONLY] 0 in
+      Fun.protect ~finally:(fun () ->
+        Unix.dup2 saved Unix.stdout;
+        flush stdout;
+        Unix.close saved;
+        Unix.close read_only) (fun () ->
+        Live.execute_decision
+          ~existing:(if known then ["SPY", sell] else [])
+          ~order_by_client_id:(fun _ id ->
+            if id = "bt-SPY-2025-06-24" then Some sell else None)
+          ~clock:(fun _ ->
+            let () = if broken_log then Unix.dup2 read_only Unix.stdout in
+            { Alpaca.timestamp = date ^ "T15:58:00-04:00"; is_open = true;
+              next_open = "2025-06-25T09:30:00-04:00"; next_close = close })
+          ~submit_market:(fun _ ~symbol ~qty:_ ~side:_ ~client_order_id:_ ->
+            let () = posted := symbol :: !posted in
+            us_fixture_order symbol "buy" "filled")
+          ~finish:(fun _ _ symbol order -> finished := (symbol, order) :: !finished)
+          Live.Paper date close decision)) in
+    (* At the two-minute cutoff no new order is safe. The supplied or
+       dedupe-found sell still finishes, whether cutoff is checked before
+       a pending sell or immediately before a pending buy's POST. A broken
+       stdout must not prevent this finish pass. *)
+    assert (!posted = []);
+    assert (!finished = ["SPY", sell]);
+    if not broken_log then
+      assert (contains output "date=2025-06-24 error=submit cutoff passed order=skip"))
+    [true, `Buy, false; false, `Buy, false; true, `Sell, false; false, `Sell, false;
+     true, `Buy, true; false, `Buy, true; true, `Sell, true; false, `Sell, true]
+
+let test_us_restart_terminal_sell_stops () =
+  let date = "2025-06-24" and close = "2025-06-24T16:00:00-04:00" in
+  let decision = us_pair_decision
+    [|Live.Order { side = `Sell; qty = 1.; id = "bt-SPY-2025-06-24" };
+      Live.Order { side = `Buy; qty = 1.; id = "bt-QQQ-2025-06-24" }|] in
+  List.iter (fun status ->
+    let sell = us_fixture_order "SPY" "sell" status in
+    List.iter (fun known ->
+      let posted = ref [] and finished = ref [] in
+      let output = capture_stdout (fun () ->
+        Live.execute_decision
+          ~existing:(if known then ["SPY", sell] else [])
+          ~order_by_client_id:(fun _ id ->
+            if id = "bt-SPY-2025-06-24" then Some sell else None)
+          ~clock:(fun _ -> assert false)
+          ~submit_market:(fun _ ~symbol ~qty:_ ~side:_ ~client_order_id:_ ->
+            let () = posted := symbol :: !posted in
+            us_fixture_order symbol "buy" "filled")
+          ~finish:(fun _ _ symbol order -> finished := (symbol, order) :: !finished)
+          Live.Paper date close decision) in
+      (* A terminal unfilled sell cannot recover on retry. Stop without a
+         new POST, log exactly one skip naming it, and finish the known sell. *)
+      assert (!posted = []);
+      assert (!finished = ["SPY", sell]);
+      let skips = String.split_on_char '\n' output
+        |> List.filter (fun line -> contains line "order=skip") in
+      assert (List.length skips = 1);
+      assert (contains (List.hd skips) ("error=sell SPY " ^ status ^ " order=skip")))
+      [true; false])
+    ["rejected"; "canceled"; "expired"; "stopped"]
 
 let us_phase_failure first_side first_status with_buy =
   let date = "2025-06-24" and close = "2025-06-24T16:00:00-04:00" in
@@ -8734,6 +8876,10 @@ let () =
   test_us_decision_logs_after_preflight ();
   let () = test_us_buy_failure_keeps_siblings () in
   let () = test_us_sell_failure_keeps_siblings () in
+  let () = test_us_restart_failure_before_post_retries () in
+  let () = test_us_restart_buy_post_failure_finishes () in
+  let () = test_us_restart_cutoff_finishes_existing () in
+  let () = test_us_restart_terminal_sell_stops () in
   test_us_step_routing ();
   test_live_retry_clock ();
   test_live_daemon_lock ();
