@@ -30,6 +30,7 @@ type snapshot_t = {
 type order_t = {
   id : string;
   status : string;
+  side : string;
   filled_avg_price : float option;
   filled_qty : float;
 }
@@ -128,6 +129,12 @@ let parse_position_qty ~http_code raw =
   | 404 -> 0.
   | code -> failf "Alpaca position request failed with HTTP %d" code
 
+let parse_positions raw =
+  match jq_fields "positions"
+    "if type == \"array\" and all(.[]; (.symbol | type) == \"string\" and (.symbol | test(\"^[A-Za-z0-9.-]+\\\\z\"))) then map(.symbol) | @tsv else error(\"expected position symbols\") end" raw with
+  | [""] -> []
+  | symbols -> symbols
+
 let parse_snapshot raw =
   match
     jq_fields "snapshot"
@@ -147,12 +154,13 @@ let parse_snapshot raw =
 let parse_order raw =
   match
     jq_fields "order"
-      "[.id, .status, (.filled_avg_price // \"\"), .filled_qty] | @tsv"
+      "[.id, .status, (if .side == \"buy\" or .side == \"sell\" then .side else error(\"invalid side\") end), (.filled_avg_price // \"\"), .filled_qty] | @tsv"
       raw
   with
-  | [id; status; filled_avg_price; filled_qty] ->
+  | [id; status; side; filled_avg_price; filled_qty] ->
       { id;
         status;
+        side;
         filled_avg_price =
           (match filled_avg_price with
            | "" -> None
@@ -232,6 +240,9 @@ let clock mode =
 
 let account mode =
   request mode ~path:"/v2/account" |> expect_ok "account" parse_account
+
+let positions mode =
+  request mode ~path:"/v2/positions" |> expect_ok "positions" parse_positions
 
 let position_qty mode symbol =
   let raw, http_code =

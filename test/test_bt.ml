@@ -4580,24 +4580,41 @@ let test_alpaca_position_parse () =
   (* Alpaca uses HTTP 404 to represent no open position. *)
   assert (Alpaca.parse_position_qty ~http_code:404 "" = 0.)
 
+let test_alpaca_positions_parse () =
+  (* Synthetic documented-field projection, not an account probe: the two
+     rows name TQQQ and QQQ; quantities remain per-symbol reads. *)
+  assert (Alpaca.parse_positions (alpaca_fixture "positions.json") = ["TQQQ"; "QQQ"]);
+  assert (Alpaca.parse_positions "[]" = []);
+  assert_failure (fun () -> ignore (Alpaca.parse_positions "{}"));
+  assert_failure (fun () -> ignore (Alpaca.parse_positions "[{\"qty\":\"1\"}]"));
+  (* Symbols must survive the TSV boundary unchanged; whitespace and tabs
+     cannot represent broker symbol identifiers. *)
+  assert_failure (fun () -> ignore (Alpaca.parse_positions {|[{"symbol":" "}]|}));
+  assert_failure (fun () -> ignore (Alpaca.parse_positions {|[{"symbol":"TQ\tQQ"}]|}));
+  (* A final newline is outside the identifier, even though regex $ can
+     match immediately before it. *)
+  assert_failure (fun () -> ignore (Alpaca.parse_positions {|[{"symbol":"TQQQ\n"}]|}))
+
 let test_alpaca_order_parse () =
   let actual = Alpaca.parse_order (alpaca_fixture "order.json") in
   (* The unfilled example reports string quantity "0" and null fill price. *)
   let expected : Alpaca.order_t =
     { id = "7b08df51-c1ac-453c-99f9-323a5f075f0d";
       status = "accepted";
+      side = "buy";
       filled_avg_price = None;
       filled_qty = 0. }
   in
   let () = assert (actual = expected) in
   let filled =
     Alpaca.parse_order
-      {|{"id":"filled-id","status":"filled","filled_avg_price":"172.55","filled_qty":"2"}|}
+      {|{"id":"filled-id","status":"filled","side":"sell","filled_avg_price":"172.55","filled_qty":"2"}|}
   in
   (* Decimal fill strings "172.55" and "2" parse to the reported fill values. *)
   let filled_expected : Alpaca.order_t =
     { id = "filled-id";
       status = "filled";
+      side = "sell";
       filled_avg_price = Some 172.55;
       filled_qty = 2. }
   in
@@ -5133,6 +5150,7 @@ let test_us_live_submit_cutoff () =
       ~submit_market:(fun _ ~symbol ~qty ~side:_ ~client_order_id ->
         let () = Queue.add (symbol, qty, client_order_id) posted in
         { Alpaca.id = "order-id"; status = "filled";
+          side = "buy";
           filled_avg_price = Some 300.; filled_qty = qty })
       Live.Paper "SPY" close decision
   in
@@ -5203,6 +5221,7 @@ let test_us_rejected_submission_stops () =
       ~submit_market:(fun _ ~symbol:_ ~qty:_ ~side:_ ~client_order_id:_ ->
         incr submissions;
         { Alpaca.id = "rejected-id"; status = "rejected";
+          side = "buy";
           filled_avg_price = None; filled_qty = 0. })
       Live.Paper "SPY" close decision
   in
@@ -5246,6 +5265,7 @@ let test_us_rejected_log_failure_stops () =
             Unix.dup2 read_only Unix.stdout;
             broken := true;
             { Alpaca.id = "rejected-id"; status = "rejected";
+              side = "buy";
               filled_avg_price = None; filled_qty = 0. })
           Live.Paper "SPY" close decision)
   in
@@ -5310,6 +5330,7 @@ let test_us_step_routing () =
   in
   let existing : Alpaca.order_t =
     { id = "existing"; status = "filled";
+      side = "buy";
       filled_avg_price = Some 300.; filled_qty = 1. }
   in
   let run timestamp ~lookup ~decide ~execute ~finish =
@@ -6394,7 +6415,9 @@ let test_shioaji_request_headers () =
      = plain)
 
 let test_shioaji_snapshot_parse () =
-  let actual = Shioaji.parse_snapshot (shioaji_fixture "snapshot.json") in
+  let actual =
+    (Shioaji.parse_snapshot ~codes:[|"2330"|] (shioaji_fixture "snapshot.json")).(0)
+  in
   (* Expected values are copied from the documented 2330 snapshot row. *)
   let expected : Shioaji.snapshot =
     { datetime = "2026-05-18T14:30:00";
@@ -6407,6 +6430,21 @@ let test_shioaji_snapshot_parse () =
       total_volume = 25820. }
   in
   assert (actual = expected)
+
+let test_shioaji_snapshot_codes () =
+  let row code close = Printf.sprintf
+    "{\"code\":\"%s\",\"datetime\":\"2026-05-26T13:20:00\",\"open\":10,\"high\":20,\"low\":5,\"close\":%g,\"buy_price\":10,\"sell_price\":11,\"total_volume\":100}" code close in
+  let raw = "[" ^ row "2890" 12. ^ "," ^ row "2330" 10. ^ "]" in
+  let snapshots = Shioaji.parse_snapshot ~codes:[|"2330"; "2890"|] raw in
+  (* Declaration order is 2330 then 2890, although the response reverses it. *)
+  assert (Array.map (fun (s : Shioaji.snapshot) -> s.close) snapshots = [|10.; 12.|]);
+  List.iter (fun raw ->
+    match Shioaji.parse_snapshot ~codes:[|"2330"; "2890"|] raw with
+    | _ -> assert false
+    | exception Failure message -> assert (message = "invalid Shioaji snapshot response"))
+    ["[" ^ row "2330" 10. ^ "]";
+     "[" ^ row "2330" 10. ^ "," ^ row "2330" 10. ^ "]";
+     "[" ^ row "2330" 10. ^ "," ^ row "9999" 10. ^ "]"]
 
 let test_shioaji_positions_parse () =
   let actual = Shioaji.parse_positions (shioaji_fixture "positions.json") in
@@ -6477,16 +6515,16 @@ let test_shioaji_parser_rejections () =
     assert_failure (fun () ->
       ignore (Shioaji.parse_info {|{"simulation":"maybe","version":"1"}|}))
   in
-  (* An empty array violates the exactly-one-snapshot response shape. *)
+  (* An empty array is missing the requested 2330 snapshot. *)
   let () =
-    assert_failure (fun () -> ignore (Shioaji.parse_snapshot {|[]|}))
+    assert_failure (fun () -> ignore (Shioaji.parse_snapshot ~codes:[|"2330"|] {|[]|}))
   in
   (* Snapshot prices are nonnegative; open = -1 violates that field contract. *)
   let () =
     assert_failure (fun () ->
       ignore
-        (Shioaji.parse_snapshot
-           {|[{"datetime":"2026-05-18T13:20:00","open":-1,"high":1,"low":1,"close":1,"buy_price":1,"sell_price":1,"total_volume":1}]|}))
+        (Shioaji.parse_snapshot ~codes:[|"2330"|]
+           {|[{"code":"2330","datetime":"2026-05-18T13:20:00","open":-1,"high":1,"low":1,"close":1,"buy_price":1,"sell_price":1,"total_volume":1}]|}))
   in
   (* A positions response must be an array, not an object. *)
   let () =
@@ -7367,7 +7405,9 @@ let test_tw_live_decide_override () =
              :: _) -> ()
         | _ -> assert false
       in
-      let fixture = Shioaji.parse_snapshot (shioaji_fixture "snapshot.json") in
+      let fixture =
+        (Shioaji.parse_snapshot ~codes:[|"2330"|] (shioaji_fixture "snapshot.json")).(0)
+      in
       let fixture_decision =
         Live.decide ~previous_session:"2026-05-15" ~equity:20000000.
           ~tw_positions:positions ~tw_snapshot:fixture Live.Paper
@@ -8141,6 +8181,7 @@ let () =
   test_alpaca_clock_parse ();
   test_alpaca_account_parse ();
   test_alpaca_position_parse ();
+  test_alpaca_positions_parse ();
   test_alpaca_order_parse ();
   test_alpaca_snapshot_parse ();
   test_engine_effective_targets ();
@@ -8314,6 +8355,7 @@ let () =
   let () = test_shioaji_info_parse () in
   let () = test_shioaji_request_headers () in
   let () = test_shioaji_snapshot_parse () in
+  let () = test_shioaji_snapshot_codes () in
   let () = test_shioaji_positions_parse () in
   let () = test_tw_live_positions_share () in
   let () = test_shioaji_position_details_parse () in

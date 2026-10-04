@@ -706,7 +706,7 @@ let decide ?provisional_close ?previous_session ?equity ?tw_balance
         | None, Some snapshot -> snapshot
         | None, None ->
             let exchange = exchange_of_symbol ~data_dir symbol in
-            Shioaji.snapshot ~exchange ~code:symbol
+            (Shioaji.snapshot ~contracts:[|exchange, symbol|]).(0)
       in
       let () =
         if fetch_required then
@@ -1106,7 +1106,7 @@ let sleep_taipei ~days ~hour ~minute =
   if delay > 0. then Unix.sleepf delay
 
 let prepare_tw ~exchange ~symbol ~date ~data_dir =
-  let snapshot = Shioaji.snapshot ~exchange ~code:symbol in
+  let snapshot = (Shioaji.snapshot ~contracts:[|exchange, symbol|]).(0) in
   let snapshot_date = tw_snapshot_date snapshot in
   let () =
     if snapshot_date <> date then
@@ -1697,7 +1697,7 @@ let run_tw mode ~equity ~symbol ~strat_path ~data_dir ~rebalance_choice =
                     cycle prepared (Some date)
                 | [] ->
                     let snapshot =
-                      Shioaji.snapshot ~exchange ~code:symbol
+                      (Shioaji.snapshot ~contracts:[|exchange, symbol|]).(0)
                     in
                     let positions = Shioaji.positions () in
                     let position_details =

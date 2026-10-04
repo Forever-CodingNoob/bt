@@ -84,8 +84,9 @@ val request_headers :
 (** Parse a Shioaji server information response. *)
 val parse_info : string -> info
 
-(** Parse a one-element stock snapshot response. *)
-val parse_snapshot : string -> snapshot
+(** Parse stock snapshots in requested-code order, rejecting missing, extra,
+    or duplicate codes. *)
+val parse_snapshot : codes:string array -> string -> snapshot array
 
 (** Parse stock positions whose requested unit is [Share]. *)
 val parse_positions : string -> position list
@@ -108,8 +109,8 @@ val parse_orders_today : code:string -> today:string -> string -> trade list
 (** Fetch server simulation-mode information. *)
 val info : unit -> info
 
-(** Fetch one stock snapshot. *)
-val snapshot : exchange:string -> code:string -> snapshot
+(** Fetch all requested stock contracts in one request, in request order. *)
+val snapshot : contracts:(string * string) array -> snapshot array
 
 (** Fetch share-unit stock positions from the default account. *)
 val positions : unit -> position list

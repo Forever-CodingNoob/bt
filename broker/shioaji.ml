@@ -193,23 +193,34 @@ let parse_info raw =
       { simulation = bool_field "info simulation" simulation }
   | _ -> failwith "invalid Shioaji info response"
 
-let parse_snapshot raw =
-  match
-    jq_fields "snapshot"
-      "if length == 1 then [.[0].datetime, (.[0].open | tostring), (.[0].high | tostring), (.[0].low | tostring), (.[0].close | tostring), (.[0].buy_price | tostring), (.[0].sell_price | tostring), (.[0].total_volume | tostring)] | @tsv else error(\"expected one snapshot\") end"
-      raw
-  with
-  | [datetime; open_; high; low; close; bid; ask; total_volume] ->
-      { datetime;
-        open_ = nonnegative_float_field "snapshot open" open_;
-        high = nonnegative_float_field "snapshot high" high;
-        low = nonnegative_float_field "snapshot low" low;
-        close = nonnegative_float_field "snapshot close" close;
-        bid = nonnegative_float_field "snapshot buy_price" bid;
-        ask = nonnegative_float_field "snapshot sell_price" ask;
-        total_volume =
-          nonnegative_float_field "snapshot total_volume" total_volume }
-  | _ -> failwith "invalid Shioaji snapshot response"
+let parse_snapshot ~codes raw =
+  let rows = jq_rows "snapshot"
+    "if type == \"array\" then map([.code, .datetime, (.open | tostring), (.high | tostring), (.low | tostring), (.close | tostring), (.buy_price | tostring), (.sell_price | tostring), (.total_volume | tostring)] | @tsv) | join(\"\\n\") else error(\"expected snapshots\") end" raw in
+  let invalid () = failwith "invalid Shioaji snapshot response" in
+  let requested = Hashtbl.create (Array.length codes) in
+  let () = Array.iter (fun code ->
+    let () = if Hashtbl.mem requested code then invalid () in
+    Hashtbl.add requested code ()) codes in
+  let found = Hashtbl.create (Array.length codes) in
+  let () = List.iter (function
+    | [code; datetime; open_; high; low; close; bid; ask; total_volume] ->
+        let () = if not (Hashtbl.mem requested code) || Hashtbl.mem found code
+          then invalid () in
+        let snapshot =
+          { datetime;
+            open_ = nonnegative_float_field "snapshot open" open_;
+            high = nonnegative_float_field "snapshot high" high;
+            low = nonnegative_float_field "snapshot low" low;
+            close = nonnegative_float_field "snapshot close" close;
+            bid = nonnegative_float_field "snapshot buy_price" bid;
+            ask = nonnegative_float_field "snapshot sell_price" ask;
+            total_volume = nonnegative_float_field "snapshot total_volume" total_volume }
+        in
+        Hashtbl.add found code snapshot
+    | _ -> invalid ()) rows in
+  Array.map (fun code -> match Hashtbl.find_opt found code with
+    | Some snapshot -> snapshot
+    | None -> invalid ()) codes
 
 let parse_position = function
   | [id; code; cond; shares; yd_shares; avg_price; last_price; loan_amount;
@@ -387,14 +398,15 @@ let expect_ok label parse (raw, http_code) =
 let info () =
   request ~auth:false ~path:"/api/v1/info" () |> expect_ok "info" parse_info
 
-let snapshot ~exchange ~code =
-  let body =
-    jq_object "snapshot"
-      ["--arg"; "exchange"; exchange; "--arg"; "code"; code]
-      "{contracts:[{security_type:\"STK\",exchange:$exchange,code:$code}]}"
-  in
+let snapshot ~contracts =
+  let contracts_text = Array.to_list contracts
+    |> List.map (fun (exchange, code) -> exchange ^ "\t" ^ code)
+    |> String.concat "\n" in
+  let body = jq_object "snapshot" ["--arg"; "contracts"; contracts_text]
+    "{contracts:($contracts | split(\"\\n\") | map(split(\"\\t\") | {security_type:\"STK\",exchange:.[0],code:.[1]}))}" in
+  let codes = Array.map snd contracts in
   request ~method_:"POST" ~body ~path:"/api/v1/data/snapshots" ()
-  |> expect_ok "snapshot" parse_snapshot
+  |> expect_ok "snapshot" (parse_snapshot ~codes)
 
 let positions () =
   let body = {|{"account_type":"S","unit":"Share"}|} in

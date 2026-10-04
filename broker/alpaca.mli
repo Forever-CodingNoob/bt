@@ -35,6 +35,7 @@ type snapshot_t = {
 type order_t = {
   id : string;
   status : string;
+  side : string;
   filled_avg_price : float option;
   filled_qty : float;
 }
@@ -51,6 +52,9 @@ val parse_account : string -> account_t
 (** Parse a position response, mapping HTTP 404 to zero quantity. *)
 val parse_position_qty : http_code:int -> string -> float
 
+(** Parse open position symbols, retaining response order. *)
+val parse_positions : string -> string list
+
 (** Parse a stock snapshot response. *)
 val parse_snapshot : string -> snapshot_t
 
@@ -62,6 +66,9 @@ val clock : mode -> clock_t
 
 (** Fetch the selected Alpaca account. *)
 val account : mode -> account_t
+
+(** Fetch all open position symbols from the selected account. *)
+val positions : mode -> string list
 
 (** Fetch the open position quantity for one symbol. *)
 val position_qty : mode -> string -> float
