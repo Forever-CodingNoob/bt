@@ -7024,6 +7024,90 @@ let scripted_placements entries =
         let () = assert (request.quantity = expected.quantity) in
         { Shioaji.order_id = order_id; status = "PendingSubmit" }
 
+let with_tw_decision_cache function_ =
+  with_temp_market "tw" (fun data_dir tw_dir ->
+    let write path contents =
+      let output = open_out path in
+      Fun.protect ~finally:(fun () -> close_out output)
+        (fun () -> output_string output contents)
+    in
+    let () =
+      write (Filename.concat tw_dir "stockinfo.csv")
+        "stock_id,type,date\n2330,twse,2026-01-01\n2890,tpex,2026-01-01\n"
+    in
+    let () =
+      List.iter (fun code ->
+        let directory = Filename.concat tw_dir code in
+        let () = Unix.mkdir directory 0o700 in
+        let path suffix = Filename.concat directory (code ^ suffix) in
+        let () = write (path ".csv")
+          "date,open,high,low,close,volume\n\
+           2026-05-14,1870,1880,1860,1870,900\n\
+           2026-05-15,1880,1890,1870,1880,900\n\
+           2026-05-21,1950,1960,1940,1950,1100\n\
+           2026-05-22,1980,1990,1970,1980,1200\n" in
+        let () = write (path ".div.csv") "date,factor\n" in
+        let () = write (path ".events.csv") "date,factor\n" in
+        write (path ".cashdiv.csv") "ex_date,cash_per_share,pay_date\n")
+        ["2330"; "2890"]
+    in
+    function_ data_dir)
+
+let test_multi_stock_one_stock_pins () =
+  with_tw_decision_cache (fun data_dir ->
+    let position : Shioaji.position =
+      { id = 0; code = "2330"; cond = "Cash"; shares = 10000;
+        last_price = 200.; loan_amount = 0.; interest = 0. }
+    in
+    let choose policy target details =
+      with_temp_strategy
+        (Printf.sprintf "stock \"tw/2330\"\nrebalance %s\ntarget %.10g\n"
+          policy target)
+        (fun strat_path ->
+          Live.decide ~provisional_close:200.
+            ~previous_session:"2026-05-22" ~equity:3000000.
+            ~tw_positions:[position] ~tw_position_details:details
+            Live.Paper ~session_date:"2026-05-26" ~strat_path ~data_dir)
+    in
+    let constant = choose "on_change" 0.5 [] in
+    (* Both rows target 0.5; the 10000-share drift stays, with no legs. *)
+    let () = assert (constant.target = 0.5 && constant.held = 10000.) in
+    let () = assert (constant.action = Live.Orders []) in
+    let drift = choose "daily" 0.8 [] in
+    (* E1 = 3000000 - 200*q*0.001425; floor(0.8*E1/200)-10000
+       is 1997: one Common lot and 997 odd shares, in that order. *)
+    let () = assert (drift.target = 0.8 && drift.held = 10000.) in
+    let () = assert (drift.action = Live.Orders
+      [{ Live.action = "Buy"; cond = "Cash"; lot = Shioaji.Common; quantity = 1 };
+       { Live.action = "Buy"; cond = "Cash"; lot = Shioaji.IntradayOdd; quantity = 997 }]) in
+    let levered = choose "on_change" 1.5 [] in
+    (* 1.5*(1-0.6) = 0.6 < 1, so normalization leaves 1.5 unchanged;
+       equal previous target preserves the same drift and emits no legs. *)
+    let () = assert (levered.target = 1.5 && levered.held = 10000.) in
+    let () = assert (levered.action = Live.Orders []) in
+    let matured =
+      with_temp_strategy "stock \"tw/2330\"\nrebalance on_change\ntarget 1.5\n"
+        (fun strat_path ->
+          Live.decide ~provisional_close:200.
+            ~previous_session:"2026-05-22" ~equity:3000000.
+            ~tw_positions:[{ position with cond = "MarginTrading";
+              shares = 3000; loan_amount = 360000. }]
+            ~tw_position_details:
+              [{ Shioaji.code = "2330"; cond = "MarginTrading";
+                 date = "2024-11-26"; lots = 2 };
+               { Shioaji.code = "2330"; cond = "MarginTrading";
+                 date = "2024-05-31"; lots = 1 }]
+            Live.Paper ~session_date:"2026-05-26" ~strat_path ~data_dir)
+    in
+    (* 18 months gives 2026-05-26 and clamped 2025-11-30; both mature.
+       Ordinary target is unchanged, so these four legs are the entire list. *)
+    let () = assert (matured.target = 1.5 && matured.held = 3000.) in
+    assert (matured.action = Live.Orders
+      [{ Live.action = "Sell"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 2 };
+       { Live.action = "Buy"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 2 };
+       { Live.action = "Sell"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 1 };
+       { Live.action = "Buy"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 1 }]))
+
 let test_tw_live_decide_override () =
   with_temp_market "tw" (fun data_dir tw_dir ->
     let symbol_dir = Filename.concat tw_dir "2330" in
@@ -8236,6 +8320,7 @@ let () =
   let () = test_tw_live_startup_guard () in
   let () = test_tw_maturity_rollover_legs () in
   let () = test_tw_position_detail_share_consistency () in
+  let () = test_multi_stock_one_stock_pins () in
   let () = test_tw_live_decide_override () in
   let () = test_tw_execution_stops_on_predecessor () in
   let () = test_tw_execution_times_out () in
