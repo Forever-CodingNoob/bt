@@ -3,6 +3,8 @@ type mode = Alpaca.mode = Paper | Live
 
 (** One TW stock order, with quantity in lots or shares according to [lot]. *)
 type leg = {
+  code : string;
+  exchange : string;
   action : string;
   cond : string;
   lot : Shioaji.lot;
@@ -92,15 +94,28 @@ val tw_production_cash :
 (** Value cash and share-unit positions net of loans and interest. *)
 val equity_of : cash:float -> positions:Shioaji.position list -> float
 
-(** Convert a one-asset absolute-TWD plan to Common and cash IntradayOdd
-    orders, preserving refinance sell-and-rebuy pairs. *)
-val legs_of_plan : price:float -> Engine.fill_plan -> leg list
+(** Convert an N-asset absolute-TWD plan to code-tagged Common and cash
+    IntradayOdd orders in sell, refinance-pair, then buy groups.
+    Assets follow declaration order within each group, lots before odd shares.
+    Raise [Failure] if any input array length differs from the planned assets. *)
+val legs_of_plan :
+  codes:string array -> exchanges:string array -> prices:float array ->
+  Engine.fill_plan -> leg list
+
+(** Validate the strategy's TW position set and aggregate per symbol at its
+    provisional price: cash shares, margin shares, cash value, margin value,
+    loans, and interests. Foreign inactive rows are ignored.
+    Raise [Failure] for mismatched array lengths or repeated symbols. *)
+val position_totals :
+  symbols:string array -> prices:float array -> Shioaji.position list ->
+  (float * float * float * float * float * float) array
 
 (** Return 18-calendar-month TW margin-lot sell/rebuy rollover pairs in
     broker detail order. *)
 val maturity_rollover_legs :
   session_date:string ->
   symbol:string ->
+  exchange:string ->
   Shioaji.position_detail list ->
   leg list
 
@@ -116,7 +131,9 @@ val taipei_phase :
   [`Weekend | `Before_fetch | `Fetch | `Decide | `After_close]
 
 (** Submit TW legs in order. Common fills settle before the next leg;
-    intraday-odd ROD orders reserve buy cash without waiting for final fills. *)
+    intraday-odd ROD orders reserve buy cash without waiting for final fills.
+    Raise [Failure] before submission if any leg code or exchange differs
+    from the executor's one-code contract. *)
 val execute_tw_legs :
   mode:mode ->
   bid:float ->

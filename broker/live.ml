@@ -1,6 +1,8 @@
 type mode = Alpaca.mode = Paper | Live
 
 type leg = {
+  code : string;
+  exchange : string;
   action : string;
   cond : string;
   lot : Shioaji.lot;
@@ -283,40 +285,42 @@ let equity_of ~cash ~positions =
   else failwith "TW account equity is not finite"
 
 
-let legs_of_plan ~price (plan : Engine.fill_plan) =
+let legs_of_plan ~codes ~exchanges ~prices (plan : Engine.fill_plan) =
+  let count = Array.length plan.planned_assets in
   let () =
-    if not (Float.is_finite price) || price <= 0. then
-      failwith "TW planning price must be finite and positive"
-  in
-  let item =
-    match plan.planned_assets with
-    | [| item |] -> item
-    | _ -> failwith "live trading requires exactly one planned asset"
+    if Array.length codes <> count || Array.length exchanges <> count
+       || Array.length prices <> count then
+      failwith "TW leg inputs do not match planned assets"
   in
   (* Live.decide plans in absolute TWD, so its value/share capital is 1. *)
-  let leg ~odd action cond value =
-    let shares =
-      int_of_float (Engine.shares_of_value ~capital:1. ~price value)
-    in
-    let common =
-      if shares / 1000 > 0 then
-        [{ action; cond; lot = Shioaji.Common; quantity = shares / 1000 }]
-      else []
-    in
+  let leg i ~odd action cond value =
+    let price = prices.(i) in
+    let () = if not (Float.is_finite price) || price <= 0. then
+      failwith "TW planning price must be finite and positive" in
+    let shares = int_of_float (Engine.shares_of_value ~capital:1. ~price value) in
+    let make lot quantity =
+      { code = codes.(i); exchange = exchanges.(i); action; cond; lot; quantity } in
+    let common = if shares / 1000 > 0 then
+      [make Shioaji.Common (shares / 1000)] else [] in
     let remainder = shares mod 1000 in
-    if odd && remainder > 0 then
-      common @ [{ action; cond; lot = Shioaji.IntradayOdd;
-                  quantity = remainder }]
+    if odd && remainder > 0 then common @ [make Shioaji.IntradayOdd remainder]
     else common
   in
-  leg ~odd:false "Sell" "MarginTrading" item.plan_sell_margin
-  @ leg ~odd:true "Sell" "Cash" item.plan_sell_cash
-  @ leg ~odd:false "Sell" "Cash" item.plan_refinance_cash
-  @ leg ~odd:false "Buy" "MarginTrading" item.plan_refinance_cash
-  @ leg ~odd:false "Sell" "MarginTrading" item.plan_refinance_margin
-  @ leg ~odd:false "Buy" "MarginTrading" item.plan_refinance_margin
-  @ leg ~odd:true "Buy" "Cash" item.plan_buy_cash
-  @ leg ~odd:false "Buy" "MarginTrading" item.plan_buy_margin
+  let group function_ =
+    Array.to_list (Array.mapi function_ plan.planned_assets) |> List.concat in
+  group (fun i (a : Engine.planned_asset) ->
+    leg i ~odd:false "Sell" "MarginTrading" a.plan_sell_margin)
+  @ group (fun i (a : Engine.planned_asset) ->
+    leg i ~odd:true "Sell" "Cash" a.plan_sell_cash)
+  @ group (fun i (a : Engine.planned_asset) ->
+    leg i ~odd:false "Sell" "Cash" a.plan_refinance_cash
+    @ leg i ~odd:false "Buy" "MarginTrading" a.plan_refinance_cash
+    @ leg i ~odd:false "Sell" "MarginTrading" a.plan_refinance_margin
+    @ leg i ~odd:false "Buy" "MarginTrading" a.plan_refinance_margin)
+  @ group (fun i (a : Engine.planned_asset) ->
+    leg i ~odd:true "Buy" "Cash" a.plan_buy_cash)
+  @ group (fun i (a : Engine.planned_asset) ->
+    leg i ~odd:false "Buy" "MarginTrading" a.plan_buy_margin)
 
 let taipei_phase ~now =
   let local =
@@ -387,7 +391,7 @@ let validate_date label date =
   if not valid then failwith (Printf.sprintf "invalid %s date %S" label date)
 
 
-let maturity_rollover_legs ~session_date ~symbol details =
+let maturity_rollover_legs ~session_date ~symbol ~exchange details =
   let () = validate_date "session" session_date in
   (* TW lots mature at the first session on or after 18 clamped
      calendar months. *)
@@ -398,10 +402,10 @@ let maturity_rollover_legs ~session_date ~symbol details =
          && detail.lots > 0
          && session_date >= Engine.add_months_clamped detail.date 18
       then
-        [{ action = "Sell"; cond = "MarginTrading"; lot = Shioaji.Common;
-           quantity = detail.lots };
-         { action = "Buy"; cond = "MarginTrading"; lot = Shioaji.Common;
-           quantity = detail.lots }]
+        [{ code = symbol; exchange; action = "Sell"; cond = "MarginTrading";
+           lot = Shioaji.Common; quantity = detail.lots };
+         { code = symbol; exchange; action = "Buy"; cond = "MarginTrading";
+           lot = Shioaji.Common; quantity = detail.lots }]
       else [])
     details
 
@@ -508,52 +512,44 @@ let tw_provisional_bar (snapshot : Shioaji.snapshot) : Data.bar =
     v = snapshot.total_volume }
 
 
-let position_totals symbol price positions =
+let position_totals ~symbols ~prices positions =
   let () =
-    if not (Float.is_finite price) || price <= 0. then
-      failwith "TW planning price must be finite and positive"
+    if Array.length symbols <> Array.length prices then
+      failwith "TW position inputs do not match symbols"
   in
-  List.fold_left
-    (fun (cash_shares, margin_shares, loans, interests)
-         (position : Shioaji.position) ->
-      let active =
-        position.shares <> 0 || position.loan_amount <> 0.
-        || position.interest <> 0.
-      in
-      let () =
-        if position.shares < 0
-           || not (Float.is_finite position.loan_amount)
-           || position.loan_amount < 0.
-           || not (Float.is_finite position.interest)
-           || position.interest < 0.
-        then
-          failwith "TW position contains invalid account values"
-      in
-      if position.code <> symbol then
-        if active then
-          failwith
-            (Printf.sprintf "TW account holds unsupported symbol %s"
-               position.code)
-        else
-          cash_shares, margin_shares, loans, interests
-      else
-        match position.cond with
-        | "Cash" ->
-            cash_shares +. float_of_int position.shares,
-            margin_shares, loans, interests
-        | "MarginTrading" ->
-            cash_shares,
-            margin_shares +. float_of_int position.shares,
-            loans +. position.loan_amount,
-            interests +. position.interest
-        | cond when active ->
-            failwith
-              (Printf.sprintf "TW account holds unsupported inventory %s" cond)
-        | _ -> cash_shares, margin_shares, loans, interests)
-    (0., 0., 0., 0.) positions
-  |> fun (cash_shares, margin_shares, loans, interests) ->
-     cash_shares, margin_shares, cash_shares *. price,
-     margin_shares *. price, loans, interests
+  (* ponytail: quadratic duplicate scan avoids allocation for small portfolios;
+     use a symbol set if large portfolios make this material. *)
+  let () = Array.iteri (fun i symbol ->
+    let rec check j =
+      if j < i then
+        if symbols.(j) = symbol then
+          failwith ("live trading needs distinct symbols: " ^ symbol)
+        else check (j + 1)
+    in
+    check 0) symbols in
+  let () = Array.iter (fun price ->
+    if not (Float.is_finite price) || price <= 0. then
+      failwith "TW planning price must be finite and positive") prices in
+  let () = List.iter (fun (p : Shioaji.position) ->
+    let active = p.shares <> 0 || p.loan_amount <> 0. || p.interest <> 0. in
+    let () = if p.shares < 0 || not (Float.is_finite p.loan_amount)
+      || p.loan_amount < 0. || not (Float.is_finite p.interest) || p.interest < 0.
+      then failwith "TW position contains invalid account values" in
+    let () = if active && not (Array.exists (( = ) p.code) symbols) then
+      failwith ("TW account holds unsupported symbol " ^ p.code) in
+    if active && p.cond <> "Cash" && p.cond <> "MarginTrading" then
+      failwith ("TW account holds unsupported inventory " ^ p.cond)) positions in
+  Array.mapi (fun i symbol ->
+    let cs, ms, loans, interests = List.fold_left
+      (fun (cs, ms, loans, interests) (p : Shioaji.position) ->
+        if p.code <> symbol then cs, ms, loans, interests
+        else match p.cond with
+          | "Cash" -> cs +. float_of_int p.shares, ms, loans, interests
+          | "MarginTrading" -> cs, ms +. float_of_int p.shares,
+              loans +. p.loan_amount, interests +. p.interest
+          | _ -> cs, ms, loans, interests)
+      (0., 0., 0., 0.) positions in
+    cs, ms, cs *. prices.(i), ms *. prices.(i), loans, interests) symbols
 
 let fetch_position_details ?(position_details = Shioaji.position_details)
     symbol positions =
@@ -779,7 +775,7 @@ let decide ?provisional_close ?previous_session ?equity ?tw_balance
       in
       let cash_shares, margin_shares, cash_value, margin_value,
           loans, interests =
-        position_totals symbol provisional.c positions
+        (position_totals ~symbols:[|symbol|] ~prices:[|provisional.c|] positions).(0)
       in
       let held = cash_shares +. margin_shares in
       let cash, equity =
@@ -823,10 +819,12 @@ let decide ?provisional_close ?previous_session ?equity ?tw_balance
               previous_targets = [| previous_target |] }
           ~prices:[| provisional.c |] ~targets:[| target |] ~force:rebalance
       in
+      let exchange = exchange_of_symbol ~data_dir symbol in
       let action =
         Orders
-          (maturity_rollover_legs ~session_date ~symbol position_details
-           @ legs_of_plan ~price:provisional.c plan)
+          (maturity_rollover_legs ~session_date ~symbol ~exchange position_details
+           @ legs_of_plan ~codes:[|symbol|] ~exchanges:[|exchange|]
+               ~prices:[|provisional.c|] plan)
       in
       { fetched_through; provisional; target; equity; cash;
         debit = loans; held; action }
@@ -1184,6 +1182,11 @@ let tw_order_cost (costs : Engine.costs) ~action ~price ~shares =
 let execute_tw_legs ~mode ~bid ~ask ~now ~sleep ~place_order ~orders_today
     ~exchange ~code
     ~date ~price ~financing_ratio ~costs ~cash ~positions legs =
+  let () =
+    if List.exists (fun (leg : leg) ->
+      leg.code <> code || leg.exchange <> exchange) legs then
+      failwith "TW leg code does not match executor code"
+  in
   let () = validate_date "order" date in
   let () =
     if not (Float.is_finite price) || price <= 0. then
@@ -1200,7 +1203,7 @@ let execute_tw_legs ~mode ~bid ~ask ~now ~sleep ~place_order ~orders_today
       failwith "TW execution cash is not finite"
   in
   let cash_shares, margin_shares, _, _, loans, interests =
-    position_totals code price positions
+    (position_totals ~symbols:[|code|] ~prices:[|price|] positions).(0)
   in
   let cash_shares = int_of_float cash_shares in
   let margin_lots = int_of_float (margin_shares /. 1000.) in
@@ -1726,7 +1729,8 @@ let run_tw mode ~equity ~symbol ~strat_path ~data_dir ~rebalance_choice =
                     in
                     let cash_shares, margin_shares, cash_value, margin_value,
                         loans, interests =
-                      position_totals symbol decision.provisional.c positions
+                      (position_totals ~symbols:[|symbol|]
+                         ~prices:[|decision.provisional.c|] positions).(0)
                     in
                     let cash =
                       match mode, equity, production_cash with
