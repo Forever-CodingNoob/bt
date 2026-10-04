@@ -8554,6 +8554,53 @@ let test_us_pair_execution () =
        a failure logging it on broken stdout, must leave QQQ reachable. *)
     assert (finished = ["SPY"; "QQQ"])) [false; true]
 
+let us_phase_failure first_side first_status with_buy =
+  let date = "2025-06-24" and close = "2025-06-24T16:00:00-04:00" in
+  let action symbol side = Live.Order
+    { side; qty = 1.; id = Live.client_order_id ~symbol ~date } in
+  let pair = us_pair_decision
+    [|action "SPY" first_side; action "QQQ" first_side|] in
+  let decision = if with_buy then
+    { pair with Live.assets = Array.append pair.assets
+        [|{ pair.assets.(1) with symbol = "DIA"; action = action "DIA" `Buy }|] }
+    else pair in
+  let posted = ref [] and finished = ref [] in
+  let output = capture_stdout (fun () ->
+    Live.execute_decision
+      ~order_by_client_id:(fun _ _ -> None)
+      ~clock:(fun _ ->
+        { Alpaca.timestamp = date ^ "T15:45:00-04:00"; is_open = true;
+          next_open = "2025-06-25T09:30:00-04:00"; next_close = close })
+      ~submit_market:(fun _ ~symbol ~qty:_ ~side ~client_order_id:_ ->
+        let () = posted := symbol :: !posted in
+        if symbol = "SPY" && first_status = "uncertain" then
+          failwith "POST response unavailable"
+        else us_fixture_order symbol (if side = `Sell then "sell" else "buy")
+          (if symbol = "SPY" then first_status else "filled"))
+      ~finish:(fun _ _ symbol _ -> finished := symbol :: !finished)
+      Live.Paper date close decision) in
+  List.rev !posted, List.rev !finished, output
+
+let test_us_buy_failure_keeps_siblings () =
+  List.iter (fun status ->
+    let posted, finished, output = us_phase_failure `Buy status false in
+    (* SPY's rejected/uncertain buy does not cancel QQQ's independent buy.
+       A known rejected order finishes too; an uncertain POST has no order. *)
+    assert (posted = ["SPY"; "QQQ"]);
+    assert (finished = if status = "rejected" then ["SPY"; "QQQ"] else ["QQQ"]);
+    assert (contains output "symbol=SPY error=");
+    assert (contains output (if status = "rejected" then "Alpaca rejected the order"
+      else "order submission uncertain"))) ["rejected"; "uncertain"]
+
+let test_us_sell_failure_keeps_siblings () =
+  List.iter (fun status ->
+    let posted, finished, output = us_phase_failure `Sell status true in
+    (* Both sells are attempted, but the first sell failure gates DIA's buy.
+       Known orders reconcile regardless of the sell barrier's failure. *)
+    assert (posted = ["SPY"; "QQQ"]);
+    assert (finished = if status = "rejected" then ["SPY"; "QQQ"] else ["QQQ"]);
+    assert (contains output ("symbol=SPY error=sell SPY " ^ status)))
+    ["rejected"; "uncertain"]
 let test_us_pair_restart_routing () =
   let date = "2025-06-24" in
   let decision = us_pair_decision
@@ -8685,6 +8732,8 @@ let () =
   test_us_rejected_submission_stops ();
   test_us_rejected_log_failure_stops ();
   test_us_decision_logs_after_preflight ();
+  let () = test_us_buy_failure_keeps_siblings () in
+  let () = test_us_sell_failure_keeps_siblings () in
   test_us_step_routing ();
   test_live_retry_clock ();
   test_live_daemon_lock ();

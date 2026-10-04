@@ -945,19 +945,25 @@ let execute_decision ?(existing = []) ?(sleep = Unix.sleepf) ?finish
       | exception error ->
           failwith (if side = `Sell then "sell " ^ symbol ^ " uncertain"
             else "order submission uncertain: " ^ Printexc.to_string error) in
-    let submit_checked ((symbol, _, _, _) as request) =
+    let sell_failure = ref None in
+    let submit_checked ((symbol, side, _, _) as request) =
       match submit request with
       | () -> ()
       | exception error ->
           let () = (try log "date=%s symbol=%s error=%s order=skip"
             date symbol (error_text error) with _ -> ()) in
-          raise error in
+          if not !posted then raise error
+          else if side = `Sell && !sell_failure = None then
+            sell_failure := Some error in
     let sells, buys = List.partition (fun (_, side, _, _) -> side = `Sell) pending in
     let has_sell = sells <> [] || List.exists
       (fun (_, (o : Alpaca.order_t)) -> o.side = "sell") !placed in
-    if not has_sell || buys = [] then List.iter submit_checked pending
+    let () = List.iter submit_checked sells in
+    let () = match !sell_failure with
+      | None -> ()
+      | Some error -> raise error in
+    if not has_sell || buys = [] then List.iter submit_checked buys
     else
-      let () = List.iter submit_checked sells in
       let rec wait_sells () =
         let stop = ref None in
         let open_sell = ref None in
