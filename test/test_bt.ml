@@ -5257,17 +5257,15 @@ let test_live_schedule () =
 let test_us_live_submit_cutoff () =
   let close = "2025-06-24T16:00:00-04:00" in
   let decision : Live.decision =
-    { fetched_through = "2025-06-23";
+    { fetched_through = "2025-06-23"; equity = 1000.;
+      (* No position: all 1000 equity is free cash and there is no debit. *)
+      cash = 1000.; debit = 0.; legs = [];
+      assets = [|{ Live.symbol = "SPY";
       provisional =
         { date = "2025-06-24"; o = 300.; h = 300.; l = 300.; c = 300.; v = 0. };
-      target = 0.5;
-      equity = 1000.;
-      (* No position: all 1000 equity is free cash and there is no debit. *)
-      cash = 1000.;
-      debit = 0.;
-      held = 0.;
+      target = 0.5; held = 0.;
       action =
-        Live.Order { side = `Buy; qty = 1.666666666; id = "bt-SPY-2025-06-24" } }
+        Live.Order { side = `Buy; qty = 1.666666666; id = "bt-SPY-2025-06-24" } }|] }
   in
   let posted = Queue.create () in
   let execute now =
@@ -5281,7 +5279,7 @@ let test_us_live_submit_cutoff () =
         { Alpaca.id = "order-id"; status = "filled";
           side = "buy";
           filled_avg_price = Some 300.; filled_qty = qty })
-      Live.Paper "SPY" close decision
+      Live.Paper "2025-06-24" close decision
   in
   (* Two minutes before the 16:00 close, the submission window has ended. *)
   let () = execute "2025-06-24T15:58:00-04:00" in
@@ -5295,17 +5293,15 @@ let test_us_live_submit_cutoff () =
 
 let test_us_uncertain_submission_stops () =
   let decision : Live.decision =
-    { fetched_through = "2025-06-23";
+    { fetched_through = "2025-06-23"; equity = 1000.;
+      (* No position: all 1000 equity is free cash and there is no debit. *)
+      cash = 1000.; debit = 0.; legs = [];
+      assets = [|{ Live.symbol = "SPY";
       provisional =
         { date = "2025-06-24"; o = 300.; h = 300.; l = 300.; c = 300.; v = 0. };
-      target = 0.5;
-      equity = 1000.;
-      (* No position: all 1000 equity is free cash and there is no debit. *)
-      cash = 1000.;
-      debit = 0.;
-      held = 0.;
+      target = 0.5; held = 0.;
       action =
-        Live.Order { side = `Buy; qty = 1.; id = "bt-SPY-2025-06-24" } }
+        Live.Order { side = `Buy; qty = 1.; id = "bt-SPY-2025-06-24" } }|] }
   in
   let submissions = ref 0 in
   let close = "2025-06-24T16:00:00-04:00" in
@@ -5319,24 +5315,22 @@ let test_us_uncertain_submission_stops () =
       ~submit_market:(fun _ ~symbol:_ ~qty:_ ~side:_ ~client_order_id:_ ->
         incr submissions;
         failwith "curl failed while calling Alpaca")
-      Live.Paper "SPY" close decision
+      Live.Paper "2025-06-24" close decision
   in
   (* A POST that may have reached Alpaca cannot safely be submitted again. *)
   assert (!submissions = 1)
 
 let test_us_rejected_submission_stops () =
   let decision : Live.decision =
-    { fetched_through = "2025-06-23";
+    { fetched_through = "2025-06-23"; equity = 1000.;
+      (* No position: all 1000 equity is free cash and there is no debit. *)
+      cash = 1000.; debit = 0.; legs = [];
+      assets = [|{ Live.symbol = "SPY";
       provisional =
         { date = "2025-06-24"; o = 300.; h = 300.; l = 300.; c = 300.; v = 0. };
-      target = 0.5;
-      equity = 1000.;
-      (* No position: all 1000 equity is free cash and there is no debit. *)
-      cash = 1000.;
-      debit = 0.;
-      held = 0.;
+      target = 0.5; held = 0.;
       action =
-        Live.Order { side = `Buy; qty = 1.; id = "bt-SPY-2025-06-24" } }
+        Live.Order { side = `Buy; qty = 1.; id = "bt-SPY-2025-06-24" } }|] }
   in
   let submissions = ref 0 in
   let close = "2025-06-24T16:00:00-04:00" in
@@ -5352,24 +5346,22 @@ let test_us_rejected_submission_stops () =
         { Alpaca.id = "rejected-id"; status = "rejected";
           side = "buy";
           filled_avg_price = None; filled_qty = 0. })
-      Live.Paper "SPY" close decision
+      Live.Paper "2025-06-24" close decision
   in
   (* The broker returned a rejected order, so no second POST is safe. *)
   assert (!submissions = 1)
 
 let test_us_rejected_log_failure_stops () =
   let decision : Live.decision =
-    { fetched_through = "2025-06-23";
+    { fetched_through = "2025-06-23"; equity = 1000.;
+      (* No position: all 1000 equity is free cash and there is no debit. *)
+      cash = 1000.; debit = 0.; legs = [];
+      assets = [|{ Live.symbol = "SPY";
       provisional =
         { date = "2025-06-24"; o = 300.; h = 300.; l = 300.; c = 300.; v = 0. };
-      target = 0.5;
-      equity = 1000.;
-      (* No position: all 1000 equity is free cash and there is no debit. *)
-      cash = 1000.;
-      debit = 0.;
-      held = 0.;
+      target = 0.5; held = 0.;
       action =
-        Live.Order { side = `Buy; qty = 1.; id = "bt-SPY-2025-06-24" } }
+        Live.Order { side = `Buy; qty = 1.; id = "bt-SPY-2025-06-24" } }|] }
   in
   let submissions = ref 0 in
   let close = "2025-06-24T16:00:00-04:00" in
@@ -5396,23 +5388,21 @@ let test_us_rejected_log_failure_stops () =
             { Alpaca.id = "rejected-id"; status = "rejected";
               side = "buy";
               filled_avg_price = None; filled_qty = 0. })
-          Live.Paper "SPY" close decision)
+          Live.Paper "2025-06-24" close decision)
   in
   (* A failed post-POST log must never re-enter submission. *)
   assert (!submissions = 1)
 
 let test_us_decision_logs_after_preflight () =
   let decision : Live.decision =
-    { fetched_through = "2025-06-23";
+    { fetched_through = "2025-06-23"; equity = 1000.;
+      (* No position: all 1000 equity is free cash and there is no debit. *)
+      cash = 1000.; debit = 0.; legs = [];
+      assets = [|{ Live.symbol = "SPY";
       provisional =
         { date = "2025-06-24"; o = 300.; h = 300.; l = 300.; c = 300.; v = 0. };
-      target = 0.5;
-      equity = 1000.;
-      (* No position: all 1000 equity is free cash and there is no debit. *)
-      cash = 1000.;
-      debit = 0.;
-      held = 0.;
-      action = Live.Order { side = `Buy; qty = 1.; id = "bt-SPY-2025-06-24" } }
+      target = 0.5; held = 0.;
+      action = Live.Order { side = `Buy; qty = 1.; id = "bt-SPY-2025-06-24" } }|] }
   in
   let close = "2025-06-24T16:00:00-04:00" in
   let check ~lookup ~clock =
@@ -5421,7 +5411,7 @@ let test_us_decision_logs_after_preflight () =
         Live.execute_decision ~order_by_client_id:lookup ~clock
           ~submit_market:(fun _ ~symbol:_ ~qty:_ ~side:_ ~client_order_id:_ ->
             failwith "unexpected submission")
-          Live.Paper "SPY" close decision))
+          Live.Paper "2025-06-24" close decision))
   in
   (* Neither a failed lookup nor a failed pre-submit clock logs a decision. *)
   let () =
@@ -5434,28 +5424,27 @@ let test_us_decision_logs_after_preflight () =
       (check ~lookup:(fun _ _ -> None)
          ~clock:(fun _ -> failwith "clock unavailable") = "")
   in
-  let skipped = { decision with Live.action = Live.Skip "no trade" } in
+  let skipped = { decision with Live.assets =
+    [|{ decision.assets.(0) with action = Live.Skip "no trade" }|] } in
   let output =
     capture_stdout (fun () ->
       Live.execute_decision
         ~order_by_client_id:(fun _ _ -> failwith "unexpected lookup")
-        Live.Paper "SPY" close skipped)
+        Live.Paper "2025-06-24" close skipped)
   in
   assert (contains output "order=skip:no trade fill=pending")
 
 let test_us_step_routing () =
   let next_open = "2025-06-25T09:30:00-04:00" in
   let decision : Live.decision =
-    { fetched_through = "2025-06-23";
+    { fetched_through = "2025-06-23"; equity = 1000.;
+      (* No position: all 1000 equity is free cash and there is no debit. *)
+      cash = 1000.; debit = 0.; legs = [];
+      assets = [|{ Live.symbol = "SPY";
       provisional =
         { date = "2025-06-24"; o = 300.; h = 300.; l = 300.; c = 300.; v = 0. };
-      target = 0.5;
-      equity = 1000.;
-      (* No position: all 1000 equity is free cash and there is no debit. *)
-      cash = 1000.;
-      debit = 0.;
-      held = 0.;
-      action = Live.Skip "no trade" }
+      target = 0.5; held = 0.;
+      action = Live.Skip "no trade" }|] }
   in
   let existing : Alpaca.order_t =
     { id = "existing"; status = "filled";
@@ -5469,10 +5458,10 @@ let test_us_step_routing () =
       { timestamp; is_open = true; next_open;
         next_close = "2025-06-24T16:00:00-04:00" }
     in
-    Live.us_step ~symbol:"SPY"
+    Live.us_step ~symbols:[|"SPY"|]
       ~lookup:(fun id -> record ("lookup:" ^ id); lookup id)
       ~decide:(fun date -> record ("decide:" ^ date); decide date)
-      ~execute:(fun clock decision ->
+      ~execute:(fun _existing clock decision ->
         record "execute"; execute clock decision)
       ~finish:(fun clock date id order ->
         record "finish"; finish clock date id order)
@@ -7332,6 +7321,77 @@ let with_tw_decision_cache function_ =
     in
     function_ data_dir)
 
+let test_live_history_gap () =
+  let dates = List.init 7 (fun i -> Printf.sprintf "2026-05-%02d" (i + 11)) in
+  let bars dates = Array.of_list (List.map (fun d -> bar d 100. 100.) dates) in
+  let full = bars dates in
+  let old = bars (List.tl dates) in
+  let fetched, aligned = Live.align_history ~symbols:[|"A"; "B"|] [full; old] in
+  (* Union's last five are May 13-17; the missing May 11 is older and passes.
+     Both arrays equal bt run's intersection filter, May 12-17. *)
+  assert (fetched = "2026-05-17");
+  assert (aligned = [old; old]);
+  let recent = bars (List.filter (( <> ) "2026-05-16") dates) in
+  match Live.align_history ~symbols:[|"A"; "B"|] [full; recent] with
+  | _ -> assert false
+  | exception Failure message ->
+      assert (message = "history gap in B within the last 5 sessions")
+
+let test_tw_live_pair_decide () =
+  with_tw_decision_cache (fun data_dir ->
+    let snapshot price : Shioaji.snapshot =
+      { datetime = "2026-05-26T13:20:00+08:00"; open_ = price;
+        high = price; low = price; close = price; bid = price; ask = price;
+        total_volume = 0. } in
+    let positions : Shioaji.position list =
+      [{ id = 0; code = "2330"; cond = "Cash"; shares = 1000;
+         last_price = 1.; loan_amount = 0.; interest = 0. };
+       { id = 1; code = "2330"; cond = "MarginTrading"; shares = 1000;
+         last_price = 1.; loan_amount = 6000.; interest = 10. };
+       { id = 2; code = "2890"; cond = "MarginTrading"; shares = 2000;
+         last_price = 1.; loan_amount = 24000.; interest = 20. }] in
+    let details : Shioaji.position_detail list =
+      [{ code = "2330"; cond = "MarginTrading"; date = "2024-11-26"; lots = 1 };
+       { code = "2890"; cond = "MarginTrading"; date = "2024-11-26"; lots = 2 }] in
+    let choose rebalance ta tb details =
+      with_temp_strategy
+        (Printf.sprintf
+          "stock \"tw/2330\" as a\nstock \"tw/2890\" as b\nrebalance %s\na.target %s\nb.target %s\n"
+          rebalance ta tb)
+        (fun strat_path -> Live.decide ~previous_session:"2026-05-22"
+          ~equity:100000. ~tw_positions:positions ~tw_position_details:details
+          ~tw_snapshots:[|snapshot 10.; snapshot 20.|] Live.Paper
+          ~session_date:"2026-05-26" ~strat_path ~data_dir) in
+    let scaled = choose "on_change" "2.0" "2.0" details in
+    (* Funding need 2*0.4 + 2*0.4 = 1.6; scale 1/1.6 makes both 1.25.
+       CV=10000, MV=10000+40000, L=6000+24000, I=10+20:
+       cash=100000-10000-50000+30000+30=70030, debit=30000. *)
+    let () = assert (Array.map (fun (a : Live.asset_decision) -> a.symbol)
+      scaled.assets = [|"2330"; "2890"|]) in
+    let () = Array.iter (fun (a : Live.asset_decision) -> assert_close 1.25 a.target)
+      scaled.assets in
+    let () = assert (scaled.cash = 70030. && scaled.debit = 30000.) in
+    let () = assert (scaled.legs =
+      [{ Live.code = "2330"; exchange = "TSE"; action = "Sell";
+         cond = "MarginTrading"; lot = Shioaji.Common; quantity = 1 };
+       { Live.code = "2330"; exchange = "TSE"; action = "Buy";
+         cond = "MarginTrading"; lot = Shioaji.Common; quantity = 1 };
+       { Live.code = "2890"; exchange = "OTC"; action = "Sell";
+         cond = "MarginTrading"; lot = Shioaji.Common; quantity = 2 };
+       { Live.code = "2890"; exchange = "OTC"; action = "Buy";
+         cond = "MarginTrading"; lot = Shioaji.Common; quantity = 2 }]) in
+    (* Both prior closes are 1980: num(close>1000)=1. Provisional prices
+       are 10 and 20: each becomes zero, so each asset fully closes.
+       This distinguishes previous-row targets from zeros or today's row. *)
+    let closed = choose "on_change" "num(a.close > 1000.0)"
+      "num(b.close > 1000.0)" [] in
+    let () = assert (List.map (fun (l : Live.leg) -> l.code, l.cond, l.quantity)
+      closed.legs = ["2330", "MarginTrading", 1;
+        "2890", "MarginTrading", 2; "2330", "Cash", 1]) in
+    Array.iter (fun (a : Live.asset_decision) -> match a.action with
+      | Live.Orders legs -> assert (legs = List.filter
+          (fun (l : Live.leg) -> l.code = a.symbol) closed.legs)
+      | Live.Order _ | Live.Skip _ -> assert false) closed.assets)
 let test_multi_stock_one_stock_pins () =
   with_tw_decision_cache (fun data_dir ->
     let position : Shioaji.position =
@@ -7350,20 +7410,21 @@ let test_multi_stock_one_stock_pins () =
     in
     let constant = choose "on_change" 0.5 [] in
     (* Both rows target 0.5; the 10000-share drift stays, with no legs. *)
-    let () = assert (constant.target = 0.5 && constant.held = 10000.) in
-    let () = assert (constant.action = Live.Orders []) in
+    let () = assert (constant.assets.(0).target = 0.5 && constant.assets.(0).held = 10000.) in
+    let () = assert (constant.assets.(0).action = Live.Orders []) in
     let drift = choose "daily" 0.8 [] in
     (* E1 = 3000000 - 200*q*0.001425; floor(0.8*E1/200)-10000
        is 1997: one Common lot and 997 odd shares, in that order. *)
-    let () = assert (drift.target = 0.8 && drift.held = 10000.) in
-    let () = assert (drift.action = Live.Orders
+    let () = assert (drift.assets.(0).target = 0.8 && drift.assets.(0).held = 10000.) in
+    let () = assert (drift.assets.(0).action = Live.Orders
       [{ Live.code = "2330"; exchange = "TSE"; action = "Buy"; cond = "Cash"; lot = Shioaji.Common; quantity = 1 };
        { Live.code = "2330"; exchange = "TSE"; action = "Buy"; cond = "Cash"; lot = Shioaji.IntradayOdd; quantity = 997 }]) in
+    let () = assert (drift.assets.(0).action = Live.Orders drift.legs) in
     let levered = choose "on_change" 1.5 [] in
     (* 1.5*(1-0.6) = 0.6 < 1, so normalization leaves 1.5 unchanged;
        equal previous target preserves the same drift and emits no legs. *)
-    let () = assert (levered.target = 1.5 && levered.held = 10000.) in
-    let () = assert (levered.action = Live.Orders []) in
+    let () = assert (levered.assets.(0).target = 1.5 && levered.assets.(0).held = 10000.) in
+    let () = assert (levered.assets.(0).action = Live.Orders []) in
     let matured =
       with_temp_strategy "stock \"tw/2330\"\nrebalance on_change\ntarget 1.5\n"
         (fun strat_path ->
@@ -7380,8 +7441,9 @@ let test_multi_stock_one_stock_pins () =
     in
     (* 18 months gives 2026-05-26 and clamped 2025-11-30; both mature.
        Ordinary target is unchanged, so these four legs are the entire list. *)
-    let () = assert (matured.target = 1.5 && matured.held = 3000.) in
-    assert (matured.action = Live.Orders
+    let () = assert (matured.assets.(0).target = 1.5 && matured.assets.(0).held = 3000.) in
+    let () = assert (matured.assets.(0).action = Live.Orders matured.legs) in
+    assert (matured.assets.(0).action = Live.Orders
       [{ Live.code = "2330"; exchange = "TSE"; action = "Sell"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 2 };
        { Live.code = "2330"; exchange = "TSE"; action = "Buy"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 2 };
        { Live.code = "2330"; exchange = "TSE"; action = "Sell"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 1 };
@@ -7455,7 +7517,7 @@ let test_tw_live_decide_override () =
       (* The target stays at 1.0, so the planner preserves the drifted
          position. The pending payable changes equity but does not skip the
          production session. *)
-      let () = assert (production.Live.action = Live.Orders []) in
+      let () = assert (production.Live.assets.(0).action = Live.Orders []) in
 
       let drift_position : Shioaji.position =
         { id = 0; code = "2330"; cond = "Cash"; shares = 10000;
@@ -7477,7 +7539,7 @@ let test_tw_live_decide_override () =
          holding has drifted above TWD 1,500,000, but an unchanged target
          preserves that drift and submits no order. This fixture stays
          undeclared to pin the on_change default. *)
-      let () = assert (unchanged.Live.action = Live.Orders []) in
+      let () = assert (unchanged.Live.assets.(0).action = Live.Orders []) in
       let unchanged_below =
         decide_drift "stock \"tw/2330\"\nrebalance on_change\ntarget 0.8\n"
       in
@@ -7486,9 +7548,9 @@ let test_tw_live_decide_override () =
       in
       (* TWD 2,000,000 held versus TWD 2,400,000 desired; at TWD 200
          the daily plan needs a positive 2,000-share cash purchase. *)
-      let () = assert (unchanged_below.Live.action = Live.Orders []) in
+      let () = assert (unchanged_below.Live.assets.(0).action = Live.Orders []) in
       let () =
-        match daily_below.Live.action with
+        match daily_below.Live.assets.(0).action with
         | Live.Orders legs ->
             assert (List.exists (fun (leg : Live.leg) ->
               leg.action = "Buy" && leg.quantity > 0) legs)
@@ -7512,7 +7574,7 @@ let test_tw_live_decide_override () =
       (* At the provisional TWD 200 price, 10,000 shares plus TWD 500,000
          cash give TWD 2,500,000 equity and exactly 0.8 exposure. The stale
          TWD 180 position mark must not produce a spurious sell. *)
-      let () = assert (stale_price.Live.action = Live.Orders []) in
+      let () = assert (stale_price.Live.assets.(0).action = Live.Orders []) in
       let () = assert_close 2500000. stale_price.Live.equity in
       (* TWD 2,000,000 in margin shares plus TWD 500,000 spendable cash,
          less TWD 2,600,000 loan and TWD 10,000 interest, is
@@ -7545,7 +7607,7 @@ let test_tw_live_decide_override () =
          actual cash inventory. *)
       let () =
         assert
-          (dropped.Live.action =
+          (dropped.Live.assets.(0).action =
            Live.Orders
              [{ Live.code = "2330"; exchange = "TSE"; action = "Sell"; cond = "Cash"; lot = Shioaji.Common; quantity = 10 }])
       in
@@ -7565,7 +7627,7 @@ let test_tw_live_decide_override () =
          fund 998 shares plus the 14.2215 fee (9,994.22). *)
       let () =
         assert
-          (minimum_commission.Live.action
+          (minimum_commission.Live.assets.(0).action
            = Live.Orders
                [{ code = "2330"; exchange = "TSE"; action = "Buy"; cond = "Cash"; lot = Shioaji.IntradayOdd; quantity = 998 }])
       in
@@ -7581,7 +7643,7 @@ let test_tw_live_decide_override () =
               ~data_dir)
       in
       let legs =
-        match cash_bound.Live.action with
+        match cash_bound.Live.assets.(0).action with
         | Live.Orders legs -> legs
         | Live.Skip _ | Live.Order _ -> assert false
       in
@@ -7618,15 +7680,15 @@ let test_tw_live_decide_override () =
       (* The injected previous session is the fixture cache's final date. *)
       let () = assert (decision.Live.fetched_through = "2026-05-22") in
       (* The explicit provisional close is TWD 2,000. *)
-      let () = assert_close 2000. decision.Live.provisional.c in
+      let () = assert_close 2000. decision.Live.assets.(0).provisional.c in
       (* The strategy source declares target 1.0. *)
-      let () = assert_close 1. decision.Live.target in
+      let () = assert_close 1. decision.Live.assets.(0).target in
       (* The two 2330 fixture rows hold 1 cash lot + 3 margin lots = 4,000 shares. *)
-      let () = assert_close 4000. decision.Live.held in
+      let () = assert_close 4000. decision.Live.assets.(0).held in
       (* The 2024-11-26 two-lot and 2024-05-31 one-lot rows are both
          mature on 2026-05-26, so their sell/rebuy pairs lead the plan. *)
       let () =
-        match decision.Live.action with
+        match decision.Live.assets.(0).action with
         | Live.Orders
             ({ action = "Sell"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 2; _ }
              :: { action = "Buy"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 2; _ }
@@ -7640,11 +7702,11 @@ let test_tw_live_decide_override () =
       in
       let fixture_decision =
         Live.decide ~previous_session:"2026-05-15" ~equity:20000000.
-          ~tw_positions:positions ~tw_snapshot:fixture Live.Paper
+          ~tw_positions:positions ~tw_snapshots:[|fixture|] Live.Paper
           ~session_date:"2026-05-18" ~strat_path ~data_dir
       in
       (* The snapshot fixture's close field is TWD 2,240. *)
-      let () = assert_close 2240. fixture_decision.Live.provisional.c in
+      let () = assert_close 2240. fixture_decision.Live.assets.(0).provisional.c in
       let snapshot : Shioaji.snapshot =
         { fixture with datetime = "2026-05-26T13:20:00";
           open_ = 2000.; high = 2002.; low = 1998.; close = 0.;
@@ -7652,15 +7714,15 @@ let test_tw_live_decide_override () =
       in
       let midpoint =
         Live.decide ~previous_session:"2026-05-22" ~equity:20000000.
-          ~tw_positions:positions ~tw_snapshot:snapshot Live.Paper
+          ~tw_positions:positions ~tw_snapshots:[|snapshot|] Live.Paper
           ~session_date:"2026-05-26" ~strat_path ~data_dir
       in
       (* A zero close falls back to (TWD 1,998 + TWD 2,002) / 2 = TWD 2,000. *)
-      let () = assert_close 2000. midpoint.Live.provisional.c in
+      let () = assert_close 2000. midpoint.Live.assets.(0).provisional.c in
       let decide_at datetime =
         Live.decide ~previous_session:"2026-05-22" ~equity:20000000.
           ~tw_positions:positions
-          ~tw_snapshot:{ snapshot with datetime }
+          ~tw_snapshots:[|{ snapshot with datetime }|]
           Live.Paper ~session_date:"2026-05-26" ~strat_path ~data_dir
       in
       let fractional = decide_at "2026-05-26T13:20:00.671475" in
@@ -7702,8 +7764,8 @@ let test_tw_live_decide_override () =
           ignore
             (Live.decide ~previous_session:"2026-05-22" ~equity:20000000.
                ~tw_positions:positions
-               ~tw_snapshot:{ snapshot with datetime =
-                 "2026-05-22T13:20:00" }
+               ~tw_snapshots:[|{ snapshot with datetime =
+                 "2026-05-22T13:20:00" }|]
                Live.Paper ~session_date:"2026-05-26" ~strat_path ~data_dir))
       in
       (* Hour 25 is outside the valid 00-23 timestamp range. *)
@@ -7712,8 +7774,8 @@ let test_tw_live_decide_override () =
           ignore
             (Live.decide ~previous_session:"2026-05-22" ~equity:20000000.
                ~tw_positions:positions
-               ~tw_snapshot:{ snapshot with datetime =
-                 "2026-05-26T25:20:00" }
+               ~tw_snapshots:[|{ snapshot with datetime =
+                 "2026-05-26T25:20:00" }|]
                Live.Paper ~session_date:"2026-05-26" ~strat_path ~data_dir))
       in
       (* Zero close, bid, and ask provide no positive provisional price. *)
@@ -7722,7 +7784,7 @@ let test_tw_live_decide_override () =
           ignore
             (Live.decide ~previous_session:"2026-05-22" ~equity:20000000.
                ~tw_positions:positions
-               ~tw_snapshot:{ snapshot with close = 0.; bid = 0.; ask = 0. }
+               ~tw_snapshots:[|{ snapshot with close = 0.; bid = 0.; ask = 0. }|]
                Live.Paper ~session_date:"2026-05-26" ~strat_path ~data_dir))
       in
       (* An open of zero violates the positive OHLCV snapshot contract. *)
@@ -7731,7 +7793,7 @@ let test_tw_live_decide_override () =
           ignore
             (Live.decide ~previous_session:"2026-05-22" ~equity:20000000.
                ~tw_positions:positions
-               ~tw_snapshot:{ snapshot with open_ = 0. }
+               ~tw_snapshots:[|{ snapshot with open_ = 0. }|]
                Live.Paper ~session_date:"2026-05-26" ~strat_path ~data_dir))
       in
       (* TWD 2,003 is above the fixture session high of TWD 2,002. *)
@@ -7740,7 +7802,7 @@ let test_tw_live_decide_override () =
           ignore
             (Live.decide ~previous_session:"2026-05-22" ~equity:20000000.
                ~tw_positions:positions
-               ~tw_snapshot:{ snapshot with close = 2003. }
+               ~tw_snapshots:[|{ snapshot with close = 2003. }|]
                Live.Paper ~session_date:"2026-05-26" ~strat_path ~data_dir))
       in
       (* NaN is not a finite positive simulation equity. *)
@@ -8387,6 +8449,199 @@ let test_shioaji_weighted_fill_price () =
       assert (trade.Shioaji.deal_price = Some 29.)
   | _ -> assert false
 
+let us_pair_decision actions : Live.decision =
+  { fetched_through = "2025-06-23"; equity = 1000.; cash = 500.; debit = 0.;
+    legs = []; assets = Array.mapi (fun i action ->
+      { Live.symbol = [|"SPY"; "QQQ"|].(i);
+        provisional = bar "2025-06-24" 100. 100.; target = 0.5;
+        held = 5.; action }) actions }
+
+let us_fixture_order symbol side status : Alpaca.order_t =
+  { id = "broker-" ^ symbol; side; status;
+    filled_avg_price = if status = "filled" then Some 100. else None;
+    filled_qty = if status = "filled" then 1. else 0. }
+
+let with_us_finish_failure ~broken_log function_ =
+  let saved = Unix.dup Unix.stdout in
+  let read_only = Unix.openfile "/dev/null" [Unix.O_RDONLY] 0 in
+  let finished = ref [] in
+  let finish symbol =
+    let () = finished := symbol :: !finished in
+    if symbol = "SPY" then
+      let () = if broken_log then Unix.dup2 read_only Unix.stdout in
+      failwith "SPY fill lookup unavailable"
+  in
+  Fun.protect
+    ~finally:(fun () ->
+      Unix.dup2 saved Unix.stdout;
+      flush stdout;
+      Unix.close saved;
+      Unix.close read_only)
+    (fun () ->
+      let () = function_ finish in
+      List.rev !finished)
+
+let test_us_pair_execution () =
+  let date = "2025-06-24" and close = "2025-06-24T16:00:00-04:00" in
+  let action symbol side = Live.Order
+    { side; qty = 1.; id = Live.client_order_id ~symbol ~date } in
+  let decision = us_pair_decision [|action "SPY" `Sell; action "QQQ" `Buy|] in
+  let run sell_status cutoff existing decision =
+    let events = ref [] and submitted = ref false in
+    let record x = events := x :: !events in
+    let output = capture_stdout (fun () ->
+      Live.execute_decision ~existing ~sleep:(fun _ -> record "sleep")
+        ~finish:(fun _ _ symbol _ -> record ("finish:" ^ symbol))
+        ~clock:(fun _ -> { Alpaca.timestamp =
+            (if (!submitted || existing <> []) && cutoff then "2025-06-24T15:58:00-04:00"
+             else "2025-06-24T15:45:00-04:00");
+          is_open = true; next_open = "2025-06-25T09:30:00-04:00"; next_close = close })
+        ~order_by_client_id:(fun _ id ->
+          if (!submitted || existing <> []) && id = "bt-SPY-2025-06-24" then
+            let () = record ("poll:" ^ sell_status) in
+            Some (us_fixture_order "SPY" "sell" sell_status)
+          else None)
+        ~submit_market:(fun _ ~symbol ~qty:_ ~side ~client_order_id:_ ->
+          let () = record ("post:" ^ symbol) in
+          let () = submitted := true in
+          us_fixture_order symbol (if side = `Sell then "sell" else "buy") "filled")
+        Live.Paper date close decision) in
+    List.rev !events, output
+  in
+  (* Sell POST and its filled poll precede the buy POST. *)
+  let events, _ = run "filled" false [] decision in
+  assert (events = ["post:SPY"; "poll:filled"; "post:QQQ";
+    "finish:SPY"; "finish:QQQ"]);
+  let events, output = run "accepted" true [] decision in
+  (* Open sell at cutoff forbids QQQ; SPY still reaches the finish pass. *)
+  assert (not (List.mem "post:QQQ" events));
+  assert (List.mem "finish:SPY" events);
+  assert (contains output "sell SPY open at cutoff");
+  List.iter (fun status ->
+    let events, output = run status false [] decision in
+    assert (not (List.mem "post:QQQ" events));
+    assert (contains output ("sell SPY " ^ status)))
+    ["rejected"; "canceled"; "expired"; "stopped"];
+  let single = { decision with Live.assets = [|decision.assets.(0)|] } in
+  (* No mixed phases: N=1 posts once then finishes, without a sell-phase poll. *)
+  let events, _ = run "accepted" false [] single in
+  assert (events = ["post:SPY"; "finish:SPY"]);
+  let existing = ["SPY", us_fixture_order "SPY" "sell" "accepted"] in
+  let events, output = run "accepted" true existing decision in
+  (* A restarted sell counts as a sell and blocks the remaining buy at cutoff. *)
+  assert (not (List.mem "post:SPY" events || List.mem "post:QQQ" events));
+  assert (contains output "sell SPY open at cutoff");
+  let events, _ = run "filled" false existing decision in
+  assert (not (List.mem "post:SPY" events));
+  assert (List.mem "poll:filled" events && List.mem "post:QQQ" events);
+  let events, _ = run "filled" false
+    ["SPY", us_fixture_order "SPY" "buy" "accepted"] decision in
+  (* An existing buy joins only the finish pass, never the sell-phase poll. *)
+  assert (events = ["post:QQQ"; "finish:SPY"; "finish:QQQ"]);
+  let buys = us_pair_decision [|action "SPY" `Buy; action "QQQ" `Buy|] in
+  List.iter (fun broken_log ->
+    let finished = with_us_finish_failure ~broken_log (fun finish ->
+      Live.execute_decision
+        ~order_by_client_id:(fun _ _ -> None)
+        ~clock:(fun _ ->
+          { Alpaca.timestamp = date ^ "T15:45:00-04:00"; is_open = true;
+            next_open = "2025-06-25T09:30:00-04:00"; next_close = close })
+        ~submit_market:(fun _ ~symbol ~qty:_ ~side:_ ~client_order_id:_ ->
+          us_fixture_order symbol "buy" "filled")
+        ~finish:(fun _ _ symbol _ -> finish symbol)
+        Live.Paper date close buys) in
+    (* Both known orders need reconciliation. A SPY lookup failure, and
+       a failure logging it on broken stdout, must leave QQQ reachable. *)
+    assert (finished = ["SPY"; "QQQ"])) [false; true]
+
+let test_us_pair_restart_routing () =
+  let date = "2025-06-24" in
+  let decision = us_pair_decision
+    [|Live.Order { side = `Sell; qty = 1.; id = "bt-SPY-2025-06-24" };
+      Live.Order { side = `Buy; qty = 1.; id = "bt-QQQ-2025-06-24" }|] in
+  let clock : Alpaca.clock_t =
+    { timestamp = date ^ "T15:45:00-04:00"; is_open = true;
+      next_open = "2025-06-25T09:30:00-04:00"; next_close = date ^ "T16:00:00-04:00" } in
+  let run both side =
+    let decisions = ref 0 and finished = ref [] and executed = ref None in
+    let order symbol = us_fixture_order symbol side "filled" in
+    Live.us_step ~symbols:[|"SPY"; "QQQ"|]
+      ~lookup:(fun id ->
+        if id = "bt-SPY-2025-06-24" then Some (order "SPY")
+        else if both then Some (order "QQQ") else None)
+      ~decide:(fun _ -> let () = incr decisions in decision)
+      ~execute:(fun existing _ d -> executed := Some (existing, d))
+      ~finish:(fun _ _ id _ -> finished := id :: !finished)
+      ~sleep_until:(fun _ -> ()) ~retry:(fun () -> assert false)
+      ~continue:(fun () -> ()) clock;
+    !decisions, !finished, !executed in
+  List.iter (fun side ->
+    let calls, finished, executed = run false side in
+    assert (calls = 1 && finished = []);
+    match executed with
+    | None -> assert false
+    | Some (existing, actual) ->
+        (* One done symbol is dropped; the other planned action is unchanged. *)
+        assert ((List.assoc "SPY" existing).Alpaca.side = side);
+        assert (actual.Live.assets.(0).action = Live.Skip "existing order");
+        assert (actual.assets.(1).action = decision.assets.(1).action))
+    ["sell"; "buy"];
+  let calls, finished, executed = run true "buy" in
+  (* All done routes only to reconciliation, with no re-plan or execute. *)
+  assert (calls = 0 && executed = None);
+  assert (List.sort String.compare finished = ["bt-QQQ-2025-06-24"; "bt-SPY-2025-06-24"]);
+  List.iter (fun broken_log ->
+    List.iter (fun cutoff ->
+      let finished = with_us_finish_failure ~broken_log (fun finish ->
+        let symbols = if cutoff then [|"SPY"; "QQQ"; "DIA"|]
+          else [|"SPY"; "QQQ"|] in
+        let clock = if cutoff then
+          { clock with Alpaca.timestamp = date ^ "T15:58:00-04:00" }
+          else clock in
+        Live.us_step ~symbols
+          ~lookup:(fun id ->
+            if id = "bt-SPY-2025-06-24" then
+              Some (us_fixture_order "SPY" "buy" "filled")
+            else if id = "bt-QQQ-2025-06-24" then
+              Some (us_fixture_order "QQQ" "buy" "filled")
+            else failwith "DIA order lookup unavailable")
+          ~decide:(fun _ -> assert false)
+          ~execute:(fun _ _ _ -> assert false)
+          ~finish:(fun _ _ id _ ->
+            finish (if id = "bt-SPY-2025-06-24" then "SPY" else "QQQ"))
+          ~sleep_until:(fun _ -> ())
+          ~retry:(fun () -> assert false)
+          ~continue:(fun () -> ()) clock) in
+      (* All-done or a failed third lookup at cutoff uses one finish pass.
+         Failure of SPY's finish/error log cannot prevent QQQ's finish. *)
+      assert (finished = ["SPY"; "QQQ"])) [false; true]) [false; true]
+
+let test_live_pair_cli_guards () =
+  let binary = locate ["_build/default/bin/bt.exe"; "../bin/bt.exe"] in
+  let check source options expected =
+    let stderr_path = Filename.temp_file "bt-live-guard-" ".txt" in
+    Fun.protect ~finally:(fun () -> Sys.remove stderr_path) (fun () ->
+      with_temp_strategy source (fun path ->
+        let command = String.concat " "
+          [Filename.quote binary; "target"; Filename.quote path; options;
+           ">/dev/null"; "2>" ^ Filename.quote stderr_path] in
+        let status = Sys.command command in
+        assert (status <> 0);
+        assert (contains (read_file stderr_path) expected);
+        if expected = "live trading needs one market" then assert (status = 2))) in
+  check "stock \"us/SPY\" as a\nstock \"tw/2330\" as b\na.target 0.5\nb.target 0.5\n"
+    "" "live trading needs one market";
+  check "stock \"us/SPY\" as a\nstock \"us/SPY\" as b\na.target 0.5\nb.target 0.5\n"
+    "" "live trading needs distinct symbols: SPY";
+  check "stock \"us/SPY\" as a\nstock \"us/QQQ\" as b\na.target 0.5\nb.target 0.5\n"
+    "--provisional-close 100" "--provisional-close needs a one-stock strategy";
+  with_temp_strategy
+    "stock \"tw/2330\" as a\nstock \"tw/2890\" as b\na.target 0.5\nb.target 0.5\n"
+    (fun strat_path ->
+      match Live.run ~equity:100000. Live.Paper ~strat_path ~data_dir:"unused" with
+      | () -> assert false
+      | exception Failure message ->
+          assert (message = "TW live trading needs one stock in this release"))
 let () =
   let () = test_daytrade_cli () in
   let () = test_intraday_latency () in
@@ -8608,6 +8863,11 @@ let () =
   let () = test_tw_maturity_rollover_legs () in
   let () = test_tw_position_detail_share_consistency () in
   let () = test_multi_stock_one_stock_pins () in
+  let () = test_live_history_gap () in
+  let () = test_tw_live_pair_decide () in
+  let () = test_us_pair_execution () in
+  let () = test_us_pair_restart_routing () in
+  let () = test_live_pair_cli_guards () in
   let () = test_tw_live_decide_override () in
   let () = test_tw_execution_stops_on_predecessor () in
   let () = test_tw_execution_times_out () in

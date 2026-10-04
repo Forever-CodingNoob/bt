@@ -23,15 +23,21 @@ type action =
   | Orders of leg list
 
 (** Inputs and result of one live decision cycle before submission. *)
-type decision = {
-  fetched_through : string;
+type asset_decision = {
+  symbol : string;
   provisional : Data.bar;
   target : float;
+  held : float;
+  action : action;
+}
+
+type decision = {
+  fetched_through : string;
   equity : float;
   cash : float;
   debit : float;
-  held : float;
-  action : action;
+  assets : asset_decision array;
+  legs : leg list;
 }
 
 (** TW submission result. [remaining] was never posted; [trades] holds
@@ -153,6 +159,10 @@ val execute_tw_legs :
   leg list ->
   tw_execution
 
+val strategy_market : (string option * string * string) list -> string
+val align_history :
+  symbols:string array -> Data.bar array list -> string * Data.bar array list
+
 (** Select the next daemon phase from RFC3339 clock timestamps. *)
 val next_actions :
   now:string ->
@@ -166,28 +176,25 @@ val next_actions :
     [error=submit cutoff passed order=skip]. The broker calls default to
     [Alpaca]. *)
 val execute_decision :
+  ?existing:(string * Alpaca.order_t) list ->
+  ?sleep:(float -> unit) ->
+  ?finish:(string -> string -> string -> Alpaca.order_t -> unit) ->
   ?order_by_client_id:(mode -> string -> Alpaca.order_t option) ->
   ?clock:(mode -> Alpaca.clock_t) ->
   ?submit_market:
-    (mode ->
-     symbol:string ->
-     qty:float ->
-     side:[`Buy | `Sell] ->
-     client_order_id:string ->
-     Alpaca.order_t) ->
+    (mode -> symbol:string -> qty:float -> side:[`Buy | `Sell] ->
+     client_order_id:string -> Alpaca.order_t) ->
   mode -> string -> string -> decision -> unit
 
 (** Advance one US daemon clock with injected broker and scheduling actions. *)
 val us_step :
-  symbol:string ->
+  symbols:string array ->
   lookup:(string -> Alpaca.order_t option) ->
   decide:(string -> decision) ->
-  execute:(Alpaca.clock_t -> decision -> unit) ->
+  execute:((string * Alpaca.order_t) list -> Alpaca.clock_t -> decision -> unit) ->
   finish:(Alpaca.clock_t -> string -> string -> Alpaca.order_t -> unit) ->
-  sleep_until:(string -> unit) ->
-  retry:(unit -> unit) ->
-  continue:(unit -> unit) ->
-  Alpaca.clock_t -> unit
+  sleep_until:(string -> unit) -> retry:(unit -> unit) ->
+  continue:(unit -> unit) -> Alpaca.clock_t -> unit
 
 (** Extract the calendar date prefix from an RFC3339 timestamp. *)
 val timestamp_date : string -> string
@@ -211,7 +218,7 @@ val decide :
   ?tw_settlements:Shioaji.settlement list ->
   ?tw_positions:Shioaji.position list ->
   ?tw_position_details:Shioaji.position_detail list ->
-  ?tw_snapshot:Shioaji.snapshot ->
+  ?tw_snapshots:Shioaji.snapshot array ->
   mode ->
   session_date:string ->
   strat_path:string ->

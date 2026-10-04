@@ -20,15 +20,21 @@ type action =
   | Orders of leg list
 
 
-type decision = {
-  fetched_through : string;
+type asset_decision = {
+  symbol : string;
   provisional : Data.bar;
   target : float;
+  held : float;
+  action : action;
+}
+
+type decision = {
+  fetched_through : string;
   equity : float;
   cash : float;
   debit : float;
-  held : float;
-  action : action;
+  assets : asset_decision array;
+  legs : leg list;
 }
 
 type tw_execution = {
@@ -582,254 +588,200 @@ let fetch_position_details ?(position_details = Shioaji.position_details)
 let tw_live_debit_costs symbol =
   { (Engine.default_costs ~market:"tw" ~symbol) with fee_bps = 14.25 }
 
+let strategy_market stocks =
+  match stocks with
+  | [] -> failwith "live trading needs one market"
+  | (_, market, _) :: rest ->
+      let () = if not (List.for_all (fun (_, other, _) -> other = market) rest)
+        then failwith "live trading needs one market" in
+      let seen = Hashtbl.create (List.length stocks) in
+      let () = List.iter (fun (_, _, symbol) ->
+        if Hashtbl.mem seen symbol then
+          failwith ("live trading needs distinct symbols: " ^ symbol);
+        Hashtbl.add seen symbol ()) stocks in
+      market
+
+let align_history ~symbols arrays =
+  let dates bars = Array.to_list (Array.map (fun (b : Data.bar) -> b.date) bars) in
+  let union = List.concat_map dates arrays |> List.sort_uniq String.compare in
+  let recent = List.rev union |> List.to_seq |> Seq.take 5 |> List.of_seq in
+  let () = List.iteri (fun i bars ->
+    let present = Hashtbl.create (Array.length bars) in
+    let () = Array.iter (fun (b : Data.bar) -> Hashtbl.replace present b.date ()) bars in
+    if List.exists (fun date -> not (Hashtbl.mem present date)) recent then
+      failwith ("history gap in " ^ symbols.(i) ^ " within the last 5 sessions")) arrays in
+  let common = Data.common_dates arrays in
+  let fetched_through = match List.rev common with
+    | date :: _ -> date
+    | [] -> failwith "live history has no common trading dates" in
+  let keep = Hashtbl.create (List.length common) in
+  let () = List.iter (fun date -> Hashtbl.replace keep date ()) common in
+  fetched_through, List.map
+    (Data.filter_dates ~keep:(fun date -> Hashtbl.mem keep date)) arrays
+
+let decision_targets ast stocks arrays provisional ratios =
+  let index = ref 0 in
+  let assets = List.map2 (fun (alias, _, _) bars ->
+    let provisional_bar = provisional.(!index) in
+    let () = incr index in
+    alias, Array.append bars [|provisional_bar|]) stocks arrays in
+  let strategy = Dsl.compile_ast ast ~params:[] ~assets in
+  let length = Array.length strategy.Engine.targets.(0) in
+  let row i = Array.map (fun targets -> targets.(i)) strategy.targets in
+  let effective i = fst (Engine.effective_targets ~financing_ratios:ratios (row i)) in
+  effective (length - 1),
+  (if length = 1 then Array.make (List.length stocks) 0. else effective (length - 2))
+
 let decide ?provisional_close ?previous_session ?equity ?tw_balance
-    ?tw_settlements ?tw_positions ?tw_position_details ?tw_snapshot mode
+    ?tw_settlements ?tw_positions ?tw_position_details ?tw_snapshots mode
     ~session_date ~strat_path ~data_dir =
   let ast = Dsl.parse_file strat_path in
-  let rebalance =
-    Option.value (Dsl.rebalance_of ~filename:strat_path ast) ~default:false
-  in
-  match Dsl.stocks_of ~filename:strat_path ast with
-  | [alias, "us", symbol] ->
-      let snapshot =
-        match provisional_close with
-        | None -> Alpaca.snapshot symbol
-        | Some price ->
-            let cache_path =
-              Filename.concat
-                (Filename.concat (Filename.concat data_dir "us") symbol)
-                (symbol ^ ".csv")
-            in
-            let prev_day_date =
-              match Data.last_cached_date cache_path with
-              | Some date -> date
-              | None ->
-                  failwith
-                    (Printf.sprintf
-                       "%s has no cached rows; run bt fetch us/%s"
-                       cache_path symbol)
-            in
-            override_snapshot ~session_date ~prev_day_date ~price
-      in
-      let () =
-        Data.fetch ~market:"us" ~symbol ~from_:None
-          ~to_:snapshot.prev_day_date ~data_dir
-      in
-      let asset =
-        Data.load_asset ~market:"us" ~symbol ~from_:None
-          ~to_:(Some snapshot.prev_day_date) ~data_dir
-      in
-      let last = Array.length asset.signal - 1 in
-      let fetched_through = asset.signal.(last).date in
-      let () =
-        if not
-            (cache_is_fresh ~last_cached:fetched_through
-               ~prev_trading_day:snapshot.prev_day_date)
-        then
-          failwith
-            (Printf.sprintf "stale cache: fetched through %s, expected %s"
-               fetched_through snapshot.prev_day_date)
-      in
-      let provisional = provisional_bar snapshot in
-      let () =
-        match snapshot_session ~session_date
-                ~provisional_date:provisional.date with
-        | `Proceed -> ()
-        | `Skip reason -> failwith reason
-      in
-      let bars = Array.append asset.signal [| provisional |] in
-      let strategy =
-        Dsl.compile_ast ast ~params:[] ~assets:[alias, bars]
-      in
-      let profile = Engine.profile_of_market "us" in
-      let effective_target raw =
-        let effective, _ =
-          Engine.effective_targets
-            ~financing_ratios:[| profile.default_financing_ratio |]
-            [| raw |]
-        in
-        effective.(0)
-      in
-      let target, previous_target =
-        match strategy.Engine.targets with
-        | [| targets |] when Array.length targets > 0 ->
-            let last = Array.length targets - 1 in
-            let target = effective_target targets.(last) in
-            let previous =
-              if last = 0 then 0. else effective_target targets.(last - 1)
-            in
-            target, previous
-        | _ -> failwith "live trading requires exactly one stock target"
-      in
+  let rebalance = Option.value (Dsl.rebalance_of ~filename:strat_path ast) ~default:false in
+  let stocks = Dsl.stocks_of ~filename:strat_path ast in
+  let market = strategy_market stocks in
+  let symbols = Array.of_list (List.map (fun (_, _, s) -> s) stocks) in
+  let () = if provisional_close <> None && Array.length symbols <> 1 then
+    failwith "--provisional-close needs a one-stock strategy" in
+  let check_session (bar : Data.bar) =
+    match snapshot_session ~session_date ~provisional_date:bar.date with
+    | `Proceed -> ()
+    | `Skip reason -> failwith reason in
+  match market with
+  | "us" ->
+      let loaded = Array.map (fun symbol ->
+        let snapshot = match provisional_close with
+          | None -> Alpaca.snapshot symbol
+          | Some price ->
+              let path = Filename.concat
+                (Filename.concat (Filename.concat data_dir "us") symbol) (symbol ^ ".csv") in
+              let prev_day_date = match Data.last_cached_date path with
+                | Some date -> date
+                | None -> failwith (Printf.sprintf
+                    "%s has no cached rows; run bt fetch us/%s" path symbol) in
+              override_snapshot ~session_date ~prev_day_date ~price in
+        let () = Data.fetch ~market:"us" ~symbol ~from_:None
+          ~to_:snapshot.prev_day_date ~data_dir in
+        let asset = Data.load_asset ~market:"us" ~symbol ~from_:None
+          ~to_:(Some snapshot.prev_day_date) ~data_dir in
+        let through = asset.signal.(Array.length asset.signal - 1).date in
+        let () = if not (cache_is_fresh ~last_cached:through
+          ~prev_trading_day:snapshot.prev_day_date) then
+          failwith (Printf.sprintf "stale cache: fetched through %s, expected %s"
+            through snapshot.prev_day_date) in
+        asset.signal, provisional_bar snapshot) symbols in
+      let fetched_through, arrays = align_history ~symbols
+        (Array.to_list (Array.map fst loaded)) in
+      let provisional = Array.map snd loaded in
+      let () = Array.iter check_session provisional in
+      let ratios = Array.make (Array.length symbols)
+        (Engine.profile_of_market "us").default_financing_ratio in
+      let targets, previous_targets =
+        decision_targets ast stocks arrays provisional ratios in
       let account = Alpaca.account mode in
-      let held = Alpaca.position_qty mode symbol in
+      let held = Array.map (Alpaca.position_qty mode) symbols in
       let position_symbols = Alpaca.positions mode in
-      let state, actions =
-        us_plan_action ~rebalance ~symbols:[|symbol|] ~date:provisional.date
-          ~account ~position_symbols ~held:[|held|] ~prices:[|provisional.c|]
-          ~targets:[|target|] ~previous_targets:[|previous_target|]
-      in
-      { fetched_through; provisional; target;
-        equity = state.equity; cash = state.cash; debit = state.loans.(0);
-        held; action = actions.(0) }
-  | [alias, "tw", symbol] ->
+      let prices = Array.map (fun (b : Data.bar) -> b.c) provisional in
+      let state, actions = us_plan_action ~rebalance ~symbols ~date:session_date
+        ~account ~position_symbols ~held ~prices ~targets ~previous_targets in
+      { fetched_through; equity = state.equity; cash = state.cash;
+        debit = Array.fold_left ( +. ) 0. state.loans; legs = [];
+        assets = Array.mapi (fun i symbol ->
+          { symbol; provisional = provisional.(i); target = targets.(i);
+            held = held.(i); action = actions.(i) }) symbols }
+  | "tw" ->
       let () = validate_date "session" session_date in
-      let () =
-        match mode, equity with
-        | Paper, Some value when Float.is_finite value && value > 0. -> ()
-        | Paper, Some _ ->
-            failwith "simulation equity must be finite and positive"
+      let () = match mode, equity with
+        | Paper, Some v when Float.is_finite v && v > 0. -> ()
+        | Paper, Some _ -> failwith "simulation equity must be finite and positive"
         | Paper, None -> failwith "simulation mode requires --equity"
         | Live, Some _ -> failwith "--equity is not allowed in production"
-        | Live, None -> ()
-      in
+        | Live, None -> () in
       let fetch_required = Option.is_none previous_session in
-      let previous_session =
-        match previous_session with
+      let previous_session = match previous_session with
         | Some date -> date
-        | None -> Data.previous_trading_day ~before:session_date
-      in
+        | None -> Data.previous_trading_day ~before:session_date in
       let () = validate_date "previous session" previous_session in
-      let () =
-        if previous_session >= session_date then
-          failwith
-            (Printf.sprintf
-               "previous TW trading session %s is not before %s"
-               previous_session session_date)
-      in
-      let snapshot =
-        match provisional_close, tw_snapshot with
+      let () = if previous_session >= session_date then failwith
+        (Printf.sprintf "previous TW trading session %s is not before %s"
+          previous_session session_date) in
+      let exchanges = Array.map (exchange_of_symbol ~data_dir) symbols in
+      let snapshots = match provisional_close, tw_snapshots with
         | Some price, _ ->
-            { Shioaji.datetime = session_date ^ "T13:20:00+08:00";
-              open_ = price; high = price; low = price; close = price;
-              bid = price; ask = price; total_volume = 0. }
-        | None, Some snapshot -> snapshot
-        | None, None ->
-            let exchange = exchange_of_symbol ~data_dir symbol in
-            (Shioaji.snapshot ~contracts:[|exchange, symbol|]).(0)
-      in
-      let () =
-        if fetch_required then
-          let () =
-            Data.fetch ~market:"tw" ~symbol ~from_:None
-              ~to_:previous_session ~data_dir
-          in
-          Data.fetch_tw_adjustments ~symbol ~to_:session_date ~data_dir
-      in
-      let asset =
-        Data.load_asset ~market:"tw" ~symbol ~from_:None
-          ~to_:(Some previous_session) ~data_dir
-      in
-      let fetched_through =
-        match Array.length asset.signal with
-        | 0 -> failwith "TW cache has no previous trading session"
-        | length -> asset.signal.(length - 1).date
-      in
-      let () =
-        if fetched_through <> previous_session then
-          failwith
-            (Printf.sprintf
-               "stale TW cache: fetched through %s, expected %s"
-               fetched_through previous_session)
-      in
-      let provisional = tw_provisional_bar snapshot in
-      let () =
-        match snapshot_session ~session_date
-                ~provisional_date:provisional.date with
-        | `Proceed -> ()
-        | `Skip reason -> failwith reason
-      in
-      let bars = Array.append asset.signal [| provisional |] in
-      let strategy = Dsl.compile_ast ast ~params:[] ~assets:[alias, bars] in
-      let financing_ratio =
-        Data.financing_ratio ~market:"tw" ~data_dir ~symbol
-      in
-      let effective_target raw =
-        let effective, _ =
-          Engine.effective_targets
-            ~financing_ratios:[| financing_ratio |] [| raw |]
-        in
-        effective.(0)
-      in
-      let target, previous_target =
-        match strategy.Engine.targets with
-        | [| targets |] when Array.length targets > 0 ->
-            let last = Array.length targets - 1 in
-            let target = effective_target targets.(last) in
-            let previous =
-              if last = 0 then 0. else effective_target targets.(last - 1)
-            in
-            target, previous
-        | _ -> failwith "live trading requires exactly one stock target"
-      in
-      let positions =
-        match tw_positions with
-        | Some positions -> positions
-        | None -> Shioaji.positions ()
-      in
-      let position_details =
-        match tw_position_details, tw_positions with
+            [|{ Shioaji.datetime = session_date ^ "T13:20:00+08:00";
+                open_ = price; high = price; low = price; close = price;
+                bid = price; ask = price; total_volume = 0. }|]
+        | None, Some snapshots -> snapshots
+        | None, None -> Shioaji.snapshot ~contracts:
+            (Array.mapi (fun i code -> exchanges.(i), code) symbols) in
+      let () = if Array.length snapshots <> Array.length symbols then
+        failwith "invalid Shioaji snapshot response" in
+      let arrays = Array.map (fun symbol ->
+        let () = if fetch_required then
+          let () = Data.fetch ~market:"tw" ~symbol ~from_:None ~to_:previous_session ~data_dir in
+          Data.fetch_tw_adjustments ~symbol ~to_:session_date ~data_dir in
+        let asset = Data.load_asset ~market:"tw" ~symbol ~from_:None
+          ~to_:(Some previous_session) ~data_dir in
+        let through = match Array.length asset.signal with
+          | 0 -> failwith "TW cache has no previous trading session"
+          | n -> asset.signal.(n - 1).date in
+        let () = if through <> previous_session then
+          failwith (Printf.sprintf "stale TW cache: fetched through %s, expected %s"
+            through previous_session) in
+        asset.signal) symbols |> Array.to_list in
+      let fetched_through, arrays = align_history ~symbols arrays in
+      let provisional = Array.map tw_provisional_bar snapshots in
+      let () = Array.iter check_session provisional in
+      let prices = Array.map (fun (b : Data.bar) -> b.c) provisional in
+      let ratios = Array.map
+        (fun symbol -> Data.financing_ratio ~market:"tw" ~data_dir ~symbol) symbols in
+      let targets, previous_targets =
+        decision_targets ast stocks arrays provisional ratios in
+      let positions = match tw_positions with
+        | Some positions -> positions | None -> Shioaji.positions () in
+      let details = match tw_position_details, tw_positions with
         | Some details, _ -> details
         | None, Some _ -> []
-        | None, None -> fetch_position_details symbol positions
-      in
-      let cash_shares, margin_shares, cash_value, margin_value,
-          loans, interests =
-        (position_totals ~symbols:[|symbol|] ~prices:[|provisional.c|] positions).(0)
-      in
-      let held = cash_shares +. margin_shares in
-      let cash, equity =
-        match mode, equity with
-        | Paper, Some equity ->
-            equity -. cash_value -. margin_value +. loans +. interests,
-            equity
+        | None, None -> Array.to_list symbols
+            |> List.concat_map (fun symbol -> fetch_position_details symbol positions) in
+      let totals = position_totals ~symbols ~prices positions in
+      let cash_values = Array.map (fun (_, _, cv, _, _, _) -> cv) totals in
+      let margin_values = Array.map (fun (_, _, _, mv, _, _) -> mv) totals in
+      let loans = Array.map (fun (_, _, _, _, l, _) -> l) totals in
+      let interests = Array.map (fun (_, _, _, _, _, i) -> i) totals in
+      let sum values = Array.fold_left ( +. ) 0. values in
+      let cv = sum cash_values and mv = sum margin_values in
+      let loan = sum loans and interest = sum interests in
+      let cash, equity = match mode, equity with
+        | Paper, Some equity -> equity -. cv -. mv +. loan +. interest, equity
         | Live, None ->
-            let balance =
-              match tw_balance with
-              | Some balance -> balance
-              | None -> Shioaji.balance ()
-            in
-            let settlements =
-              match tw_settlements with
-              | Some settlements -> settlements
-              | None -> Shioaji.settlements ()
-            in
+            let balance = match tw_balance with Some b -> b | None -> Shioaji.balance () in
+            let settlements = match tw_settlements with
+              | Some s -> s | None -> Shioaji.settlements () in
             let cash = tw_production_cash ~balance ~settlements in
-            cash, cash +. cash_value +. margin_value -. loans -. interests
-        | Paper, None | Live, Some _ -> assert false
-      in
-      let () =
-        if not (Float.is_finite cash) then
-          failwith "TW inferred cash balance is not finite"
-      in
-      let () =
-        if not (Float.is_finite equity) || equity <= 0. then
-          failwith "TW account equity is not positive"
-      in
-      let costs = tw_live_debit_costs symbol in
-      let plan =
-        Engine.plan_fills ~costs:[| costs |] ~capital:1.
-          ~profile:(Engine.profile_of_market "tw")
-          ~financing_ratios:[| financing_ratio |]
-          ~state:
-            { Engine.equity; cash; cash_values = [| cash_value |];
-              margin_values = [| margin_value |]; loans = [| loans |];
-              interests = [| interests |]; tail_interests = [| 0. |];
-              debt = 0.; receivables = 0.;
-              previous_targets = [| previous_target |] }
-          ~prices:[| provisional.c |] ~targets:[| target |] ~force:rebalance
-      in
-      let exchange = exchange_of_symbol ~data_dir symbol in
-      let action =
-        Orders
-          (maturity_rollover_legs ~session_date ~symbol ~exchange position_details
-           @ legs_of_plan ~codes:[|symbol|] ~exchanges:[|exchange|]
-               ~prices:[|provisional.c|] plan)
-      in
-      { fetched_through; provisional; target; equity; cash;
-        debit = loans; held; action }
-  | [_, _, _] -> failwith "live trading supports us and tw only"
-  | _ -> failwith "live trading requires exactly one stock"
+            cash, cash +. cv +. mv -. loan -. interest
+        | Paper, None | Live, Some _ -> assert false in
+      let () = if not (Float.is_finite cash) then
+        failwith "TW inferred cash balance is not finite" in
+      let () = if not (Float.is_finite equity) || equity <= 0. then
+        failwith "TW account equity is not positive" in
+      let state : Engine.plan_state =
+        { equity; cash; cash_values; margin_values; loans; interests;
+          tail_interests = Array.make (Array.length symbols) 0.;
+          debt = 0.; receivables = 0.; previous_targets } in
+      let plan = Engine.plan_fills ~costs:(Array.map tw_live_debit_costs symbols)
+        ~capital:1. ~profile:(Engine.profile_of_market "tw")
+        ~financing_ratios:ratios ~state ~prices ~targets ~force:rebalance in
+      let rollover = Array.to_list (Array.mapi (fun i symbol ->
+        maturity_rollover_legs ~session_date ~symbol ~exchange:exchanges.(i) details) symbols)
+        |> List.concat in
+      let legs = rollover @ legs_of_plan ~codes:symbols ~exchanges ~prices plan in
+      { fetched_through; equity; cash; debit = loan; legs;
+        assets = Array.mapi (fun i symbol ->
+          let cs, ms, _, _, _, _ = totals.(i) in
+          { symbol; provisional = provisional.(i); target = targets.(i);
+            held = cs +. ms;
+            action = Orders (List.filter (fun (l : leg) -> l.code = symbol) legs) }) symbols }
+  | _ -> failwith "live trading supports us and tw only"
 
 let printable_ascii value =
   String.map
@@ -886,18 +838,23 @@ let order_description = function
                (lot_name leg.lot) leg.quantity)
       |> String.concat ","
 
-let log_decision (decision : decision) =
-  log
-    "date=%s fetched-through=%s provisional-close=%.10g target=%.10g \
-     equity=%.10g held=%.10g order=%s fill=pending"
-    decision.provisional.date decision.fetched_through decision.provisional.c
-    decision.target decision.equity decision.held
-    (order_description decision.action)
+let log_decision date (decision : decision) =
+  if Array.for_all (fun (a : asset_decision) ->
+    a.action = Skip "target unchanged") decision.assets then
+    log "date=%s fetched-through=%s equity=%.10g cash=%.10g debit=%.10g order=skip:target unchanged"
+      date decision.fetched_through decision.equity decision.cash decision.debit
+  else
+    let () = log "date=%s fetched-through=%s equity=%.10g cash=%.10g debit=%.10g"
+      date decision.fetched_through decision.equity decision.cash decision.debit in
+    Array.iter (fun (a : asset_decision) ->
+      log "date=%s symbol=%s provisional-close=%.10g target=%.10g held=%.10g order=%s fill=pending"
+        date a.symbol a.provisional.c a.target a.held (order_description a.action))
+      decision.assets
 
-let log_fill date client_order_id = function
+let log_fill date symbol client_order_id = function
   | None ->
-      log "date=%s client-order-id=%s fill-status=missing fill-price=- filled-qty=0"
-        date client_order_id
+      log "date=%s symbol=%s client-order-id=%s fill-status=missing fill-price=- filled-qty=0"
+        date symbol client_order_id
   | Some (order : Alpaca.order_t) ->
       let price =
         match order.filled_avg_price with
@@ -905,77 +862,136 @@ let log_fill date client_order_id = function
         | None -> "-"
       in
       log
-        "date=%s client-order-id=%s fill-status=%s fill-price=%s \
+        "date=%s symbol=%s client-order-id=%s fill-status=%s fill-price=%s \
          filled-qty=%.10g"
-        date client_order_id order.status price order.filled_qty
+        date symbol client_order_id order.status price order.filled_qty
 
 let terminal_order_status = function
   | "filled" | "canceled" | "expired" | "rejected" | "stopped" -> true
   | _ -> false
 
-let rec poll_fill mode date client_order_id deadline =
+let rec poll_fill mode date symbol client_order_id deadline =
   let order = Alpaca.order_by_client_id mode client_order_id in
   match order with
   | Some order when terminal_order_status order.status ->
-      log_fill date client_order_id (Some order)
+      log_fill date symbol client_order_id (Some order)
   | _ when Unix.gettimeofday () >= deadline ->
-      log_fill date client_order_id order
+      log_fill date symbol client_order_id order
   | _ ->
-      Unix.sleepf 15.;
-      poll_fill mode date client_order_id deadline
+      let () = Unix.sleepf 15. in
+      poll_fill mode date symbol client_order_id deadline
 
-let finish_order mode next_close date client_order_id
+let finish_order mode next_close date symbol client_order_id
     (order : Alpaca.order_t) =
   if terminal_order_status order.status then
-    log_fill date client_order_id (Some order)
-  else begin
-    sleep_until next_close;
-    poll_fill mode date client_order_id
+    log_fill date symbol client_order_id (Some order)
+  else
+    let () = sleep_until next_close in
+    poll_fill mode date symbol client_order_id
       (float_of_int (rfc3339_seconds next_close + (5 * 60)))
-  end
 
-let execute_decision ?(order_by_client_id = Alpaca.order_by_client_id)
-    ?(clock = Alpaca.clock) ?(submit_market = Alpaca.submit_market) mode
-    symbol next_close decision =
-  match decision.action with
-  | Skip _ -> log_decision decision
-  | Order { side; qty; id } ->
-      (match order_by_client_id mode id with
-       | Some order ->
-           log_decision decision;
-           finish_order mode next_close decision.provisional.date id order
-       | None ->
-           let clock = clock mode in
-           log_decision decision;
-           if clock.is_open
-              && next_actions ~now:clock.timestamp ~next_close = `Decide
-           then
-             (try
-                match submit_market mode ~symbol ~qty ~side ~client_order_id:id with
-                | order ->
-                    (match
-                       if order.status = "rejected" then `Rejected
-                       else begin
-                         finish_order mode next_close decision.provisional.date id
-                           order;
-                         `Finished
-                       end
-                     with
-                     | `Rejected ->
-                         log "date=%s error=Alpaca rejected the order order=skip"
-                           decision.provisional.date
-                     | `Finished -> ()
-                     | exception error ->
-                         log "date=%s error=%s order=skip"
-                           decision.provisional.date (Printexc.to_string error))
-                | exception error ->
-                    log "date=%s error=order submission uncertain: %s order=skip"
-                      decision.provisional.date (Printexc.to_string error)
-              with _ -> ())
-           else
-             log "date=%s error=submit cutoff passed order=skip"
-               decision.provisional.date)
-  | Orders _ -> failwith "TW order legs require Shioaji"
+let execute_decision ?(existing = []) ?(sleep = Unix.sleepf) ?finish
+    ?(order_by_client_id = Alpaca.order_by_client_id)
+    ?(clock = Alpaca.clock) ?(submit_market = Alpaca.submit_market)
+    mode date next_close (decision : decision) =
+  let finish = match finish with
+    | Some finish -> finish
+    | None -> fun next_close date symbol order ->
+        finish_order mode next_close date symbol (client_order_id ~symbol ~date) order in
+  let error_text = function
+    | Failure message -> message
+    | error -> Printexc.to_string error in
+  let posted = ref (existing <> []) in
+  let placed = ref existing in
+  let finish_all () = List.iter (fun (symbol, order) ->
+    try finish next_close date symbol order with error ->
+      (try log "date=%s symbol=%s error=%s order=skip"
+        date symbol (Printexc.to_string error) with _ -> ())) (List.rev !placed) in
+  let orders = Array.to_list decision.assets
+    |> List.filter (fun (a : asset_decision) ->
+      not (List.mem_assoc a.symbol existing))
+    |> List.filter_map (fun (a : asset_decision) -> match a.action with
+      | Order { side; qty; id } -> Some (a.symbol, side, qty, id)
+      | Skip _ -> None
+      | Orders _ -> failwith "TW order legs require Shioaji") in
+  let execute () =
+    (* Complete every dedupe lookup before logging or submitting. *)
+    let pending = List.filter (fun (symbol, _, _, id) ->
+      match order_by_client_id mode id with
+      | None -> true
+      | Some order ->
+          let () = placed := (symbol, order) :: !placed in
+          let () = posted := true in
+          let () = log "date=%s symbol=%s order=existing:%s fill=pending" date symbol id in
+          false) orders in
+    let preflight () =
+      let c = clock mode in
+      if not c.is_open || next_actions ~now:c.timestamp ~next_close <> `Decide
+      then failwith "submit cutoff passed" in
+    let restarting_sell = List.exists
+      (fun (_, (o : Alpaca.order_t)) -> o.side = "sell") !placed in
+    let pending_sell = List.exists (fun (_, side, _, _) -> side = `Sell) pending in
+    let () = if pending <> [] && (not restarting_sell || pending_sell) then preflight () in
+    let () = log_decision date decision in
+    let submit (symbol, side, qty, id) =
+      let () = preflight () in
+      let () = posted := true in
+      match submit_market mode ~symbol ~qty ~side ~client_order_id:id with
+      | order ->
+          let () = placed := (symbol, order) :: !placed in
+          if order.status = "rejected" then
+            failwith (if side = `Sell then "sell " ^ symbol ^ " rejected"
+              else "Alpaca rejected the order")
+      | exception error ->
+          failwith (if side = `Sell then "sell " ^ symbol ^ " uncertain"
+            else "order submission uncertain: " ^ Printexc.to_string error) in
+    let submit_checked ((symbol, _, _, _) as request) =
+      match submit request with
+      | () -> ()
+      | exception error ->
+          let () = (try log "date=%s symbol=%s error=%s order=skip"
+            date symbol (error_text error) with _ -> ()) in
+          raise error in
+    let sells, buys = List.partition (fun (_, side, _, _) -> side = `Sell) pending in
+    let has_sell = sells <> [] || List.exists
+      (fun (_, (o : Alpaca.order_t)) -> o.side = "sell") !placed in
+    if not has_sell || buys = [] then List.iter submit_checked pending
+    else
+      let () = List.iter submit_checked sells in
+      let rec wait_sells () =
+        let stop = ref None in
+        let open_sell = ref None in
+        let () = placed := List.map (fun (symbol, (order : Alpaca.order_t)) ->
+          if order.side <> "sell" then symbol, order
+          else
+            let current =
+              match order_by_client_id mode (client_order_id ~symbol ~date) with
+              | None -> order
+              | Some current -> current
+              | exception _ -> failwith ("sell " ^ symbol ^ " uncertain") in
+            let () = if current.status <> "filled" then
+              if terminal_order_status current.status then
+                (if !stop = None then stop := Some ("sell " ^ symbol ^ " " ^ current.status))
+              else if !open_sell = None then open_sell := Some symbol in
+            symbol, current) !placed in
+        match !stop, !open_sell with
+        | Some reason, _ -> failwith reason
+        | None, None -> ()
+        | None, Some symbol ->
+            let c = clock mode in
+            if not c.is_open || next_actions ~now:c.timestamp ~next_close <> `Decide then
+              failwith ("sell " ^ symbol ^ " open at cutoff")
+            else let () = sleep 15. in wait_sells () in
+      let () = wait_sells () in
+      List.iter submit_checked buys in
+  match execute () with
+  | () -> (try finish_all () with _ -> ())
+  | exception error when !posted ->
+      let () = (try log "date=%s error=%s order=skip" date (error_text error) with _ -> ()) in
+      (try finish_all () with _ -> ())
+  | exception Failure message when message = "submit cutoff passed" ->
+      log "date=%s error=submit cutoff passed order=skip" date
+  | exception error -> raise error
 
 let retry_clock ~clock ~sleep ~dispatch =
   let rec loop () =
@@ -986,78 +1002,54 @@ let retry_clock ~clock ~sleep ~dispatch =
   in
   loop ()
 
-let us_step ~symbol ~lookup ~decide ~execute ~finish ~sleep_until ~retry
+let us_step ~symbols ~lookup ~decide ~execute ~finish ~sleep_until ~retry
     ~continue (clock : Alpaca.clock_t) =
-  if not clock.is_open then begin
-    sleep_until clock.next_open;
-    continue ()
-  end else
-    match next_actions ~now:clock.timestamp ~next_close:clock.next_close with
-    | `Sleep_until timestamp ->
-        sleep_until timestamp;
-        continue ()
-    | `Post_close ->
-        sleep_until clock.next_open;
-        continue ()
-    | (`Decide | `Cutoff_passed as phase) ->
-        let date = timestamp_date clock.timestamp in
-        let id = client_order_id ~symbol ~date in
-        let outcome =
-          match
-            let existing_order = lookup id in
-            match existing_order with
-            | Some order ->
-                log "date=%s order=existing:%s fill=pending" date id;
-                finish clock date id order;
-                sleep_until clock.next_open;
-                `Continue
-            | None when phase = `Cutoff_passed ->
-                log "date=%s error=submit cutoff passed order=skip" date;
-                sleep_until clock.next_open;
-                `Continue
-            | None ->
-                (match decide date with
-                 | decision ->
-                     (match execute clock decision with
-                      | () ->
-                          sleep_until clock.next_open;
-                          `Continue
-                      | exception error ->
-                          log "date=%s error=%s order=retry"
-                            decision.provisional.date
-                            (Printexc.to_string error);
-                          `Retry)
-                 | exception error ->
-                     log "date=%s error=%s order=retry" date
-                       (Printexc.to_string error);
-                     `Retry)
-          with
-          | outcome -> outcome
-          | exception error ->
-              if phase = `Cutoff_passed then begin
-                log "date=%s error=%s order=skip" date
-                  (Printexc.to_string error);
-                sleep_until clock.next_open;
-                `Continue
-              end else begin
-                log "date=%s error=%s order=retry" date
-                  (Printexc.to_string error);
-                `Retry
-              end
-        in
-        match outcome with
-        | `Continue -> continue ()
-        | `Retry -> retry ()
+  if not clock.is_open then
+    let () = sleep_until clock.next_open in continue ()
+  else match next_actions ~now:clock.timestamp ~next_close:clock.next_close with
+  | `Sleep_until timestamp -> let () = sleep_until timestamp in continue ()
+  | `Post_close -> let () = sleep_until clock.next_open in continue ()
+  | (`Decide | `Cutoff_passed as phase) ->
+      let date = timestamp_date clock.timestamp in
+      let existing = ref [] in
+      let end_day () = let () = sleep_until clock.next_open in continue () in
+      let reconcile () = List.iter (fun (symbol, order) ->
+        try finish clock date (client_order_id ~symbol ~date) order with error ->
+          (try log "date=%s symbol=%s error=%s order=skip"
+            date symbol (Printexc.to_string error) with _ -> ())) (List.rev !existing) in
+      match
+        let () = Array.iter (fun symbol ->
+          let id = client_order_id ~symbol ~date in
+          match lookup id with
+          | None -> ()
+          | Some order ->
+              let () = existing := (symbol, order) :: !existing in
+              log "date=%s symbol=%s order=existing:%s fill=pending" date symbol id) symbols in
+        let () = if phase = `Cutoff_passed
+          && List.length !existing <> Array.length symbols then
+          log "date=%s error=submit cutoff passed order=skip" date in
+        if List.length !existing = Array.length symbols || phase = `Cutoff_passed then
+          let () = reconcile () in `End
+        else
+          let decision = decide date in
+          let decision = { decision with assets = Array.map (fun (a : asset_decision) ->
+            if List.mem_assoc a.symbol !existing then { a with action = Skip "existing order" }
+            else a) decision.assets } in
+          let () = execute (List.rev !existing) clock decision in
+          `End
+      with
+      | `End -> end_day ()
+      | exception error ->
+          if phase = `Cutoff_passed then
+            let () = (try log "date=%s error=%s order=skip" date
+              (Printexc.to_string error) with _ -> ()) in
+            let () = reconcile () in
+            end_day ()
+          else
+            let () = log "date=%s error=%s order=retry" date (Printexc.to_string error) in
+            retry ()
 
-let run_us mode ~strat_path ~data_dir ~rebalance_choice =
-  let ast = Dsl.parse_file strat_path in
-  let symbol =
-    match Dsl.stocks_of ~filename:strat_path ast with
-    | [_, "us", symbol] -> symbol
-    | [_, "tw", _] | [_, _, _] ->
-        failwith "live trading supports us only"
-    | _ -> failwith "live trading requires exactly one stock"
-  in
+let run_us mode ~symbols ~strat_path ~data_dir ~rebalance_choice =
   let account = Alpaca.account mode in
   let () =
     match startup_ok account with
@@ -1076,16 +1068,18 @@ let run_us mode ~strat_path ~data_dir ~rebalance_choice =
           ~dispatch:step
     | clock -> step clock
   and step clock =
-    us_step ~symbol ~lookup:(Alpaca.order_by_client_id mode)
+    us_step ~symbols ~lookup:(Alpaca.order_by_client_id mode)
       ~decide:(fun date -> decide mode ~session_date:date ~strat_path ~data_dir)
-      ~execute:(fun clock decision ->
-        execute_decision mode symbol clock.next_close decision)
+      ~execute:(fun existing clock decision ->
+        execute_decision ~existing mode (timestamp_date clock.timestamp)
+          clock.next_close decision)
       ~finish:(fun clock date id order ->
-        finish_order mode clock.next_close date id order)
+        let symbol = Array.find_opt (fun symbol ->
+          client_order_id ~symbol ~date = id) symbols |> Option.get in
+        finish_order mode clock.next_close date symbol id order)
       ~sleep_until
       ~retry:(fun () ->
-        retry_clock ~clock:(fun () -> Alpaca.clock mode) ~sleep:Unix.sleepf
-          ~dispatch:step)
+        retry_clock ~clock:(fun () -> Alpaca.clock mode) ~sleep:Unix.sleepf ~dispatch:step)
       ~continue:cycle clock
   in
   cycle ()
@@ -1108,14 +1102,12 @@ let sleep_taipei ~days ~hour ~minute =
   if delay > 0. then Unix.sleepf delay
 
 let prepare_tw ~exchange ~symbol ~date ~data_dir =
-  let snapshot = (Shioaji.snapshot ~contracts:[|exchange, symbol|]).(0) in
-  let snapshot_date = tw_snapshot_date snapshot in
-  let () =
-    if snapshot_date <> date then
-      failwith
-        (Printf.sprintf "snapshot session %s is not trading date %s"
-           snapshot_date date)
-  in
+  let snapshots = Shioaji.snapshot ~contracts:[|exchange, symbol|] in
+  let () = Array.iter (fun snapshot ->
+    let snapshot_date = tw_snapshot_date snapshot in
+    if snapshot_date <> date then failwith
+      (Printf.sprintf "snapshot session %s is not trading date %s" snapshot_date date))
+    snapshots in
   let previous_session = Data.previous_trading_day ~before:date in
   let () =
     Data.fetch ~market:"tw" ~symbol ~from_:None ~to_:previous_session
@@ -1157,10 +1149,8 @@ let log_tw_trade date (trade : Shioaji.trade) =
     | Some price -> Printf.sprintf "%.10g" price
     | None -> "-"
   in
-  log
-    "date=%s order-id=%s action=%s cond=%s lot=%s fill-status=%s \
-     deal-quantity=%d fill-price=%s"
-    date trade.order_id trade.action trade.cond (lot_name trade.lot)
+  log "date=%s code=%s order-id=%s action=%s cond=%s lot=%s fill-status=%s deal-quantity=%d fill-price=%s"
+    date trade.code trade.order_id trade.action trade.cond (lot_name trade.lot)
     trade.status trade.deal_quantity price
 
 let tw_order_cost (costs : Engine.costs) ~action ~price ~shares =
@@ -1693,13 +1683,12 @@ let run_tw mode ~equity ~symbol ~strat_path ~data_dir ~rebalance_choice =
                let existing = Shioaji.orders_today ~code:symbol ~today:date in
                (match existing with
                 | _ :: _ ->
-                    let () =
-                      log
-                        "date=%s fetched-through=%s provisional-close=- \
-                         target=- equity=%.10g cash-shares=- margin-shares=- loan=- \
-                         planned-legs=none submitted=skip:existing-orders"
-                        date previous_session startup_equity
-                    in
+                    let () = log
+                      "date=%s fetched-through=%s equity=%.10g cash=- debit=- submitted=skip:existing-orders"
+                      date previous_session startup_equity in
+                    let () = log
+                      "date=%s symbol=%s provisional-close=- target=- cash-shares=- margin-shares=- loan=- planned-legs=none"
+                      date symbol in
                     let () = sleep_taipei ~days:0 ~hour:13 ~minute:30 in
                     cycle prepared (Some date)
                 | [] ->
@@ -1710,75 +1699,50 @@ let run_tw mode ~equity ~symbol ~strat_path ~data_dir ~rebalance_choice =
                     let position_details =
                       fetch_position_details symbol positions
                     in
-                    let tw_balance, tw_settlements, production_cash =
+                    let tw_balance, tw_settlements =
                       match mode, equity with
-                      | Paper, Some _ -> None, None, None
+                      | Paper, Some _ -> None, None
                       | Live, None ->
                           let balance = Shioaji.balance () in
                           let settlements = Shioaji.settlements () in
-                          Some balance, Some settlements,
-                          Some (tw_production_cash ~balance ~settlements)
+                          Some balance, Some settlements
                       | Paper, None | Live, Some _ -> assert false
                     in
                     let decision =
                       decide ~previous_session ?equity ?tw_balance
                         ?tw_settlements ~tw_positions:positions
                         ~tw_position_details:position_details
-                        ~tw_snapshot:snapshot mode ~session_date:date
+                        ~tw_snapshots:[|snapshot|] mode ~session_date:date
                         ~strat_path ~data_dir
                     in
-                    let cash_shares, margin_shares, cash_value, margin_value,
-                        loans, interests =
+                    let asset = decision.assets.(0) in
+                    let cash_shares, margin_shares, _, _, loans, _ =
                       (position_totals ~symbols:[|symbol|]
-                         ~prices:[|decision.provisional.c|] positions).(0)
-                    in
-                    let cash =
-                      match mode, equity, production_cash with
-                      | Paper, Some equity, None ->
-                          equity -. cash_value -. margin_value +. loans
-                          +. interests
-                      | Live, None, Some cash -> cash
-                      | _ -> assert false
-                    in
+                        ~prices:[|asset.provisional.c|] positions).(0) in
+                    let cash = decision.cash in
                     let outcome, legs =
-                      match decision.action with
-                      | Orders [] -> "skip:no-order-legs", []
-                      | Orders legs ->
-                          let execution =
-                            execute_tw_legs ~mode ~bid:snapshot.bid
-                              ~ask:snapshot.ask ~now:taipei_now
-                              ~sleep:Unix.sleepf
-                              ~place_order:Shioaji.place_order
-                              ~orders_today:Shioaji.orders_today ~exchange
-                              ~code:symbol ~date
-                              ~price:decision.provisional.c ~financing_ratio
-                              ~costs ~cash ~positions legs
-                          in
-                          let () =
-                            List.iter (log_tw_trade date) execution.trades
-                          in
-                          let outcome =
-                            match execution.stop_reason with
+                      match decision.legs with
+                      | [] -> "skip:no-order-legs", []
+                      | legs ->
+                          let execution = execute_tw_legs ~mode ~bid:snapshot.bid
+                            ~ask:snapshot.ask ~now:taipei_now ~sleep:Unix.sleepf
+                            ~place_order:Shioaji.place_order ~orders_today:Shioaji.orders_today
+                            ~exchange ~code:symbol ~date ~price:asset.provisional.c
+                            ~financing_ratio ~costs ~cash ~positions legs in
+                          let () = List.iter (log_tw_trade date) execution.trades in
+                          let outcome = match execution.stop_reason with
                             | None -> "complete"
-                            | Some reason ->
-                                Printf.sprintf "stop:%s remaining:%s" reason
-                                  (tw_legs_description execution.remaining)
-                          in
-                          outcome, legs
-                      | Order _ | Skip _ ->
-                          failwith "TW decision returned an Alpaca action"
-                    in
-                    let () =
-                      log
-                        "date=%s fetched-through=%s provisional-close=%.10g \
-                         target=%.10g equity=%.10g cash-shares=%.10g \
-                         margin-shares=%.10g loan=%.10g planned-legs=%s \
-                         submitted=%s"
-                        date decision.fetched_through decision.provisional.c
-                        decision.target decision.equity
-                        cash_shares margin_shares loans
-                        (tw_legs_description legs) outcome
-                    in
+                            | Some reason -> Printf.sprintf "stop:%s remaining:%s" reason
+                                (tw_legs_description execution.remaining) in
+                          outcome, legs in
+                    let () = log
+                      "date=%s fetched-through=%s equity=%.10g cash=%.10g debit=%.10g submitted=%s"
+                      date decision.fetched_through decision.equity decision.cash
+                      decision.debit outcome in
+                    let () = log
+                      "date=%s symbol=%s provisional-close=%.10g target=%.10g cash-shares=%.10g margin-shares=%.10g loan=%.10g planned-legs=%s"
+                      date symbol asset.provisional.c asset.target cash_shares margin_shares
+                      loans (tw_legs_description legs) in
                     let () = sleep_taipei ~days:0 ~hour:13 ~minute:30 in
                     cycle prepared (Some date)))
       | `After_close ->
@@ -1828,15 +1792,19 @@ let run ?equity mode ~strat_path ~data_dir =
     | Some home when home <> "" -> Filename.concat home ".bt"
     | _ -> failwith "HOME must be set to run bt live"
   in
-  match Dsl.stocks_of ~filename:strat_path ast with
-  | [_, "us", _] ->
+  let stocks = Dsl.stocks_of ~filename:strat_path ast in
+  let market = strategy_market stocks in
+  let symbols = Array.of_list (List.map (fun (_, _, s) -> s) stocks) in
+  match market with
+  | "us" ->
       let fd = lock_daemon ~directory ~market:"us" mode in
       Fun.protect ~finally:(fun () -> Unix.close fd)
-        (fun () -> run_us mode ~strat_path ~data_dir ~rebalance_choice)
-  | [_, "tw", symbol] ->
+        (fun () -> run_us mode ~symbols ~strat_path ~data_dir ~rebalance_choice)
+  | "tw" ->
+      let () = if Array.length symbols <> 1 then
+        failwith "TW live trading needs one stock in this release" in
+      let symbol = symbols.(0) in
       let fd = lock_daemon ~directory ~market:"tw" mode in
       Fun.protect ~finally:(fun () -> Unix.close fd)
-        (fun () -> run_tw mode ~equity ~symbol ~strat_path ~data_dir
-          ~rebalance_choice)
-  | [_, _, _] -> failwith "live trading supports us and tw only"
-  | _ -> failwith "live trading requires exactly one stock"
+        (fun () -> run_tw mode ~equity ~symbol ~strat_path ~data_dir ~rebalance_choice)
+  | _ -> failwith "live trading supports us and tw only"

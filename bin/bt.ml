@@ -660,50 +660,41 @@ let daytrade argv =
   if not !no_plot then Report.write_png ~out_dir:!out_dir ~stem
 
 let print_decision provisional_close (decision : Live.decision) =
-  let () =
-    match provisional_close with
+  let () = match provisional_close with
     | None -> ()
-    | Some price -> Printf.printf "provisional: override %.10g\n" price
-  in
-  let bar = decision.provisional in
-  Printf.printf "fetched-through: %s\n" decision.fetched_through;
-  Printf.printf "provisional-date: %s\n" bar.date;
-  Printf.printf "provisional-open: %.10g\n" bar.o;
-  Printf.printf "provisional-high: %.10g\n" bar.h;
-  Printf.printf "provisional-low: %.10g\n" bar.l;
-  Printf.printf "provisional-close: %.10g\n" bar.c;
-  Printf.printf "provisional-volume: %.10g\n" bar.v;
-  Printf.printf "target: %.10g\n" decision.target;
-  Printf.printf "equity: %.10g\n" decision.equity;
-  Printf.printf "cash: %.10g\n" decision.cash;
-  Printf.printf "debit: %.10g\n" decision.debit;
-  Printf.printf "held: %.10g\n" decision.held;
-  match decision.action with
-  | Live.Order { side; qty; id } ->
-      let side =
-        match side with
-        | `Buy -> "buy"
-        | `Sell -> "sell"
-      in
-      Printf.printf "action: order\n";
-      Printf.printf "side: %s\n" side;
-      Printf.printf "quantity: %s\n" (Alpaca.qty_string qty);
-      Printf.printf "client-order-id: %s\n" id
-  | Live.Skip reason ->
-      Printf.printf "action: skip\n";
-      Printf.printf "reason: %s\n" reason
-  | Live.Orders legs ->
-      let () = Printf.printf "action: orders\n" in
-      List.iter
-        (fun (leg : Live.leg) ->
-          let lot =
-            match leg.lot with
-            | Shioaji.Common -> "Common"
-            | Shioaji.IntradayOdd -> "IntradayOdd"
-          in
-          Printf.printf "leg: %s %s %s %d\n" leg.action leg.cond lot
-            leg.quantity)
-        legs
+    | Some price -> Printf.printf "provisional: override %.10g\n" price in
+  let () = Printf.printf "fetched-through: %s\n" decision.fetched_through in
+  let () = Printf.printf "equity: %.10g\n" decision.equity in
+  let () = Printf.printf "cash: %.10g\n" decision.cash in
+  let () = Printf.printf "debit: %.10g\n" decision.debit in
+  Array.iter (fun (asset : Live.asset_decision) ->
+    let bar = asset.provisional in
+    let () = Printf.printf "symbol: %s\n" asset.symbol in
+    let () = Printf.printf "provisional-date: %s\n" bar.date in
+    let () = Printf.printf "provisional-open: %.10g\n" bar.o in
+    let () = Printf.printf "provisional-high: %.10g\n" bar.h in
+    let () = Printf.printf "provisional-low: %.10g\n" bar.l in
+    let () = Printf.printf "provisional-close: %.10g\n" bar.c in
+    let () = Printf.printf "provisional-volume: %.10g\n" bar.v in
+    let () = Printf.printf "target: %.10g\n" asset.target in
+    let () = Printf.printf "held: %.10g\n" asset.held in
+    match asset.action with
+    | Live.Order { side; qty; id } ->
+        let side = match side with `Buy -> "buy" | `Sell -> "sell" in
+        let () = Printf.printf "action: order\n" in
+        let () = Printf.printf "side: %s\n" side in
+        let () = Printf.printf "quantity: %s\n" (Alpaca.qty_string qty) in
+        Printf.printf "client-order-id: %s\n" id
+    | Live.Skip reason ->
+        let () = Printf.printf "action: skip\n" in
+        Printf.printf "reason: %s\n" reason
+    | Live.Orders legs ->
+        let () = Printf.printf "action: orders\n" in
+        List.iter (fun (leg : Live.leg) ->
+          let lot = match leg.lot with
+            | Shioaji.Common -> "Common" | Shioaji.IntradayOdd -> "IntradayOdd" in
+          Printf.printf "leg: %s %s %s %d\n"
+            leg.action leg.cond lot leg.quantity) legs) decision.assets
 
 let live_command_args command extra_options argv =
   let strat_path = ref None in
@@ -756,12 +747,10 @@ let live_command_args command extra_options argv =
       failwith "day trading strategies run under bt daytrade"
   in
   let market =
-    match Dsl.stocks_of ~filename:strat_path ast with
-    | [_, market, _] -> market
-    | _ ->
-        usage_error
-          (Printf.sprintf
-             "%s: strategy must declare exactly one stock" command)
+    match Live.strategy_market (Dsl.stocks_of ~filename:strat_path ast) with
+    | market -> market
+    | exception Failure message when message = "live trading needs one market" ->
+        usage_error message
   in
   let mode = if !use_live then Live.Live else Live.Paper in
   match market with
@@ -799,6 +788,11 @@ let target argv =
   in
   let strat_path, market, mode, equity, data_dir, rebalance =
     live_command_args "target" extra_options argv
+  in
+  let () =
+    if !provisional_close <> None
+      && List.length (Dsl.stocks_of ~filename:strat_path (Dsl.parse_file strat_path)) <> 1
+    then failwith "--provisional-close needs a one-stock strategy"
   in
   let () =
     if rebalance = None then
