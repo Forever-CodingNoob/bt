@@ -9,11 +9,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - `bt target` prints `cash` and `debit` after `equity` for US and TW decisions: the free cash and margin loan the fill planner sizes from.
+- Multi-stock US live trading in one market, with one joint decision and fill plan for all strategy symbols. TW `bt target` also plans N codes; TW `bt live` remains one-code in this release and fails at startup with `TW live trading needs one stock in this release`.
+- Shared live decisions reject mixed markets, duplicate symbols, multi-stock provisional-price overrides, and history gaps in the last five union sessions.
 
 ### Changed
 
-- US `bt live` and `bt target` size orders through the backtest fill planner, as `bt run` does. They map Alpaca's signed cash and the one held stock, valued at the provisional close, into one margin lot, so leveraged targets trade the planner's quantities. Alpaca's `equity` field no longer sizes orders; the `startup` line still logs it. `Live.us_plan_action` replaces `Live.decide_action` and `Live.us_rebalance_action`.
+- US `bt live` and `bt target` size orders through the backtest fill planner, as `bt run` does. They map Alpaca's signed cash and every held strategy stock, valued at its provisional close, into the planner state, splitting the account debit into per-symbol margin lots in proportion to position value, so leveraged targets trade the planner's quantities. Alpaca's `equity` field no longer sizes orders; the `startup` line still logs it. `Live.us_plan_action` replaces `Live.decide_action` and `Live.us_rebalance_action`.
 - US decisions fail with `US account cash is not finite`, `US account holds a short position`, `US account holds other symbols`, or `US account equity is not positive` before planning. `bt target` places no order, and `bt live` retries until its submit cutoff. The on_change skip text `target unchanged` does not change.
+- `bt target` prints account fields once followed by declaration-ordered symbol blocks. US and TW daemon logs separate account and symbol lines; US existing-order, fill, and per-order error lines carry `symbol=SYMBOL`, and TW trade lines carry `code=CODE`.
+- US live executes sells before buys in mixed sessions and stops the buy phase unless every sell fills before the cutoff. A rejected, canceled, expired, stopped, uncertain, or still-open sell stops the session with `sell SYMBOL STATE`, `sell SYMBOL uncertain`, or `sell SYMBOL open at cutoff`. A rejected or uncertain order does not block the other orders of its phase whose clock check passes: after a rejected or uncertain sell, the other sells go out and the session then stops before any buy; after a rejected or uncertain buy, the other buys go out. A cutoff reached between submissions logs `symbol=SYMBOL error=submit cutoff passed order=skip` for each affected symbol; an affected sell stops the session before any buy, and known orders still enter the finish pass. Restart deduplication routes existing sells to the sell barrier and existing buys to the finish pass.
+- US decisions check the account positions list before the existing market-value tolerance, rejecting every symbol outside the strategy with `US account holds unsupported symbol SYMBOL`, including for one-stock strategies.
+- `Alpaca.positions` lists the account's open position symbols, and `Alpaca.order_t` carries the order `side`.
+- `Shioaji.snapshot` fetches every requested contract in one request and matches the responses by code, rejecting missing, duplicate, or extra codes.
+- `Live.decision` holds the account fields plus one `asset_decision` per symbol, and TW legs carry their `code` and `exchange`. `Data.common_dates` gives `bt run` and live decisions one date intersection.
 
 ## [0.11.0] - 2026-09-29
 

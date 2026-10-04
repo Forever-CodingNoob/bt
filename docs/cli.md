@@ -16,6 +16,7 @@
   - [Intraday output fields](#intraday-output-fields)
   - [Rejected flags](#rejected-flags)
 - [`bt target`](#bt-target)
+  - [Strategy validation](#strategy-validation)
   - [US market](#us-market)
     - [Prerequisites](#prerequisites)
     - [Options](#options)
@@ -211,31 +212,33 @@ Both market arms share these options.
 
 | Argument or option | Default | Description |
 |---|---|---|
-| `STRAT` | required | Read one strategy containing exactly one US or TW stock declaration. |
-| `--data-dir DIR` | `data/` | Set the Tiingo or FinMind cache directory selected by the strategy market. |
-| `--provisional-close PRICE` | - | Build the provisional bar from a positive PRICE instead of the broker snapshot. The output then starts with `provisional: override PRICE`. |
+| `STRAT` | required | Read one daily strategy with N distinct US or TW symbols, all in one market. |
+| `--data-dir DIR` | `data/` | Use that market's Tiingo or FinMind cache. |
+| `--provisional-close PRICE` | - | Build the provisional bar from a positive PRICE instead of the broker snapshot. It requires a one-stock strategy, and the output then starts with `provisional: override PRICE`. |
 | `-h`, `-help`, `--help` | - | Print the target options and exit with code 0. |
 
 > [!TIP]
 > Use `--provisional-close PRICE` for a dry run when a current broker snapshot is unavailable or unsuitable.
 
-Both market arms print these fields to standard output, one per line.
+Both markets print the account fields once, then one symbol block per stock in declaration order, one field per line. Each block ends with its market-specific action fields.
 
-| Field | Meaning |
-|---|---|
-| `provisional` | Report `override PRICE` when `--provisional-close` supplies the provisional bar. |
-| `fetched-through` | Show the last historical date fetched from Tiingo or FinMind. |
-| `provisional-date` | Show the provisional bar's date. |
-| `provisional-open` | Show the provisional bar's open. |
-| `provisional-high` | Show the provisional bar's high. |
-| `provisional-low` | Show the provisional bar's low. |
-| `provisional-close` | Show the provisional bar's close. |
-| `provisional-volume` | Show the provisional bar's volume. |
-| `target` | Show the strategy's effective target exposure after the engine clamps it. |
-| `equity` | Show the equity the planner sizes from. US: Alpaca's signed cash plus the held position at the provisional close. TW: the simulation `--equity` or the broker-derived production equity. |
-| `cash` | Show the free cash passed to the planner. US: Alpaca's cash when positive, otherwise 0. TW: the inferred simulation cash or the production spendable cash. |
-| `debit` | Show the margin loan passed to the planner. US: the negative part of Alpaca's cash, mapped into one loan. TW: the total loan principal of the held margin positions. |
-| `held` | Show the current share position. |
+| Scope | Field | Meaning |
+|---|---|---|
+| Account | `provisional` | Report `override PRICE` first when `--provisional-close` supplies the provisional bar. |
+| Account | `fetched-through` | Show the last historical date that every symbol shares. |
+| Account | `equity` | Show the equity the planner sizes from. US: Alpaca's signed cash plus every held symbol at its provisional close. TW: the simulation `--equity` or the broker-derived production equity. |
+| Account | `cash` | Show the free cash passed to the planner. US: Alpaca's cash when positive, otherwise 0. TW: the inferred simulation cash or the production spendable cash. |
+| Account | `debit` | Show the margin loan passed to the planner. US: the negative part of Alpaca's cash. TW: the summed loan principal of the held margin positions. |
+| Symbol block | `symbol` | Start the block with the symbol or code. |
+| Symbol block | `provisional-date` | Show the provisional bar's date. |
+| Symbol block | `provisional-open` | Show the provisional bar's open. |
+| Symbol block | `provisional-high` | Show the provisional bar's high. |
+| Symbol block | `provisional-low` | Show the provisional bar's low. |
+| Symbol block | `provisional-close` | Show the provisional bar's close, the decision price. |
+| Symbol block | `provisional-volume` | Show the provisional bar's volume. |
+| Symbol block | `target` | Show the effective target exposure after the engine clamps and jointly scales all targets. |
+| Symbol block | `held` | Show the shares currently held. TW counts cash and margin shares together. |
+| Symbol block | `action` | Report US `order` or `skip`, or TW `orders`, followed by that market's fields. |
 
 > [!IMPORTANT]
 > `bt target` prints the proposed action but never submits an order, even with `--live`.
@@ -245,11 +248,25 @@ A strategy without `rebalance daily` or `rebalance on_change` rebalances only wh
 > [!IMPORTANT]
 > Under `rebalance on_change`, declared or by default, each decision compares today's effective target with the previous session's, which bt recomputes from that session's cached final close. When the two are equal, the decision places no rebalancing order, and the position keeps its gap from target until the target next changes. The gap can come from ordinary price drift, from a previous-session decision at a provisional price whose target the final close does not reproduce, from a missed session or rejected orders, or from a partial fill. `rebalance daily` re-plans toward the target from the held position every session. It can still leave a residual: US skips a buy under USD 1, and TW floors cash quantities to whole shares and margin quantities to 1000-share lots.
 
+### Strategy validation
+
+These checks apply to `bt target` and `bt live` in both markets.
+
+| Message | Effect |
+|---|---|
+| `live trading needs one market` | A strategy that mixes US and TW stocks is a usage error, exit 2. |
+| `live trading needs distinct symbols: SYMBOL` | A broker symbol declared twice fails the command, even under distinct aliases. |
+| `--provisional-close needs a one-stock strategy` | `bt target` fails before any broker call. |
+| `history gap in SYMBOL within the last 5 sessions` | The decision fails on the first symbol, in declaration order, that misses one of the last five dates in the union of cached dates. `bt target` exits 1, the US daemon retries until the cutoff, and the TW daemon skips the day. |
+| `TW live trading needs one stock in this release` | `bt live` with a multi-code TW strategy does not start. |
+
+History is loaded and freshness-checked per symbol. A gap in any of the last five union dates fails the decision; older gaps pass. Every symbol is then filtered to the common dates, as `bt run` does, before its provisional bar is appended. The DSL compiler runs once with all assets, and `Engine.effective_targets` scales the final and previous target rows jointly. Under on_change, a symbol whose effective target is unchanged keeps its drift. When every symbol is unchanged, US skips before planning.
+
 ### US market
 
 #### Prerequisites
 
-The strategy must declare exactly one US stock. The command needs Tiingo history and access to the selected Alpaca paper or live account.
+The strategy must declare one or more distinct US stocks, and the account may hold only those symbols. The command needs Tiingo history and access to the selected Alpaca paper or live account.
 
 #### Options
 
@@ -271,17 +288,17 @@ The Alpaca key variables must contain credentials for the selected account.
 
 #### Decision cycle
 
-The command fetches Tiingo history through Alpaca's previous daily bar, appends Alpaca's current snapshot as a provisional bar, and evaluates the strategy with the same DSL compiler as `bt run`. With `--provisional-close PRICE`, the command skips the Alpaca snapshot and treats the last cached date as the previous daily bar.
+For each symbol, the command fetches Tiingo history through Alpaca's previous daily bar and reads Alpaca's current snapshot. It keeps the dates every symbol shares, appends each snapshot as a provisional bar, and evaluates the strategy with the same DSL compiler as `bt run`. With `--provisional-close PRICE`, the command skips the Alpaca snapshot and treats the last cached date as the previous daily bar.
 
-Under `rebalance on_change`, or without a declaration, the command compares the effective target with the previous bar's effective target, or 0 on the first bar. When they are equal, it skips with the reason `target unchanged`. Under `rebalance daily`, or when the target changed, it plans an order from the account and the held position.
+Under `rebalance on_change`, or without a declaration, the command compares each symbol's effective target with its previous bar's effective target, or 0 on the first bar. A symbol whose target is unchanged skips with the reason `target unchanged`. Under `rebalance daily`, or for symbols whose targets changed, it plans orders from the account and the held positions.
 
-The command maps the account into one engine state. A negative Alpaca cash balance becomes one margin loan. The position, valued at the provisional close, becomes margin inventory up to `loan / 0.5`, the value that loan finances at the US financing ratio; the rest is cash inventory. `Engine.plan_fills` then plans the fill with the US default costs, as `bt run` does. Alpaca's `equity` field does not size the order.
+The command maps the account into one engine state. A negative Alpaca cash balance becomes the account debit. bt splits it across symbols in proportion to their holdings at the provisional close, or equally when every holding is zero. Each symbol's holding becomes margin inventory up to `loan / 0.5`, the value its share of the loan finances at the US financing ratio; the rest is cash inventory. One `Engine.plan_fills` call then plans every symbol with the US default costs, as `bt run` does. Alpaca's `equity` field does not size the orders.
 
-The command nets the planned ordinary buys and sells into one order. Refinancing pairs need no Alpaca order, so the net ignores them. A net of 0 skips with the reason `no trade planned`. The command truncates the quantity to at most 9 decimal places, caps a sell at the held position, and sells every held share when the plan closes the position. A buy below USD 1 notional, or a quantity that truncates to 0, skips with the reason `below $1 minimum order value`. A sell of any positive quantity becomes an order, so you can always close a position worth less than USD 1.
+The command nets each symbol's planned ordinary buys and sells into one order for that symbol. Refinancing pairs need no Alpaca order, so the net ignores them. A net of 0 skips with the reason `no trade planned`. The command truncates the quantity to at most 9 decimal places, caps a sell at the held position, and sells every held share when the plan closes the position. A buy below USD 1 notional, or a quantity that truncates to 0, skips with the reason `below $1 minimum order value`. A sell of any positive quantity becomes an order, so you can always close a position worth less than USD 1.
 
 #### Output
 
-The US arm adds these fields to the shared output.
+The US arm adds these fields to each symbol block.
 
 | Field | Meaning |
 |---|---|
@@ -293,13 +310,14 @@ The US arm adds these fields to the shared output.
 
 #### Failure handling
 
-An unavailable account, stale cache or snapshot, failed history fetch, or strategy evaluation error fails the decision without submitting an order. These account states also fail it, checked in this order before the `target unchanged` skip:
+The [strategy validation](#strategy-validation) checks apply first. An unavailable account, stale cache or snapshot, failed history fetch, or strategy evaluation error fails the decision without submitting an order. These account states also fail it, checked in this order before the `target unchanged` skip:
 
 | Message | Condition |
 |---|---|
 | `US account cash is not finite` | Alpaca's `cash` is NaN or infinite. |
 | `US account holds a short position` | `short_market_value` is not 0, or the held quantity is negative. |
-| `US account holds other symbols` | `long_market_value` is not finite, or differs from the held position at the provisional close by more than 1% of `long_market_value`. |
+| `US account holds unsupported symbol SYMBOL` | An open position in Alpaca's positions list has a symbol outside the strategy. The check applies to one-stock strategies too. |
+| `US account holds other symbols` | `long_market_value` is not finite, or differs from the sum of every symbol's held quantity at its provisional close by more than 1% of `long_market_value`. |
 | `US account equity is not positive` | The mapped equity is NaN, infinite, or at most 0. |
 
 A `--provisional-close` price more than about 1% away from Alpaca's mark trips the other-symbols check on an account that holds the stock.
@@ -311,7 +329,7 @@ A `--provisional-close` price more than about 1% away from Alpaca's mark trips t
 
 #### Prerequisites
 
-The strategy must declare exactly one TW stock. Install the official `shioaji` command, create the server `.env`, and start `shioaji server start`.
+The strategy must declare one or more distinct TW stocks, and the account may hold only those codes. Install the official `shioaji` command, create the server `.env`, and start `shioaji server start`.
 
 The official server reads this `.env` from the directory where it starts:
 
@@ -352,11 +370,13 @@ The Shioaji server may still need its own keys to log in. `bt` never fails becau
 
 #### Decision cycle
 
-The TW target reads account and snapshot data from Shioaji and historical data from FinMind. It queries `TaiwanStockTradingDate` for the previous session and never treats cached prices as a calendar. It refreshes adjustments through today and rejects a stale snapshot or a cache that does not end on the previous session.
+The TW target reads account data and one snapshot request for all codes from Shioaji, and historical data from FinMind. It queries `TaiwanStockTradingDate` for the previous session and never treats cached prices as a calendar. It refreshes adjustments through today and rejects a stale snapshot or a cache that does not end on the previous session.
 
 On TW, `--provisional-close PRICE` replaces only the snapshot. The command still checks the Shioaji server mode, queries the independent FinMind trading calendar, fetches history, and requires the cache to end on the verified previous session.
 
 The resulting plan preserves the cash and margin inventories. It can contain cash sells, margin sells, cash buys, margin buys, and paired sell/rebuy refinancing legs. When a dated `MarginTrading` position detail reaches the engine's 18-calendar-month, month-end-clamped maturity, the plan puts a sell/rebuy pair before the ordinary target legs. As in `bt run`, the engine floors cash quantities to whole shares and margin and refinance quantities to 1000-share lots. The plan prices commission at SinoPac's settlement-debit list rate of 14.25 bps, the rate the `bt live` daemon funds with, so printed buy quantities can be slightly lower than a `bt run` backtest's at the 2.85 bps default. The design is in [Design: share quantum and odd lots](./specs/share-quantum-and-odd-lots.md).
+
+With several codes, the plan lists every code's rollover pairs first, then all margin sells, cash sells, refinance pairs, cash buys, and margin buys, each group in declaration order. Each symbol block prints its own legs in that order.
 
 Under `rebalance daily`, the planner plans back to the effective target every session, so it re-plans missed legs and partial fills. Under `rebalance on_change`, or without a declaration, it plans ordinary legs only when the effective target differs from the previous bar's, and otherwise preserves drift. Maturity rollover pairs do not depend on this choice.
 
@@ -370,7 +390,7 @@ Production requires exactly one settlement row for each of T+0, T+1, and T+2 and
 
 #### Output
 
-The TW arm adds these fields to the shared output.
+The TW arm adds these fields to each symbol block.
 
 | Field | Meaning |
 |---|---|
@@ -386,10 +406,10 @@ leg: Buy Cash IntradayOdd 580
 
 #### Failure handling
 
-The mode mismatch guard refuses simulation commands against a production server and refuses `--live` against a simulation server. The decision fails when the dated `position_detail` quantities of a margin position, counted in 1000-share lots, exceed its held margin shares.
+The [strategy validation](#strategy-validation) checks apply first. The mode mismatch guard refuses simulation commands against a production server and refuses `--live` against a simulation server. The decision fails when the dated `position_detail` quantities of a margin position, counted in 1000-share lots, exceed its held margin shares.
 
 > [!WARNING]
-> `--equity` is the total equity you supply for simulation; `bt` does not read it from broker cash or `account_balance`. With the supported one-stock account shape, `bt` infers simulation cash as equity minus the selected symbol's cash and margin inventory values, plus loan principal and interest. It rejects a nonzero holding in another symbol.
+> `--equity` is the total equity you supply for simulation; `bt` does not read it from broker cash or `account_balance`. Over the strategy's symbol set, `bt` infers simulation cash as equity minus the summed cash and margin inventory values of all strategy positions, plus their summed loan principal and interest. It rejects a nonzero holding in any code outside the strategy.
 
 `bt target` does not print `acc_balance` or the T-day amounts. `bt live` logs them with derived spendable cash and equity at production startup; see [Output and logs](#output-and-logs-1). T+0 stays visible there for audit even though the verified cash formula excludes it.
 
@@ -401,11 +421,11 @@ Both market arms share these options.
 
 | Argument or option | Default | Description |
 |---|---|---|
-| `STRAT` | required | Read one strategy containing exactly one US or TW stock declaration. |
+| `STRAT` | required | Read one daily strategy with N distinct symbols in one market. US trades every symbol; TW needs one symbol in this release. |
 | `--data-dir DIR` | `data/` | Set the Tiingo or FinMind cache directory selected by the strategy market. |
 | `-h`, `-help`, `--help` | - | Print the live options and exit with code 0. |
 
-Both daemons print ASCII log lines to standard output. They record the session date, fetched-through date, provisional close, target, equity, held position, action or skip reason, and fill state and price.
+Both daemons print ASCII log lines to standard output: one account line per decision, then one line per symbol with its provisional close, target, holdings, and action. The [strategy validation](#strategy-validation) checks of `bt target` also apply.
 
 Only one daemon can hold `$HOME/.bt/live-<market>-<mode>.lock` at a time (`paper` or `live` for US; `simulation` or `production` for TW), regardless of the data directory; another fails with `another bt live daemon holds <path>`. The lock excludes only daemons that share a `HOME`, market, and mode, so daemons with different `HOME` values can trade the same account at once.
 
@@ -418,7 +438,7 @@ A strategy without `rebalance daily` or `rebalance on_change` rebalances only wh
 
 #### Prerequisites
 
-The strategy must declare exactly one US stock. The selected Alpaca account must be active and not trading-blocked.
+The strategy must declare one or more distinct US stocks, and the account may hold only those symbols. The selected Alpaca account must be active and not trading-blocked.
 
 #### Options
 
@@ -445,19 +465,39 @@ The daemon derives every phase from Alpaca's `next_close`.
 | Phase | Timing | Action |
 |---|---|---|
 | Evaluate | 15 minutes before the close | Refresh Tiingo history and evaluate the provisional daily bar. |
-| Submit | Until 2 minutes before the close | Query today's deterministic client order ID, then submit a fractional `market` order with `time_in_force: day` when needed. |
-| Reconcile | After the close | Poll the order every 15 seconds until it reaches a terminal status or 5 minutes pass after the close, then log the fill. |
+| Submit | Until 2 minutes before the close | Query today's deterministic client order ID for every symbol, then submit fractional `market` orders with `time_in_force: day` where needed. A session with sells and buys submits every buy only after every sell fills. |
+| Reconcile | After the close | Poll each open order every 15 seconds until it reaches a terminal status or 5 minutes pass after the close, then log its fill. |
 | Sleep | After reconciliation | Sleep until the next open. |
 
-The Submit phase ends 2 minutes before the close because Alpaca queues a day order sent after the close for the next session, and the order request can take up to its 60-second curl timeout. At or after that cutoff, the daemon logs `error=submit cutoff passed order=skip` and submits nothing. The account checks, the planner sizing, the `target unchanged` and `no trade planned` skips, the 9-decimal fractional quantity, and the USD 1 buy minimum match `bt target`. The `target unchanged` skip logs `order=skip:target unchanged`.
+The Submit phase ends 2 minutes before the close because Alpaca queues a day order sent after the close for the next session, and the order request can take up to its 60-second curl timeout. At or after that cutoff, the daemon logs `error=submit cutoff passed order=skip` and submits nothing. The account checks, the planner sizing, the `target unchanged` and `no trade planned` skips, the 9-decimal fractional quantity, and the USD 1 buy minimum match `bt target`.
+
+A session with both sells and buys runs a sell phase. The daemon POSTs its sells, polls all of them every 15 seconds, and starts buys only after every sell reaches `filled`. It checks the clock before each POST. A session with no sell or no buy posts its orders before the finish pass, as a one-order session always did. On restart, existing sells join the sell barrier and existing buys enter only the finish pass. No request is retried after a POST.
 
 #### Output and logs
 
-Each daemon line starts with a UTC timestamp in `YYYY-MM-DDTHH:MM:SSZ` format. Each US decision line records `held` and `order`, which holds the deterministic order as `SIDE:QUANTITY:CLIENT-ORDER-ID` or the skip reason as `skip:REASON`. For a new submission, the daemon writes the decision line only after today's order lookup and the pre-submit clock check succeed, so an attempt that fails before then and retries writes no decision line. When the lookup finds today's order already placed, the daemon writes the decision line right after the lookup, with no clock check. Fill lines record `client-order-id`, `fill-status`, `fill-price`, and `filled-qty`. The `startup` line records the selected `mode`, `account` number, and `equity`.
+Each daemon line starts with a UTC timestamp in `YYYY-MM-DDTHH:MM:SSZ` format. The `startup` line records the selected `mode`, `account` number, and `equity`. Each decision logs one account line, followed by one line per symbol:
+
+```text
+date=DATE fetched-through=DATE equity=VALUE cash=VALUE debit=VALUE
+date=DATE symbol=SYMBOL provisional-close=VALUE target=VALUE held=VALUE order=ORDER fill=pending
+```
+
+ORDER holds the deterministic order as `SIDE:QUANTITY:CLIENT-ORDER-ID` or the skip reason as `skip:REASON`. An all-unchanged on_change session logs only the account line, ending in `order=skip:target unchanged`. Existing-order, fill, and per-order error lines include `symbol=SYMBOL`. Client order IDs remain `bt-SYMBOL-DATE`. Fill lines record `client-order-id`, `fill-status`, `fill-price`, and `filled-qty`.
+
+When new orders are pending, the daemon writes the decision lines only after today's order lookups and the pre-submit clock check succeed, so an attempt that fails before then and retries writes none. When the lookups find every order already placed, the daemon reconciles those orders without deciding or logging account and symbol decision lines. A restart whose only new orders are buys behind an existing sell skips that early check; each buy POST still checks the clock.
 
 #### Failure handling
 
-The daemon refuses to start with an inactive or trading-blocked account. If the Alpaca clock request at the start of a daemon cycle fails, the daemon logs `order=retry`, retries every 60 seconds, and continues the same session once a request succeeds. Before the cutoff, a stale cache, a fetch, snapshot, or evaluation error, a failed order lookup, or a failed clock check just before submission also logs `order=retry`, and the daemon retries every 60 seconds. Each retry looks up today's client order ID first, so a day that already has an order gets no second one. At or after the cutoff, a failed order lookup logs `order=skip` and ends the US action for the day. Once the daemon sends the order request, the day ends there with no retry, because the request may have reached Alpaca and a retry could submit the order twice. A failed request logs `error=order submission uncertain: REASON order=skip`, a `rejected` status logs `error=Alpaca rejected the order order=skip`, and a failure while following the submitted order logs `error=REASON order=skip`.
+The daemon refuses to start with an inactive or trading-blocked account. If the Alpaca clock request at the start of a daemon cycle fails, the daemon logs `order=retry`, retries every 60 seconds, and continues the same session once a request succeeds. Before the cutoff, a stale cache, a history gap, a fetch, snapshot, or evaluation error, a failed order lookup, or a failed clock check just before the first submission also logs `order=retry`, and the daemon retries every 60 seconds. Each retry looks up today's client order IDs first, so a symbol that already has an order gets no second one. At or after the cutoff, a failed order lookup logs `order=skip` and ends the US action for the day. Once the daemon sends any order request, nothing is retried that day, because the request may have reached Alpaca and a retry could submit the order twice. A failed buy request logs `symbol=SYMBOL error=order submission uncertain: REASON order=skip`, a `rejected` buy logs `symbol=SYMBOL error=Alpaca rejected the order order=skip`, and the other buys still go out. A failure while following a submitted order logs `symbol=SYMBOL error=REASON order=skip`.
+
+A sell-phase stop sends no buy and logs a session-level `error=REASON order=skip` line. Known orders still enter the finish pass.
+
+| US sell-phase stop | Result |
+|---|---|
+| `sell SYMBOL rejected` or `sell SYMBOL uncertain` at submission | The failed sell logs `symbol=SYMBOL error=REASON order=skip`, and each other sell still goes out if its pre-submit clock check passes. The first failed sell names the stop, and no buy is POSTed. |
+| `submit cutoff passed` between submissions | Each sell whose pre-submit clock check finds the cutoff logs `symbol=SYMBOL error=submit cutoff passed order=skip` and is not POSTed. No buy POST. |
+| `sell SYMBOL STATE` while polling | No buy POST when STATE is `rejected`, `canceled`, `expired`, or `stopped`. A failed status lookup reports `sell SYMBOL uncertain`. |
+| `sell SYMBOL open at cutoff` | No buy POST. |
 
 A failed [account check](#failure-handling) before the cutoff logs `error=Failure("MESSAGE") order=retry`, and the daemon retries every 60 seconds. If the account stays invalid until the cutoff, the daemon logs `error=submit cutoff passed order=skip` and places no order.
 
@@ -468,16 +508,21 @@ A failed [account check](#failure-handling) before the cutoff logs `error=Failur
 > The free Alpaca IEX feed can produce a provisional price that differs from the consolidated tape. The market order fills near the decision time, about 15 minutes before the official close; model that gap in `bt run` with `--slip-bps`. Alpaca paper accounts also do not simulate dividends, so paper cash and equity can diverge from a live account.
 
 > [!IMPORTANT]
-> The US path re-plans the order from the account on every attempt. It retries a failed prerequisite until the cutoff but never retries after it sends the order request.
+> The US path re-plans every order from the account on every attempt. It retries a failed prerequisite until the cutoff but never retries after it sends an order request.
 
 > [!NOTE]
-> The US path queries the deterministic client order ID before submission. This reduces duplicate risk but is not an exactly-once guarantee for concurrent processes.
+> The US path queries each symbol's deterministic client order ID before submission. This reduces duplicate risk but is not an exactly-once guarantee for concurrent processes.
+
+> [!WARNING]
+> A partial restart plans from holdings and cash, not open orders. An unfilled order of a done symbol is invisible to that re-plan, so remaining symbols can be sized from cash the open order will spend. Symbol deduplication prevents resubmission but does not close this buying-power gap.
 
 ### Taiwan market
 
 #### Prerequisites
 
-Install the official `shioaji` command, create the server `.env` shown in the TW target section, and start `shioaji server start`. The strategy must declare exactly one TW stock.
+Install the official `shioaji` command, create the server `.env` shown in the TW target section, and start `shioaji server start`.
+
+TW `bt target` supports N distinct codes. TW `bt live` still needs one code in this release and fails at startup with `TW live trading needs one stock in this release`; N-code TW execution belongs to stage 2.
 
 #### Options
 
@@ -531,11 +576,18 @@ Live planning and execution both use SinoPac's settlement-debit list rate of 14.
 
 #### Output and logs
 
-Each daemon line starts with a UTC timestamp in `YYYY-MM-DDTHH:MM:SSZ` format. Each decision line records `cash-shares`, `margin-shares`, `loan`, `planned-legs` as `ACTION:CONDITION:LOT:QUANTITY` entries, and `submitted` as `complete`, `stop:REASON remaining:LEGS`, `skip:no-order-legs`, or `skip:existing-orders`. Odd-lot orders add their own `submitted=` lines. Trade lines record `order-id`, `action`, `cond`, `lot`, `fill-status`, `deal-quantity` in the trade's lot unit, and `fill-price`. The production `startup` line also records `acc-balance`, `t0`, `t1`, `t2`, spendable `cash`, and `equity`.
+Each daemon line starts with a UTC timestamp in `YYYY-MM-DDTHH:MM:SSZ` format. The production `startup` line also records `acc-balance`, `t0`, `t1`, `t2`, spendable `cash`, and `equity`. Each decision logs one account line followed by one line for its one supported live symbol:
+
+```text
+date=DATE fetched-through=DATE equity=VALUE cash=VALUE debit=VALUE submitted=OUTCOME
+date=DATE symbol=CODE provisional-close=VALUE target=VALUE cash-shares=VALUE margin-shares=VALUE loan=VALUE planned-legs=LEGS
+```
+
+OUTCOME is `complete`, `skip:no-order-legs`, `skip:existing-orders`, or `stop:REASON remaining:LEGS`. LEGS lists `ACTION:CONDITION:LOT:QUANTITY` entries, or `none`. In an existing-orders skip, `cash`, `debit`, and every symbol value except `planned-legs=none` print `-`, and `equity` is the startup equity. Odd-lot orders add their own `submitted=` lines. Trade lines record `code`, `order-id`, `action`, `cond`, `lot`, `fill-status`, `deal-quantity` in the trade's lot unit, and `fill-price`. `custom_field` remains `btMMDD`. Lot orders stay sequential `MKT` + `IOC`, and odd lots stay `LMT` + `ROD`, in this release.
 
 #### Failure handling
 
-The mode mismatch guard requires simulation commands to see `info.simulation = true` and `--live` to see `info.simulation = false`. The daemon re-reads server info at the start of each unsubmitted daily Decide phase; if the server mode changed after startup, it logs the mismatch and skips the day's action before any order can be submitted. The day also stops when the dated `position_detail` quantities of a margin position, counted in 1000-share lots, exceed its held margin shares.
+The [strategy validation](#strategy-validation) checks apply at startup and in each decision. The mode mismatch guard requires simulation commands to see `info.simulation = true` and `--live` to see `info.simulation = false`. The daemon re-reads server info at the start of each unsubmitted daily Decide phase; if the server mode changed after startup, it logs the mismatch and skips the day's action before any order can be submitted. The day also stops when the dated `position_detail` quantities of a margin position, counted in 1000-share lots, exceed its held margin shares.
 
 A `Common` order that ends `Failed`, `Inactive`, `Cancelled`, or `Rejected` with no fill lets later independent legs run. A sell that ends this way blocks its dependent rebuy and every leg after it. A partial, missing, ambiguous, mismatched, timed-out, cutoff, or uncertain result stops all later legs.
 
