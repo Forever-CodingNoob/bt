@@ -39,7 +39,7 @@ Status: approved, not implemented
     - [Contract info](#contract-info)
     - [Trading limits](#trading-limits)
     - [Budget rule](#budget-rule)
-    - [Pending readings](#pending-readings)
+    - [Measured and unmeasured](#measured-and-unmeasured)
 - [Errors](#errors)
 - [Tests](#tests)
   - [Single-stock pins](#single-stock-pins)
@@ -377,17 +377,7 @@ The pre-check runs in production only. Shioaji's simulation returns zero trading
 
 #### Trading limits
 
-`Shioaji.trading_limits ()` calls `POST /api/v1/portfolio/trading_limits` with `{"account_type":"S"}` and parses `trading_limit`, `trading_used`, `trading_available`, `margin_limit`, `margin_used`, and `margin_available`. The server answers on trading days from 08:30 to 15:00 Taipei only ([Shioaji accounting reference](https://github.com/Sinotrade/rshioaji/blob/main/skills/shioaji/references/ACCOUNTING.md)). The daemon reads it once per session, at the 13:20 decision.
-
-> [!NOTE]
-> Production readings on Friday 2026-10-02 (`.superpowers/sdd/tw-limits-probe/log.md`):
->
-> - 09:04: `trading_used` 0, `trading_available` 1000000, `margin_limit` 0.
-> - 09:04: a `LMT` `IntradayOdd` buy of 1 share of 0050 at 112.6, status `Submitted`. About 20 seconds later `trading_used` read 112, before the fill.
-> - 09:10: the order filled at 112.6, and `trading_used` stayed 112.
-> - 13:30: `trading_used` still 112, `margin_limit` still 0.
->
-> The broker held the limit at placement. The account has no margin facility today, so the broker would reject a margin leg until it enables one.
+`Shioaji.trading_limits ()` calls `POST /api/v1/portfolio/trading_limits` with `{"account_type":"S"}` and parses `trading_limit`, `trading_used`, `trading_available`, `margin_limit`, `margin_used`, and `margin_available`. The server answers on trading days from 08:30 to 15:00 Taipei only ([Shioaji accounting reference](https://github.com/Sinotrade/rshioaji/blob/main/skills/shioaji/references/ACCOUNTING.md)). The daemon reads it once per session, at the 13:20 decision. [Measured and unmeasured](#measured-and-unmeasured) lists how orders change the figures on the production account.
 
 #### Budget rule
 
@@ -403,20 +393,33 @@ A symbol without a usable `limit_up` (absent, null, or not positive) is priced a
 - When the cash sum exceeds `trading_available`, the session fails before any order with `TW buy budget short: planned X, available Y`.
 - When the margin sum exceeds `margin_available`, the session fails before any order with `TW margin budget short: planned X, available Y`.
 
-The daemon does not retry within the session. The [pending readings](#pending-readings) leave open how a same-day sell and an FOK kill change the limits, so the pre-check assumes that sells add nothing and kills release nothing, and a failed check stands for the day. With `margin_limit` 0, any plan with a margin buy fails this check.
+The daemon reads the limits once, before the first order, and does not retry within the session, so a failed check stands for the day. `trading_used` resets daily, so each session checks against that day's limits. A sell placement takes no hold, a cancelled order releases its hold at once, and an order rejected at placement holds nothing. The pre-check assumes that a filled sell adds nothing to `trading_available`, which can only make the check stricter.
+
+The pre-check also assumes that an FOK kill releases its hold, as a cancel does, but no session depends on it. The executor places each buy leg once and the sum counts each buy leg once, so a kill that kept its hold would still leave the total hold within the checked sum. The next session starts from reset limits. With `margin_limit` 0, any plan with a margin buy fails this check.
 
 The `limit_up` basis assumes the broker holds a market buy at the limit-up price. The [stage 2 acceptance](#stage-2-tw-production) measures the real hold on one 00685L lot. That measurement may lower the pricing basis. It never changes the order type.
 
-#### Pending readings
+#### Measured and unmeasured
+
+Readings on the production SinoPac account with 0050, on Friday 2026-10-02 and Monday 2026-10-05 (`.superpowers/sdd/tw-limits-probe/log.md`):
+
+| Question | Reading | Log lines |
+|---|---|---|
+| Does `trading_used` reset? | Daily. It read 112 at Friday's 13:30 and 0 at Monday's 09:05. | 7, 23 |
+| When does a buy take its hold? | At placement, at its limit price, before any fill. A `LMT` `IntradayOdd` buy of 1 share at 112.6 took `trading_used` from 0 to 112 about 20 seconds after placement. The fill 6 minutes later left it at 112. | 2-5 |
+| Does a sell placement consume the limit? | No. A sell of 1 share at 115.65 left `trading_used` at 0. | 24 |
+| Does a cancel release the hold? | Yes, at once. A resting buy of 1 share at 105 took `trading_used` from 0 to 105, and its cancel took it back to 0. | 34-35 |
+| Does an order rejected at placement hold anything? | No. A buy priced below `limit_down` failed at placement and left `trading_used` at 0. | 26, 33 |
+| What is `margin_limit`? | 0 at every reading. | 2, 7, 28 |
 
 > [!WARNING]
-> PENDING: the Monday 2026-10-05 production readings answer three questions. Until then, the pre-check uses the stated assumption.
->
-> - (a) Does a same-day sell add to, consume, or leave `trading_available`? Assumption: sells add nothing.
-> - (b) Does a cancelled or killed order release its hold? Assumption: it does not, so an FOK kill reduces the budget for later legs and later sessions.
-> - (c) Does `trading_used` reset daily or at settlement? The pre-check reads the limits at every session start, so either answer works.
->
-> The stage 2 plan writes the readings into this rule before the production session.
+> Three behaviors are unmeasured. The pre-check runs on the assumption in the last column until the [stage 2 acceptance](#stage-2-tw-production) measures them.
+
+| Question | Why unmeasured | Assumption |
+|---|---|---|
+| Does a filled sell add to `trading_available`? | The probe placed its sell while `trading_used` was 0, so "adds back" and "adds nothing" read the same. | Sells add nothing. |
+| Does an FOK kill after acceptance release its hold? | The probe placed no lot order. A cancel releases its hold, so a kill is expected to release too. | Kills release. No session depends on it (see the [budget rule](#budget-rule)). |
+| What hold does the broker take for a `MKT` lot buy? | The probe placed no `MKT` order. | `limit_up x lots x unit`. |
 
 ## Errors
 
@@ -509,12 +512,7 @@ The US live planner acceptance must also pass before v0.12.0.
 
 ### Stage 2: TW production
 
-Preconditions:
-
-- The probe's one 0050 share is sold (Monday 2026-10-05 runbook, `.superpowers/sdd/tw-limits-probe/log.md:10-20`).
-- `margin_limit` is confirmed. While it reads 0, the strategy uses cash targets only.
-- The Monday readings are written into the [budget rule](#budget-rule), and [Pending readings](#pending-readings) is resolved.
-- The `MKT` hold is measured on one 00685L lot: read the trading limits, place one `Common` `MKT` buy, and read them again right after placement. The pricing basis follows the measured hold.
+Precondition: `margin_limit` is confirmed. While it reads 0, the strategy uses cash targets only.
 
 Run one production session of `bt live --live` on a strategy with two TW codes, `rebalance daily`, and targets that plan a `Common` lot plus an `IntradayOdd` remainder for each code. Check in the log:
 
@@ -524,6 +522,14 @@ Run one production session of `bt live --live` on a strategy with two TW codes, 
 - The odd-lot legs placed as `LMT` + `ROD`.
 
 This session also closes the open production gate of [Design: share quantum and odd lots](./share-quantum-and-odd-lots.md#testing-and-gates), a cash leg that produces both a lot order and an odd order.
+
+Around the same session, measure the three open items of [Measured and unmeasured](#measured-and-unmeasured), with `trading_limits` read before and after each order:
+
+- A sell placed while `trading_used` is above 0. A rise in `trading_available` after its fill means a filled sell adds back.
+- One `Common` FOK lot order that the broker kills. `trading_used` back at its earlier value means a kill releases its hold.
+- One `MKT` `Common` buy of one 00685L lot that fills. The pricing basis follows the measured hold.
+
+Write the readings into [Measured and unmeasured](#measured-and-unmeasured) and the [budget rule](#budget-rule) before v0.13.0.
 
 ## Docs
 
