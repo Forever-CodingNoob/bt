@@ -30,6 +30,25 @@ type position_detail = {
   lots : int;
 }
 
+type contract_info = {
+  reference : float;
+  limit_up : float option;
+  limit_down : float;
+  day_trade : string;
+  unit : float;
+  margin_loan_ratio : float;
+  trading_suspended : bool;
+}
+
+type trading_limits = {
+  trading_limit : float;
+  trading_used : float;
+  trading_available : float;
+  margin_limit : float;
+  margin_used : float;
+  margin_available : float;
+}
+
 type lot = Common | IntradayOdd
 
 type order_request = {
@@ -192,6 +211,45 @@ let parse_info raw =
   | [simulation; _version] ->
       { simulation = bool_field "info simulation" simulation }
   | _ -> failwith "invalid Shioaji info response"
+
+let parse_contract_info raw =
+  match jq_fields "contract info"
+    "if ((.reference | type) == \"number\" and (.limit_down | type) == \"number\" and (.day_trade | type) == \"string\" and (.unit | type) == \"number\" and (.margin_loan_ratio | type) == \"number\" and (.trading_suspended | type) == \"boolean\" and (.limit_up == null or (.limit_up | type) == \"number\")) then [(.reference | tostring), (if .limit_up == null then \"\" else (.limit_up | tostring) end), (.limit_down | tostring), .day_trade, (.unit | tostring), (.margin_loan_ratio | tostring), (.trading_suspended | tostring)] | @tsv else error(\"invalid contract info fields\") end" raw with
+  | [reference; limit_up; limit_down; day_trade; unit; margin_loan_ratio;
+     trading_suspended] ->
+      let limit_up = match limit_up with
+        | "" -> None
+        | value -> let value = float_field "contract info limit_up" value in
+            if value > 0. then Some value else None in
+      let ratio = nonnegative_float_field "contract info margin_loan_ratio"
+        margin_loan_ratio in
+      let () = if ratio > 1. then failwith "invalid Shioaji contract info ratio" in
+      let reference = positive_float_field "contract info reference" reference in
+      let limit_down = nonnegative_float_field "contract info limit_down" limit_down in
+      let unit = float_field "contract info unit" unit in
+      let () =
+        if limit_down > reference
+           || (match limit_up with Some upper -> upper < reference | None -> false)
+        then failwith "invalid Shioaji contract info band"
+      in
+      let () = if unit <> 1000. then failwith "invalid Shioaji contract info unit" in
+      { reference; limit_up; limit_down; day_trade; unit;
+        margin_loan_ratio = ratio;
+        trading_suspended = bool_field "contract info trading_suspended" trading_suspended }
+  | _ -> failwith "invalid Shioaji contract info response"
+
+let parse_trading_limits raw =
+  match jq_fields "trading limits"
+    "[.trading_limit, .trading_used, .trading_available, .margin_limit, .margin_used, .margin_available] | if all(.[]; type == \"number\") then map(tostring) | @tsv else error(\"invalid trading limits fields\") end" raw with
+  | [trading_limit; trading_used; trading_available; margin_limit; margin_used;
+     margin_available] ->
+      { trading_limit = nonnegative_float_field "trading limits trading_limit" trading_limit;
+        trading_used = nonnegative_float_field "trading limits trading_used" trading_used;
+        trading_available = nonnegative_float_field "trading limits trading_available" trading_available;
+        margin_limit = nonnegative_float_field "trading limits margin_limit" margin_limit;
+        margin_used = nonnegative_float_field "trading limits margin_used" margin_used;
+        margin_available = nonnegative_float_field "trading limits margin_available" margin_available }
+  | _ -> failwith "invalid Shioaji trading limits response"
 
 let parse_snapshot ~codes raw =
   let rows = jq_rows "snapshot"
@@ -432,6 +490,15 @@ let balance () =
   request ~method_:"POST" ~body ~path:"/api/v1/portfolio/account_balance" ()
   |> expect_ok "balance" parse_balance
 
+let contract_info ~code =
+  request ~path:("/api/v1/data/contracts/" ^ code ^ "/info") ()
+  |> expect_ok "contract info" parse_contract_info
+
+let trading_limits () =
+  request ~method_:"POST" ~body:{|{"account_type":"S"}|}
+    ~path:"/api/v1/portfolio/trading_limits" ()
+  |> expect_ok "trading limits" parse_trading_limits
+
 let settlements () =
   let body = {|{"account_type":"S"}|} in
   request ~method_:"POST" ~body ~path:"/api/v1/portfolio/settlements" ()
@@ -445,7 +512,7 @@ let order_body order =
   in
   let lot, price, price_type, order_type =
     match order.lot with
-    | Common -> "Common", 0., "MKT", "IOC"
+    | Common -> "Common", 0., "MKT", "FOK"
     | IntradayOdd ->
         let () =
           if quantity > 999 then

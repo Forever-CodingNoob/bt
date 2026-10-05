@@ -34,11 +34,32 @@ type position_detail = {
   lots : int;
 }
 
+(** Contract price bands, lot unit, financing ratio and suspension status. *)
+type contract_info = {
+  reference : float;
+  limit_up : float option;
+  limit_down : float;
+  day_trade : string;
+  unit : float;
+  margin_loan_ratio : float;
+  trading_suspended : bool;
+}
+
+(** Daily cash and margin trading allowances, usage and availability. *)
+type trading_limits = {
+  trading_limit : float;
+  trading_used : float;
+  trading_available : float;
+  margin_limit : float;
+  margin_used : float;
+  margin_available : float;
+}
+
 (** TW trading book and its quantity unit: lots for [Common], shares for
     [IntradayOdd]. *)
 type lot = Common | IntradayOdd
 
-(** Fields supplied for a Common market IOC or intraday-odd limit ROD order. *)
+(** Fields supplied for a Common market FOK or intraday-odd limit ROD order. *)
 type order_request = {
   exchange : string;
   code : string;
@@ -84,6 +105,14 @@ val request_headers :
 (** Parse a Shioaji server information response. *)
 val parse_info : string -> info
 
+(** Parse required contract fields; absent, null or non-positive limit-up
+    means no usable upper band. Bands must contain the reference price,
+    and the Common-lot unit must be 1000 shares. *)
+val parse_contract_info : string -> contract_info
+
+(** Parse finite nonnegative daily stock trading limits. *)
+val parse_trading_limits : string -> trading_limits
+
 (** Parse stock snapshots in requested-code order, rejecting missing, extra,
     or duplicate codes. *)
 val parse_snapshot : codes:string array -> string -> snapshot array
@@ -120,6 +149,12 @@ val position_details : detail_id:int -> position_detail list
 
 (** Fetch settlement cash from the default stock account. *)
 val balance : unit -> float
+
+(** Fetch contract information for one stock code. *)
+val contract_info : code:string -> contract_info
+
+(** Fetch daily trading limits from the default stock account. *)
+val trading_limits : unit -> trading_limits
 
 (** Fetch dated settlements from the default stock account. *)
 val settlements : unit -> settlement list

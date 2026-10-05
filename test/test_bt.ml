@@ -6502,6 +6502,50 @@ let test_shioaji_info_parse () =
   (* The documented server info reports production mode. *)
   assert (actual.Shioaji.simulation = false)
 
+let test_shioaji_contract_info_parse () =
+  let actual = Shioaji.parse_contract_info
+    (shioaji_fixture "contract_info.json") in
+  (* Recorded 0050 fields: band is 101.55-124.05 around reference 112.8;
+     one Common lot is 1000 shares, margin ratio is 0.6, not suspended. *)
+  let expected : Shioaji.contract_info =
+    { reference = 112.8; limit_up = Some 124.05; limit_down = 101.55;
+      day_trade = "Yes"; unit = 1000.; margin_loan_ratio = 0.6;
+      trading_suspended = false } in
+  let () = assert (actual = expected) in
+  let without_band value = Shioaji.parse_contract_info
+    ("{\"reference\":100,\"limit_down\":90,\"day_trade\":\"No\",\"unit\":1000," ^
+     "\"margin_loan_ratio\":0,\"trading_suspended\":false" ^ value ^ "}") in
+  (* Missing/null/non-positive limit-up is the specified no-band case. *)
+  let () = List.iter (fun value ->
+    assert ((without_band value).Shioaji.limit_up = None))
+    [""; ",\"limit_up\":null"; ",\"limit_up\":0"; ",\"limit_up\":-1"] in
+  (* Required fields cannot silently default, and a nonnumeric band is malformed. *)
+  let () = assert_failure (fun () -> ignore (Shioaji.parse_contract_info {|{}|})) in
+  (* A usable band must contain reference 100; 99 is too low for limit-up
+     and 101 is too high for limit-down. Common quantities use 1000 shares. *)
+  let () = assert_failure (fun () ->
+    ignore (without_band ",\"limit_up\":99")) in
+  let () = assert_failure (fun () -> ignore (Shioaji.parse_contract_info
+    {|{"reference":100,"limit_up":110,"limit_down":101,"day_trade":"No","unit":1000,"margin_loan_ratio":0,"trading_suspended":false}|})) in
+  let () = assert_failure (fun () -> ignore (Shioaji.parse_contract_info
+    {|{"reference":100,"limit_up":110,"limit_down":90,"day_trade":"No","unit":1,"margin_loan_ratio":0,"trading_suspended":false}|})) in
+  assert_failure (fun () -> ignore (without_band ",\"limit_up\":\"bad\""))
+
+let test_shioaji_trading_limits_parse () =
+  let actual = Shioaji.parse_trading_limits
+    (shioaji_fixture "trading_limits.json") in
+  (* Monday start: full 1000000 cash allowance, no daily usage or margin. *)
+  let expected : Shioaji.trading_limits =
+    { trading_limit = 1000000.; trading_used = 0.; trading_available = 1000000.;
+      margin_limit = 0.; margin_used = 0.; margin_available = 0. } in
+  let () = assert (actual = expected) in
+  (* Simulation's all-zero limits must parse; they are not a production allowance. *)
+  let zero = Shioaji.parse_trading_limits
+    {|{"trading_limit":0,"trading_used":0,"trading_available":0,"margin_limit":0,"margin_used":0,"margin_available":0}|} in
+  let () = assert (zero.trading_available = 0. && zero.margin_available = 0.) in
+  assert_failure (fun () -> ignore (Shioaji.parse_trading_limits
+    {|{"trading_limit":100,"trading_used":0,"trading_available":-1,"margin_limit":0,"margin_used":0,"margin_available":0}|}))
+
 let test_shioaji_request_headers () =
   let plain = "Content-Type: application/json\n" in
   let bearer =
@@ -7911,12 +7955,9 @@ let test_tw_odd_order_body () =
       { (order "Buy" 100.) with Shioaji.lot = Shioaji.Common;
                                  quantity = 2 }
   in
-  (* Common remains an MKT IOC order with two lots, not two shares. *)
-  let () =
-    assert
-      (contains common
-         {|"price":0,"quantity":2,"price_type":"MKT","order_type":"IOC","order_lot":"Common"|})
-  in
+  (* Common is MKT FOK with two lots, not two shares; price remains zero. *)
+  let () = assert (contains common
+    {|"price":0,"quantity":2,"price_type":"MKT","order_type":"FOK","order_lot":"Common"|}) in
   (* The broker boundary rejects zero or oversized intraday odd quantities. *)
   let () =
     assert_failure (fun () ->
@@ -9034,6 +9075,8 @@ let () =
   let () = test_engine_capital_guard () in
   let () = test_engine_mandatory_capital_cost () in
   let () = test_shioaji_info_parse () in
+  let () = test_shioaji_contract_info_parse () in
+  let () = test_shioaji_trading_limits_parse () in
   let () = test_shioaji_request_headers () in
   let () = test_shioaji_snapshot_parse () in
   let () = test_shioaji_snapshot_codes () in
