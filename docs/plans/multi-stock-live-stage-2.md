@@ -1517,7 +1517,7 @@ subprocess.run(["git", "-C", root, "commit", "-m", "feat: run TW live across the
 | Produces | Permanent `test_us_open_sell_restart_end_to_end : unit -> unit`, joining the real restart routing to the real executor, rather than checking an injected execute callback's captured arguments |
 | Behavior | No US implementation change is planned. Preserve sell barrier, done-symbol dedupe, finish pass, cutoff stop and no retry after any POST. This closes the stage 1 ledger's end-to-end open-sell restart follow-up. |
 
-- [ ] **Step 1: Add and register the integrated regression below.** It drives an existing SPY sell and a remaining QQQ buy through both production functions. Unlike the stage 1 routing-only test, the `execute` injection calls `Live.execute_decision` and exercises its real sell poll. Inject only broker I/O, clock, sleep and decision data; nothing uses the network.
+- [ ] **Step 1: Add and register the integrated regression below.** It drives an existing SPY sell and a remaining QQQ buy through both production functions. Unlike the stage 1 routing-only test, the `execute` injection calls `Live.execute_decision` and exercises its real sell poll. Retain the filled, rejected and executor-cutoff outcomes, then inject two successive daemon clocks: a Decide-phase lookup failure before any POST must invoke retry without finishing or ending the day; the next step at Cutoff_passed must finish the existing open sell exactly once without deciding, executing, posting or retrying. Assert the exact event list for both successful and failed cutoff lookups. Inject only broker I/O, clock, sleep and decision data; nothing uses the network.
 
 ```ocaml
 let test_us_open_sell_restart_end_to_end () =
@@ -1592,7 +1592,72 @@ let test_us_open_sell_restart_end_to_end () =
       assert (contains output (if outcome = "rejected" then
         "error=sell SPY rejected order=skip"
         else "error=sell SPY open at cutoff order=skip")) in
-  List.iter run ["filled"; "rejected"; "open-at-cutoff"]
+  List.iter run ["filled"; "rejected"; "open-at-cutoff"];
+  let sell = us_fixture_order "SPY" "sell" "accepted" in
+  List.iter (fun fail_at_cutoff ->
+    let cutoff = { initial with timestamp = date ^ "T15:58:00-04:00" } in
+    let clocks = ref [{ initial with timestamp = date ^ "T15:57:59-04:00" }; cutoff] in
+    let events = ref [] in
+    let emit event = events := event :: !events in
+    let step () =
+      let clock = match !clocks with
+        | [] -> assert false
+        | clock :: rest -> let () = clocks := rest in clock in
+      let () = emit ("clock:" ^ clock.Alpaca.timestamp) in
+      Live.us_step ~symbols:[|"SPY"; "QQQ"|]
+        ~lookup:(fun id ->
+          let () = emit ("lookup:" ^ id) in
+          if id = "bt-SPY-2025-06-24" then Some sell
+          else
+            let () = assert (id = "bt-QQQ-2025-06-24") in
+            if fail_at_cutoff && clock = cutoff then failwith "lookup unavailable"
+            else None)
+        ~decide:(fun actual_date ->
+          let () = assert (actual_date = date) in
+          let () = emit "decide" in decision)
+        ~execute:(fun existing clock actual ->
+          let () = emit "execute" in
+          let () = assert (existing = ["SPY", sell]
+            && actual.Live.assets.(0).action = Live.Skip "existing order") in
+          Live.execute_decision ~existing
+            ~order_by_client_id:(fun _ id ->
+              let () = emit ("preflight-lookup:" ^ id) in
+              let () = assert (id = "bt-QQQ-2025-06-24") in
+              failwith "lookup unavailable")
+            ~clock:(fun _ -> let () = emit "preflight-clock" in clock)
+            ~sleep:(fun _ -> emit "wait-sell")
+            ~submit_market:(fun _ ~symbol ~qty:_ ~side:_ ~client_order_id:_ ->
+              let () = emit ("post:" ^ symbol) in
+              us_fixture_order symbol "buy" "filled")
+            ~finish:(fun _ _ symbol _ -> emit ("execute-finish:" ^ symbol))
+            Live.Paper date clock.Alpaca.next_close actual)
+        ~finish:(fun clock actual_date id order ->
+          let () = assert (clock = cutoff && actual_date = date
+            && id = "bt-SPY-2025-06-24" && order = sell) in
+          emit ("finish:" ^ id))
+        ~sleep_until:(fun timestamp -> emit ("sleep:" ^ timestamp))
+        ~retry:(fun () -> emit "retry")
+        ~continue:(fun () -> emit "continue") clock in
+    let output = capture_stdout step in
+    (* At 15:57:59 the executor's QQQ dedupe lookup fails before any POST.
+       The known SPY sell is not a POST: us_step retries without finishing. *)
+    let before_cutoff = ["clock:2025-06-24T15:57:59-04:00";
+      "lookup:bt-SPY-2025-06-24"; "lookup:bt-QQQ-2025-06-24";
+      "decide"; "execute"; "preflight-lookup:bt-QQQ-2025-06-24"; "retry"] in
+    let () = assert (List.rev !events = before_cutoff) in
+    let () = assert (contains output "order=retry") in
+    let output = capture_stdout step in
+    (* At 15:58:00 neither a successful nor failed QQQ lookup can submit.
+       Both Cutoff_passed paths finish the one known sell exactly once,
+       then sleep to the next open and continue, with no second retry. *)
+    let () = assert (List.rev !events = before_cutoff @
+      ["clock:2025-06-24T15:58:00-04:00";
+       "lookup:bt-SPY-2025-06-24"; "lookup:bt-QQQ-2025-06-24";
+       "finish:bt-SPY-2025-06-24";
+       "sleep:2025-06-25T09:30:00-04:00"; "continue"]) in
+    let () = assert (contains output "order=skip"
+      && not (contains output "order=retry")) in
+    assert (!clocks = [])) [false; true]
 ```
 
 ```ocaml
