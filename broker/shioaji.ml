@@ -3,6 +3,7 @@ type info = {
 }
 
 type snapshot = {
+  code : string;
   datetime : string;
   open_ : float;
   high : float;
@@ -31,6 +32,7 @@ type position_detail = {
 }
 
 type contract_info = {
+  code : string;
   reference : float;
   limit_up : float option;
   limit_down : float;
@@ -212,11 +214,13 @@ let parse_info raw =
       { simulation = bool_field "info simulation" simulation }
   | _ -> failwith "invalid Shioaji info response"
 
-let parse_contract_info raw =
+let parse_contract_info ~code raw =
   match jq_fields "contract info"
-    "if ((.reference | type) == \"number\" and (.limit_down | type) == \"number\" and (.day_trade | type) == \"string\" and (.unit | type) == \"number\" and (.margin_loan_ratio | type) == \"number\" and (.trading_suspended | type) == \"boolean\" and (.limit_up == null or (.limit_up | type) == \"number\")) then [(.reference | tostring), (if .limit_up == null then \"\" else (.limit_up | tostring) end), (.limit_down | tostring), .day_trade, (.unit | tostring), (.margin_loan_ratio | tostring), (.trading_suspended | tostring)] | @tsv else error(\"invalid contract info fields\") end" raw with
-  | [reference; limit_up; limit_down; day_trade; unit; margin_loan_ratio;
-     trading_suspended] ->
+    "if ((.reference | type) == \"number\" and (.limit_down | type) == \"number\" and (.day_trade | type) == \"string\" and (.unit | type) == \"number\" and (.margin_loan_ratio | type) == \"number\" and (.trading_suspended | type) == \"boolean\" and (.limit_up == null or (.limit_up | type) == \"number\") and ((has(\"code\") | not) or (.code | type) == \"string\")) then [(has(\"code\") | tostring), (.code // \"\"), (.reference | tostring), (if .limit_up == null then \"\" else (.limit_up | tostring) end), (.limit_down | tostring), .day_trade, (.unit | tostring), (.margin_loan_ratio | tostring), (.trading_suspended | tostring)] | @tsv else error(\"invalid contract info fields\") end" raw with
+  | [has_code; response_code; reference; limit_up; limit_down; day_trade; unit;
+     margin_loan_ratio; trading_suspended] ->
+      let () = if bool_field "contract info has_code" has_code && response_code <> code
+        then failwith "Shioaji contract info code does not match request" in
       let limit_up = match limit_up with
         | "" -> None
         | value -> let value = float_field "contract info limit_up" value in
@@ -233,7 +237,7 @@ let parse_contract_info raw =
         then failwith "invalid Shioaji contract info band"
       in
       let () = if unit <> 1000. then failwith "invalid Shioaji contract info unit" in
-      { reference; limit_up; limit_down; day_trade; unit;
+      { code; reference; limit_up; limit_down; day_trade; unit;
         margin_loan_ratio = ratio;
         trading_suspended = bool_field "contract info trading_suspended" trading_suspended }
   | _ -> failwith "invalid Shioaji contract info response"
@@ -265,7 +269,7 @@ let parse_snapshot ~codes raw =
         let () = if not (Hashtbl.mem requested code) || Hashtbl.mem found code
           then invalid () in
         let snapshot =
-          { datetime;
+          { code; datetime;
             open_ = nonnegative_float_field "snapshot open" open_;
             high = nonnegative_float_field "snapshot high" high;
             low = nonnegative_float_field "snapshot low" low;
@@ -492,7 +496,7 @@ let balance () =
 
 let contract_info ~code =
   request ~path:("/api/v1/data/contracts/" ^ code ^ "/info") ()
-  |> expect_ok "contract info" parse_contract_info
+  |> expect_ok "contract info" (parse_contract_info ~code)
 
 let trading_limits () =
   request ~method_:"POST" ~body:{|{"account_type":"S"}|}

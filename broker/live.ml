@@ -643,11 +643,27 @@ let decision_targets ast stocks arrays provisional ratios =
   effective (length - 1),
   (if length = 1 then Array.make (List.length stocks) 0. else effective (length - 2))
 
+let tw_inputs_by_code ~error ~code_of ~symbols values =
+  let invalid () = failwith error in
+  let () = if Array.length values <> Array.length symbols then invalid () in
+  let found = Hashtbl.create (Array.length values) in
+  let () = Array.iter (fun value ->
+    let code = code_of value in
+    let () = if Hashtbl.mem found code then invalid () in
+    Hashtbl.add found code value) values in
+  Array.map (fun code -> match Hashtbl.find_opt found code with
+    | Some value -> value
+    | None -> invalid ()) symbols
+
 let check_tw_budget ~log ~symbols ~snapshots ~contract_infos
     ~(limits : Shioaji.trading_limits) legs =
   let () = if Array.length snapshots <> Array.length symbols
     || Array.length contract_infos <> Array.length symbols then
     failwith "TW budget inputs do not match symbols" in
+  let snapshots = tw_inputs_by_code ~error:"invalid Shioaji snapshot response"
+    ~code_of:(fun (snapshot : Shioaji.snapshot) -> snapshot.code) ~symbols snapshots in
+  let contract_infos = tw_inputs_by_code ~error:"TW contract info codes differ from strategy symbols"
+    ~code_of:(fun (info : Shioaji.contract_info) -> info.code) ~symbols contract_infos in
   let () = Array.iteri (fun i code ->
     let info : Shioaji.contract_info = contract_infos.(i) in
     log (Printf.sprintf
@@ -778,14 +794,14 @@ let decide ?provisional_close ?previous_session ?equity ?tw_balance
       let exchanges = Array.map (exchange_of_symbol ~data_dir) symbols in
       let snapshots = match provisional_close, tw_snapshots with
         | Some price, _ ->
-            [|{ Shioaji.datetime = session_date ^ "T13:20:00+08:00";
+            [|{ Shioaji.code = symbols.(0); datetime = session_date ^ "T13:20:00+08:00";
                 open_ = price; high = price; low = price; close = price;
                 bid = price; ask = price; total_volume = 0. }|]
         | None, Some snapshots -> snapshots
         | None, None -> Shioaji.snapshot ~contracts:
             (Array.mapi (fun i code -> exchanges.(i), code) symbols) in
-      let () = if Array.length snapshots <> Array.length symbols then
-        failwith "invalid Shioaji snapshot response" in
+      let snapshots = tw_inputs_by_code ~error:"invalid Shioaji snapshot response"
+        ~code_of:(fun (snapshot : Shioaji.snapshot) -> snapshot.code) ~symbols snapshots in
       let arrays = Array.map (fun symbol ->
         let () = if fetch_required then
           let () = Data.fetch ~market:"tw" ~symbol ~from_:None ~to_:previous_session ~data_dir in
@@ -1191,36 +1207,30 @@ let sleep_taipei ~days ~hour ~minute =
   let delay = target -. now in
   if delay > 0. then Unix.sleepf delay
 
-let prepare_tw ~exchange ~symbol ~date ~data_dir =
-  let snapshots = Shioaji.snapshot ~contracts:[|exchange, symbol|] in
+let prepare_tw ?(snapshot = Shioaji.snapshot)
+    ?(previous_trading_day = Data.previous_trading_day)
+    ?(fetch = Data.fetch) ?(fetch_adjustments = Data.fetch_tw_adjustments)
+    ~contracts ~date ~data_dir () =
+  let snapshots = snapshot ~contracts in
+  let snapshots = tw_inputs_by_code ~error:"invalid Shioaji snapshot response"
+    ~code_of:(fun (snapshot : Shioaji.snapshot) -> snapshot.code)
+    ~symbols:(Array.map snd contracts) snapshots in
   let () = Array.iter (fun snapshot ->
     let snapshot_date = tw_snapshot_date snapshot in
     if snapshot_date <> date then failwith
       (Printf.sprintf "snapshot session %s is not trading date %s" snapshot_date date))
     snapshots in
-  let previous_session = Data.previous_trading_day ~before:date in
-  let () =
-    Data.fetch ~market:"tw" ~symbol ~from_:None ~to_:previous_session
-      ~data_dir
-  in
-  let () =
-    Data.fetch_tw_adjustments ~symbol ~to_:date ~data_dir
-  in
-  let asset =
-    Data.load_asset ~market:"tw" ~symbol ~from_:None
-      ~to_:(Some previous_session) ~data_dir
-  in
-  let fetched_through =
-    match Array.length asset.signal with
-    | 0 -> failwith "TW cache has no previous trading session"
-    | length -> asset.signal.(length - 1).date
-  in
-  let () =
-    if fetched_through <> previous_session then
-      failwith
-        (Printf.sprintf "stale TW cache: fetched through %s, expected %s"
-           fetched_through previous_session)
-  in
+  let previous_session = previous_trading_day ~before:date in
+  let () = Array.iter (fun (_, symbol) ->
+    let () = fetch ~market:"tw" ~symbol ~from_:None ~to_:previous_session ~data_dir in
+    let () = fetch_adjustments ~symbol ~to_:date ~data_dir in
+    let asset = Data.load_asset ~market:"tw" ~symbol ~from_:None
+      ~to_:(Some previous_session) ~data_dir in
+    let through = match Array.length asset.signal with
+      | 0 -> failwith "TW cache has no previous trading session"
+      | length -> asset.signal.(length - 1).date in
+    if through <> previous_session then failwith (Printf.sprintf
+      "stale TW cache: fetched through %s, expected %s" through previous_session)) contracts in
   previous_session
 
 let tw_legs_description legs =
@@ -1554,7 +1564,15 @@ let execute_tw_legs ~mode ~(assets : tw_execution_asset array)
         else remaining @ List.concat_map snd rest in
   let remaining = execute groups in
   { trades = List.rev !trades; remaining; stop_reason = !stop_reason; cash = !cash }
-let run_tw mode ~equity ~symbol ~strat_path ~data_dir ~rebalance_choice =
+
+let tw_session_step ~symbols ~orders_today ~date ~skip ~submit () =
+  let existing = Array.to_list symbols
+    |> List.concat_map (fun code -> orders_today ~code ~today:date) in
+  match existing with
+  | _ :: _ -> skip ()
+  | [] -> submit ()
+
+let run_tw mode ~equity ~symbols ~strat_path ~data_dir ~rebalance_choice =
   let info = Shioaji.info () in
   let () =
     match tw_startup_ok mode ~equity info with
@@ -1590,11 +1608,11 @@ let run_tw mode ~equity ~symbol ~strat_path ~data_dir ~rebalance_choice =
     | Paper, None | Live, Some _ -> assert false
   in
   let () = log_rebalance_warning strat_path rebalance_choice in
-  let exchange = exchange_of_symbol ~data_dir symbol in
-  let costs = tw_live_debit_costs symbol in
-  let financing_ratio =
-    Data.financing_ratio ~market:"tw" ~data_dir ~symbol
-  in
+  let exchanges = Array.map (exchange_of_symbol ~data_dir) symbols in
+  let contracts = Array.mapi (fun i code -> exchanges.(i), code) symbols in
+  let costs = Array.map tw_live_debit_costs symbols in
+  let ratios = Array.map (fun symbol ->
+    Data.financing_ratio ~market:"tw" ~data_dir ~symbol) symbols in
   let rec cycle prepared submitted =
     let now = taipei_now () in
     let date = timestamp_date now in
@@ -1617,7 +1635,7 @@ let run_tw mode ~equity ~symbol ~strat_path ~data_dir ~rebalance_choice =
             | Some _ | None ->
                 Some
                   (date,
-                   prepare_tw ~exchange ~symbol ~date ~data_dir)
+                   prepare_tw ~contracts ~date ~data_dir ())
           in
           let () = sleep_taipei ~days:0 ~hour:13 ~minute:20 in
           cycle prepared submitted
@@ -1641,32 +1659,28 @@ let run_tw mode ~equity ~symbol ~strat_path ~data_dir ~rebalance_choice =
                  | Some _ | None ->
                      Some
                        (date,
-                        prepare_tw ~exchange ~symbol ~date ~data_dir)
+                        prepare_tw ~contracts ~date ~data_dir ())
                in
                let previous_session =
                  match prepared with
                  | Some (_, previous_session) -> previous_session
                  | None -> assert false
                in
-               let existing = Shioaji.orders_today ~code:symbol ~today:date in
-               (match existing with
-                | _ :: _ ->
+               tw_session_step ~symbols ~orders_today:Shioaji.orders_today ~date
+                 ~skip:(fun () ->
                     let () = log
                       "date=%s fetched-through=%s equity=%.10g cash=- debit=- submitted=skip:existing-orders"
                       date previous_session startup_equity in
-                    let () = log
+                    let () = Array.iter (fun symbol -> log
                       "date=%s symbol=%s provisional-close=- target=- cash-shares=- margin-shares=- loan=- planned-legs=none"
-                      date symbol in
+                      date symbol) symbols in
                     let () = sleep_taipei ~days:0 ~hour:13 ~minute:30 in
-                    cycle prepared (Some date)
-                | [] ->
-                    let snapshot =
-                      (Shioaji.snapshot ~contracts:[|exchange, symbol|]).(0)
-                    in
+                    cycle prepared (Some date))
+                 ~submit:(fun () ->
+                    let snapshots = Shioaji.snapshot ~contracts in
                     let positions = Shioaji.positions () in
-                    let position_details =
-                      fetch_position_details symbol positions
-                    in
+                    let position_details = Array.to_list symbols
+                      |> List.concat_map (fun symbol -> fetch_position_details symbol positions) in
                     let tw_balance, tw_settlements =
                       match mode, equity with
                       | Paper, Some _ -> None, None
@@ -1679,23 +1693,26 @@ let run_tw mode ~equity ~symbol ~strat_path ~data_dir ~rebalance_choice =
                     let decision =
                       decide ~previous_session ?equity ?tw_balance
                         ?tw_settlements ~tw_positions:positions
-                        ~tw_position_details:position_details
-                        ~tw_snapshots:[|snapshot|] mode ~session_date:date
-                        ~strat_path ~data_dir
+                        ~tw_position_details:position_details ~tw_snapshots:snapshots
+                        ~tw_log:(fun text -> log "date=%s %s" date text)
+                        mode ~session_date:date ~strat_path ~data_dir
                     in
-                    let asset = decision.assets.(0) in
-                    let cash_shares, margin_shares, _, _, loans, _ =
-                      (position_totals ~symbols:[|symbol|]
-                        ~prices:[|asset.provisional.c|] positions).(0) in
+                    let assets = tw_inputs_by_code ~error:"TW decision codes differ from strategy symbols"
+                      ~code_of:(fun (asset : asset_decision) -> asset.symbol) ~symbols decision.assets in
+                    let snapshots = tw_inputs_by_code ~error:"invalid Shioaji snapshot response"
+                      ~code_of:(fun (snapshot : Shioaji.snapshot) -> snapshot.code) ~symbols snapshots in
+                    let prices = Array.map (fun (asset : asset_decision) -> asset.provisional.c) assets in
+                    let totals = position_totals ~symbols ~prices positions in
+                    let execution_assets = Array.mapi (fun i code ->
+                      { code; exchange = exchanges.(i); bid = snapshots.(i).Shioaji.bid;
+                        ask = snapshots.(i).ask; price = prices.(i);
+                        financing_ratio = ratios.(i); costs = costs.(i) }) symbols in
                     let cash = decision.cash in
                     let outcome, legs =
                       match decision.legs with
                       | [] -> "skip:no-order-legs", []
                       | legs ->
-                          let execution = execute_tw_legs ~mode
-                            ~assets:[|{ code = symbol; exchange; bid = snapshot.bid;
-                              ask = snapshot.ask; price = asset.provisional.c;
-                              financing_ratio; costs }|]
+                          let execution = execute_tw_legs ~mode ~assets:execution_assets
                             ~now:taipei_now ~sleep:Unix.sleepf
                             ~place_order:Shioaji.place_order ~orders_today:Shioaji.orders_today
                             ~date ~cash ~positions legs in
@@ -1709,20 +1726,21 @@ let run_tw mode ~equity ~symbol ~strat_path ~data_dir ~rebalance_choice =
                       "date=%s fetched-through=%s equity=%.10g cash=%.10g debit=%.10g submitted=%s"
                       date decision.fetched_through decision.equity decision.cash
                       decision.debit outcome in
-                    let () = log
-                      "date=%s symbol=%s provisional-close=%.10g target=%.10g cash-shares=%.10g margin-shares=%.10g loan=%.10g planned-legs=%s"
-                      date symbol asset.provisional.c asset.target cash_shares margin_shares
-                      loans (tw_legs_description legs) in
+                    let () = Array.iteri (fun i (asset : asset_decision) ->
+                      let cash_shares, margin_shares, _, _, loans, _ = totals.(i) in
+                      let symbol_legs = List.filter (fun (leg : leg) -> leg.code = asset.symbol) legs in
+                      log
+                        "date=%s symbol=%s provisional-close=%.10g target=%.10g cash-shares=%.10g margin-shares=%.10g loan=%.10g planned-legs=%s"
+                        date asset.symbol asset.provisional.c asset.target cash_shares margin_shares
+                        loans (tw_legs_description symbol_legs)) assets in
                     let () = sleep_taipei ~days:0 ~hour:13 ~minute:30 in
-                    cycle prepared (Some date)))
+                    cycle prepared (Some date)) ())
       | `After_close ->
           let () = sleep_taipei ~days:0 ~hour:13 ~minute:30 in
-          let trades = Shioaji.orders_today ~code:symbol ~today:date in
-          let () =
-            match trades with
-            | [] -> log "date=%s fill-status=none" date
-            | _ -> List.iter (log_tw_trade date) trades
-          in
+          let () = Array.iter (fun code ->
+            match Shioaji.orders_today ~code ~today:date with
+            | [] -> log "date=%s code=%s fill-status=none" date code
+            | trades -> List.iter (log_tw_trade date) trades) symbols in
           let () = sleep_taipei ~days:1 ~hour:13 ~minute:5 in
           cycle None None
     with error ->
@@ -1771,10 +1789,7 @@ let run ?equity mode ~strat_path ~data_dir =
       Fun.protect ~finally:(fun () -> Unix.close fd)
         (fun () -> run_us mode ~symbols ~strat_path ~data_dir ~rebalance_choice)
   | "tw" ->
-      let () = if Array.length symbols <> 1 then
-        failwith "TW live trading needs one stock in this release" in
-      let symbol = symbols.(0) in
       let fd = lock_daemon ~directory ~market:"tw" mode in
       Fun.protect ~finally:(fun () -> Unix.close fd)
-        (fun () -> run_tw mode ~equity ~symbol ~strat_path ~data_dir ~rebalance_choice)
+        (fun () -> run_tw mode ~equity ~symbols ~strat_path ~data_dir ~rebalance_choice)
   | _ -> failwith "live trading supports us and tw only"

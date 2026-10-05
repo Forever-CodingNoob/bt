@@ -6503,16 +6503,19 @@ let test_shioaji_info_parse () =
   assert (actual.Shioaji.simulation = false)
 
 let test_shioaji_contract_info_parse () =
-  let actual = Shioaji.parse_contract_info
+  let actual = Shioaji.parse_contract_info ~code:"0050"
     (shioaji_fixture "contract_info.json") in
   (* Recorded 0050 fields: band is 101.55-124.05 around reference 112.8;
      one Common lot is 1000 shares, margin ratio is 0.6, not suspended. *)
   let expected : Shioaji.contract_info =
-    { reference = 112.8; limit_up = Some 124.05; limit_down = 101.55;
+    { code = "0050"; reference = 112.8; limit_up = Some 124.05; limit_down = 101.55;
       day_trade = "Yes"; unit = 1000.; margin_loan_ratio = 0.6;
       trading_suspended = false } in
   let () = assert (actual = expected) in
-  let without_band value = Shioaji.parse_contract_info
+  (* A response naming a different stock cannot inherit the request's identity. *)
+  let () = assert_failure (fun () -> ignore (Shioaji.parse_contract_info ~code:"2330"
+    (shioaji_fixture "contract_info.json"))) in
+  let without_band value = Shioaji.parse_contract_info ~code:"0050"
     ("{\"reference\":100,\"limit_down\":90,\"day_trade\":\"No\",\"unit\":1000," ^
      "\"margin_loan_ratio\":0,\"trading_suspended\":false" ^ value ^ "}") in
   (* Missing/null/non-positive limit-up is the specified no-band case. *)
@@ -6520,14 +6523,14 @@ let test_shioaji_contract_info_parse () =
     assert ((without_band value).Shioaji.limit_up = None))
     [""; ",\"limit_up\":null"; ",\"limit_up\":0"; ",\"limit_up\":-1"] in
   (* Required fields cannot silently default, and a nonnumeric band is malformed. *)
-  let () = assert_failure (fun () -> ignore (Shioaji.parse_contract_info {|{}|})) in
+  let () = assert_failure (fun () -> ignore (Shioaji.parse_contract_info ~code:"0050" {|{}|})) in
   (* A usable band must contain reference 100; 99 is too low for limit-up
      and 101 is too high for limit-down. Common quantities use 1000 shares. *)
   let () = assert_failure (fun () ->
     ignore (without_band ",\"limit_up\":99")) in
-  let () = assert_failure (fun () -> ignore (Shioaji.parse_contract_info
+  let () = assert_failure (fun () -> ignore (Shioaji.parse_contract_info ~code:"0050"
     {|{"reference":100,"limit_up":110,"limit_down":101,"day_trade":"No","unit":1000,"margin_loan_ratio":0,"trading_suspended":false}|})) in
-  let () = assert_failure (fun () -> ignore (Shioaji.parse_contract_info
+  let () = assert_failure (fun () -> ignore (Shioaji.parse_contract_info ~code:"0050"
     {|{"reference":100,"limit_up":110,"limit_down":90,"day_trade":"No","unit":1,"margin_loan_ratio":0,"trading_suspended":false}|})) in
   assert_failure (fun () -> ignore (without_band ",\"limit_up\":\"bad\""))
 
@@ -6582,7 +6585,7 @@ let test_shioaji_snapshot_parse () =
   in
   (* Expected values are copied from the documented 2330 snapshot row. *)
   let expected : Shioaji.snapshot =
-    { datetime = "2026-05-18T14:30:00";
+    { code = "2330"; datetime = "2026-05-18T14:30:00";
       open_ = 2225.;
       high = 2260.;
       low = 2215.;
@@ -7388,8 +7391,8 @@ let test_live_history_gap () =
 
 let test_tw_live_pair_decide () =
   with_tw_decision_cache (fun data_dir ->
-    let snapshot price : Shioaji.snapshot =
-      { datetime = "2026-05-26T13:20:00+08:00"; open_ = price;
+    let snapshot code price : Shioaji.snapshot =
+      { code; datetime = "2026-05-26T13:20:00+08:00"; open_ = price;
         high = price; low = price; close = price; bid = price; ask = price;
         total_volume = 0. } in
     let positions : Shioaji.position list =
@@ -7409,7 +7412,7 @@ let test_tw_live_pair_decide () =
           rebalance ta tb)
         (fun strat_path -> Live.decide ~previous_session:"2026-05-22"
           ~equity:100000. ~tw_positions:positions ~tw_position_details:details
-          ~tw_snapshots:[|snapshot 10.; snapshot 20.|] Live.Paper
+          ~tw_snapshots:[|snapshot "2330" 10.; snapshot "2890" 20.|] Live.Paper
           ~session_date:"2026-05-26" ~strat_path ~data_dir) in
     let scaled = choose "on_change" "2.0" "2.0" details in
     (* Funding need 2*0.4 + 2*0.4 = 1.6; scale 1/1.6 makes both 1.25.
@@ -7441,6 +7444,30 @@ let test_tw_live_pair_decide () =
       | Live.Orders legs -> assert (legs = List.filter
           (fun (l : Live.leg) -> l.code = a.symbol) closed.legs)
       | Live.Order _ | Live.Skip _ -> assert false) closed.assets)
+let test_tw_snapshot_identity () =
+  with_tw_decision_cache (fun data_dir ->
+    with_temp_strategy
+      "stock \"tw/2330\" as a\nstock \"tw/2890\" as b\nrebalance daily\na.target 0.2\nb.target 0.3\n"
+      (fun strat_path ->
+        let snapshot code price =
+          (Shioaji.parse_snapshot ~codes:[|code|] (Printf.sprintf
+            "[{\"code\":\"%s\",\"datetime\":\"2026-05-26T13:20:00+08:00\",\"open\":%g,\"high\":%g,\"low\":%g,\"close\":%g,\"buy_price\":%g,\"sell_price\":%g,\"total_volume\":0}]"
+            code price price price price price price)).(0) in
+        let first = snapshot "2330" 10. and second = snapshot "2890" 20. in
+        let choose snapshots = Live.decide ~previous_session:"2026-05-22"
+          ~equity:100000. ~tw_positions:[] ~tw_position_details:[]
+          ~tw_snapshots:snapshots Live.Paper ~session_date:"2026-05-26"
+          ~strat_path ~data_dir in
+        let decision = choose [|second; first|] in
+        (* File order is 2330 then 2890; price identity must survive a reversed
+           injected array, so their closes remain respectively 10 and 20. *)
+        let () = assert (Array.map (fun (asset : Live.asset_decision) ->
+          asset.symbol, asset.provisional.c) decision.assets =
+          [|"2330", 10.; "2890", 20.|]) in
+        let () = assert (decision = choose [|first; second|]) in
+        List.iter (fun snapshots -> assert_failure (fun () -> ignore (choose snapshots)))
+          [[|first; first|]; [|first|]; [|first; snapshot "9999" 20.|]]))
+
 let test_multi_stock_one_stock_pins () =
   with_tw_decision_cache (fun data_dir ->
     let position : Shioaji.position =
@@ -7499,7 +7526,7 @@ let test_multi_stock_one_stock_pins () =
        { Live.code = "2330"; exchange = "TSE"; action = "Buy"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 1 }]))
 
 let tw_test_info : Shioaji.contract_info =
-  { reference = 10.; limit_up = Some 11.; limit_down = 9.; day_trade = "Yes";
+  { code = "2330"; reference = 10.; limit_up = Some 11.; limit_down = 9.; day_trade = "Yes";
     unit = 1000.; margin_loan_ratio = 0.6; trading_suspended = false }
 
 let tw_test_limits : Shioaji.trading_limits =
@@ -7509,10 +7536,10 @@ let tw_test_limits : Shioaji.trading_limits =
 
 let test_tw_buy_budget () =
   let symbols = [|"2330"; "2890"|] in
-  let snapshot ask : Shioaji.snapshot =
-    { datetime = "2026-05-26T13:20:00+08:00"; open_ = 10.; high = 10.;
+  let snapshot code ask : Shioaji.snapshot =
+    { code; datetime = "2026-05-26T13:20:00+08:00"; open_ = 10.; high = 10.;
       low = 10.; close = 10.; bid = 9.; ask; total_volume = 0. } in
-  let snapshots = [|snapshot 10.; snapshot 20.|] in
+  let snapshots = [|snapshot "2330" 10.; snapshot "2890" 20.|] in
   let cash : Live.leg =
     { code = "2330"; exchange = "TSE"; action = "Buy"; cond = "Cash";
       lot = Shioaji.Common; quantity = 2 } in
@@ -7520,9 +7547,12 @@ let test_tw_buy_budget () =
     lot = Shioaji.IntradayOdd; quantity = 3 } in
   let margin = { cash with code = "2890"; exchange = "OTC";
     cond = "MarginTrading"; quantity = 1 } in
-  let infos = [|tw_test_info; { tw_test_info with limit_up = Some 22. }|] in
+  let infos = [|tw_test_info; { tw_test_info with code = "2890"; limit_up = Some 22. }|] in
   let run infos limits legs = Live.check_tw_budget ~log:(fun _ -> ())
     ~symbols ~snapshots ~contract_infos:infos ~limits legs in
+  (* Reversing the contract array cannot exchange 2330's band of 11 with
+     2890's band of 22; the exact cash allowance below still passes. *)
+  let reversed_infos = [|infos.(1); infos.(0)|] in
   let fails expected function_ = match function_ () with
     | () -> assert false
     | exception Failure actual -> assert (actual = expected) in
@@ -7532,6 +7562,14 @@ let test_tw_buy_budget () =
     margin_available = 22000. } in
   let legs = [{ cash with action = "Sell" }; cash; odd; margin] in
   let () = run infos limits legs in
+  let () = run reversed_infos limits legs in
+  (* Reversed quotes retain 2890's odd-lot ask of 20, not 2330's ask of 10. *)
+  let () = Live.check_tw_budget ~log:(fun _ -> ()) ~symbols
+    ~snapshots:[|snapshots.(1); snapshots.(0)|] ~contract_infos:reversed_infos ~limits legs in
+  let () = List.iter (fun contract_infos -> assert_failure (fun () ->
+    Live.check_tw_budget ~log:(fun _ -> ()) ~symbols ~snapshots ~contract_infos ~limits legs))
+    [[|infos.(0); infos.(0)|]; [|infos.(0)|];
+     [|infos.(0); { infos.(1) with code = "9999" }|]] in
   let () = fails "TW buy budget short: planned 22060, available 22059"
     (fun () -> run infos { limits with trading_available = 22059. } legs) in
   let () = fails "TW margin budget short: planned 22000, available 21999"
@@ -7543,7 +7581,7 @@ let test_tw_buy_budget () =
   (* NaN comparisons cannot establish an allowance or a positive buy price. *)
   let () = fails "TW budget inputs are not finite" (fun () ->
     Live.check_tw_budget ~log:(fun _ -> ()) ~symbols
-      ~snapshots:[|snapshots.(0); snapshot Float.nan|]
+      ~snapshots:[|snapshots.(0); snapshot "2890" Float.nan|]
       ~contract_infos:infos ~limits [odd]) in
   let () = fails "TW budget inputs are not finite" (fun () ->
     run infos { limits with trading_available = Float.nan } [cash]) in
@@ -7570,7 +7608,7 @@ let test_tw_decide_production_precheck () =
       "stock \"tw/2330\" as a\nstock \"tw/2890\" as b\nrebalance daily\na.target 0.2\nb.target 0.3\n"
       (fun strat_path ->
         let snapshot : Shioaji.snapshot =
-          { datetime = "2026-05-26T13:20:00+08:00"; open_ = 10.; high = 10.;
+          { code = "2330"; datetime = "2026-05-26T13:20:00+08:00"; open_ = 10.; high = 10.;
             low = 10.; close = 10.; bid = 10.; ask = 10.; total_volume = 0. } in
         let choose mode infos limits = Live.decide
           ~previous_session:"2026-05-22"
@@ -7579,17 +7617,18 @@ let test_tw_decide_production_precheck () =
           ~tw_settlements:[{ Shioaji.day = 0; amount = 0. };
             { Shioaji.day = 1; amount = 0. }; { Shioaji.day = 2; amount = 0. }]
           ~tw_positions:[] ~tw_position_details:[]
-          ~tw_snapshots:[|snapshot; snapshot|]
+          ~tw_snapshots:[|snapshot; { snapshot with code = "2890" }|]
           ~tw_contract_infos:infos ~tw_trading_limits:limits ~tw_log:(fun _ -> ())
           mode ~session_date:"2026-05-26" ~strat_path ~data_dir in
         let baseline = choose Live.Paper [||]
           { tw_test_limits with trading_available = 0.; margin_available = 0. } in
-        let funded = choose Live.Live [|tw_test_info; tw_test_info|] tw_test_limits in
+        let funded = choose Live.Live
+          [|tw_test_info; { tw_test_info with code = "2890" }|] tw_test_limits in
         (* Zero inventory and zero settlements give the same 100000 cash/equity;
            simulation's zero allowances are deliberately not consulted. *)
         let () = assert (funded = baseline) in
         match choose Live.Live
-          [|tw_test_info; { tw_test_info with trading_suspended = true }|]
+          [|tw_test_info; { tw_test_info with code = "2890"; trading_suspended = true }|]
           tw_test_limits with
         | _ -> assert false
         | exception Failure message -> assert (message = "TW symbol 2890 is suspended")))
@@ -9184,6 +9223,29 @@ let test_us_pair_restart_routing () =
          Failure of SPY's finish/error log cannot prevent QQQ's finish. *)
       assert (finished = ["SPY"; "QQQ"])) [false; true]) [false; true]
 
+let test_tw_session_existing_second_code () =
+  let date = "2026-05-26" in
+  let leg : Live.leg = { code = "2890"; exchange = "OTC"; action = "Buy";
+    cond = "Cash"; lot = Shioaji.Common; quantity = 1 } in
+  let existing = tw_trade "existing" leg "Submitted" 0 in
+  let run orders =
+    let events = ref [] in
+    let record text = events := text :: !events in
+    let () = Live.tw_session_step ~symbols:[|"2330"; "2890"|] ~date
+      ~orders_today:(fun ~code ~today ->
+        let () = assert (today = date) in
+        let () = record ("read:" ^ code) in
+        if List.mem code orders then [existing] else [])
+      ~skip:(fun () -> record "skip")
+      ~submit:(fun () -> record "submit") () in
+    List.rev !events in
+  (* A second-code order skips the entire session, including the first code.
+     All codes are read before either session branch can run. *)
+  let () = assert (run ["2890"] = ["read:2330"; "read:2890"; "skip"]) in
+  let () = assert (run ["2330"] = ["read:2330"; "read:2890"; "skip"]) in
+  (* With no orders on either code, the joint session runs exactly once. *)
+  assert (run [] = ["read:2330"; "read:2890"; "submit"])
+
 let test_live_pair_cli_guards () =
   let binary = locate ["_build/default/bin/bt.exe"; "../bin/bt.exe"] in
   let check source options expected =
@@ -9202,14 +9264,7 @@ let test_live_pair_cli_guards () =
   check "stock \"us/SPY\" as a\nstock \"us/SPY\" as b\na.target 0.5\nb.target 0.5\n"
     "" "live trading needs distinct symbols: SPY";
   check "stock \"us/SPY\" as a\nstock \"us/QQQ\" as b\na.target 0.5\nb.target 0.5\n"
-    "--provisional-close 100" "--provisional-close needs a one-stock strategy";
-  with_temp_strategy
-    "stock \"tw/2330\" as a\nstock \"tw/2890\" as b\na.target 0.5\nb.target 0.5\n"
-    (fun strat_path ->
-      match Live.run ~equity:100000. Live.Paper ~strat_path ~data_dir:"unused" with
-      | () -> assert false
-      | exception Failure message ->
-          assert (message = "TW live trading needs one stock in this release"))
+    "--provisional-close 100" "--provisional-close needs a one-stock strategy"
 let () =
   let () = test_daytrade_cli () in
   let () = test_intraday_latency () in
@@ -9425,6 +9480,7 @@ let () =
   let () = test_shioaji_placed_parse () in
   let () = test_shioaji_parser_rejections () in
   let () = test_shioaji_orders_today_parse () in
+  let () = test_tw_session_existing_second_code () in
   let () = test_tw_live_phase () in
   let () = test_tw_live_exchange () in
   let () = test_tw_live_equity () in
@@ -9447,6 +9503,7 @@ let () =
   let () = test_multi_stock_one_stock_pins () in
   let () = test_live_history_gap () in
   let () = test_tw_live_pair_decide () in
+  let () = test_tw_snapshot_identity () in
   let () = test_us_pair_execution () in
   let () = test_us_pair_restart_routing () in
   let () = test_live_pair_cli_guards () in

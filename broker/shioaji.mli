@@ -3,8 +3,9 @@ type info = {
   simulation : bool;
 }
 
-(** Shioaji stock snapshot fields used to build a provisional daily bar. *)
+(** Code-tagged Shioaji stock snapshot fields used to build a provisional daily bar. *)
 type snapshot = {
+  code : string;
   datetime : string;
   open_ : float;
   high : float;
@@ -34,8 +35,9 @@ type position_detail = {
   lots : int;
 }
 
-(** Contract price bands, lot unit, financing ratio and suspension status. *)
+(** Code-tagged contract price bands, lot unit, financing ratio and suspension status. *)
 type contract_info = {
+  code : string;
   reference : float;
   limit_up : float option;
   limit_down : float;
@@ -107,8 +109,9 @@ val parse_info : string -> info
 
 (** Parse required contract fields; absent, null or non-positive limit-up
     means no usable upper band. Bands must contain the reference price,
-    and the Common-lot unit must be 1000 shares. *)
-val parse_contract_info : string -> contract_info
+    and the Common-lot unit must be 1000 shares. Assign request identity;
+    reject a response code, when present, that differs from the request. *)
+val parse_contract_info : code:string -> string -> contract_info
 
 (** Parse finite nonnegative daily stock trading limits. *)
 val parse_trading_limits : string -> trading_limits
