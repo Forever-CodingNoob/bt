@@ -632,8 +632,68 @@ let decision_targets ast stocks arrays provisional ratios =
   effective (length - 1),
   (if length = 1 then Array.make (List.length stocks) 0. else effective (length - 2))
 
+let check_tw_budget ~log ~symbols ~snapshots ~contract_infos
+    ~(limits : Shioaji.trading_limits) legs =
+  let () = if Array.length snapshots <> Array.length symbols
+    || Array.length contract_infos <> Array.length symbols then
+    failwith "TW budget inputs do not match symbols" in
+  let () = Array.iteri (fun i code ->
+    let info : Shioaji.contract_info = contract_infos.(i) in
+    log (Printf.sprintf
+      "code=%s reference=%.10g limit-up=%s limit-down=%.10g day-trade=%s unit=%.10g margin-loan-ratio=%.10g trading-suspended=%b"
+      code info.reference
+      (match info.limit_up with None -> "-" | Some v -> Printf.sprintf "%.10g" v)
+      info.limit_down info.day_trade info.unit info.margin_loan_ratio
+      info.trading_suspended)) symbols in
+  let () = Array.iteri (fun i code ->
+    if contract_infos.(i).Shioaji.trading_suspended then
+      failwith ("TW symbol " ^ code ^ " is suspended")) symbols in
+  let prices = Array.mapi (fun i (info : Shioaji.contract_info) ->
+    match info.limit_up with
+    | Some value when Float.is_finite value && value > 0. -> value
+    | Some _ | None ->
+        let price = info.reference *. 1.10 in
+        let () = log (Printf.sprintf
+          "code=%s budget-price-fallback=reference*1.10 price=%.10g" symbols.(i) price) in
+        price) contract_infos in
+  let index code =
+    let rec find i =
+      if i = Array.length symbols then failwith ("TW budget has unknown code " ^ code)
+      else if symbols.(i) = code then i else find (i + 1) in
+    find 0 in
+  let cash, margin = List.fold_left (fun (cash, margin) (leg : leg) ->
+    if leg.action <> "Buy" then cash, margin
+    else
+      let i = index leg.code in
+      let price = match leg.lot with
+        | Shioaji.Common -> prices.(i)
+        | Shioaji.IntradayOdd -> snapshots.(i).Shioaji.ask in
+      let () = if not (Float.is_finite price && price > 0.) then
+        failwith "TW budget inputs are not finite" in
+      let hold = match leg.lot with
+        | Shioaji.Common -> price *. float_of_int leg.quantity
+            *. contract_infos.(i).unit
+        | Shioaji.IntradayOdd -> price *. float_of_int leg.quantity in
+      match leg.cond with
+      | "Cash" -> cash +. hold, margin
+      | "MarginTrading" -> cash, margin +. hold
+      | cond -> failwith ("unsupported TW buy condition " ^ cond)) (0., 0.) legs in
+  let () = log (Printf.sprintf
+    "buy-hold=%.10g trading-available=%.10g margin-hold=%.10g margin-available=%.10g"
+    cash limits.trading_available margin limits.margin_available) in
+  let nonnegative value = Float.is_finite value && value >= 0. in
+  let () = if not (nonnegative cash && nonnegative margin
+    && nonnegative limits.trading_available && nonnegative limits.margin_available) then
+    failwith "TW budget inputs are not finite" in
+  let () = if cash > limits.trading_available then failwith (Printf.sprintf
+    "TW buy budget short: planned %.10g, available %.10g" cash limits.trading_available) in
+  if margin > limits.margin_available then failwith (Printf.sprintf
+    "TW margin budget short: planned %.10g, available %.10g" margin limits.margin_available)
+
 let decide ?provisional_close ?previous_session ?equity ?tw_balance
-    ?tw_settlements ?tw_positions ?tw_position_details ?tw_snapshots mode
+    ?tw_settlements ?tw_positions ?tw_position_details ?tw_snapshots
+    ?tw_contract_infos ?tw_trading_limits
+    ?(tw_log = fun text -> Printf.eprintf "%s\n%!" text) mode
     ~session_date ~strat_path ~data_dir =
   let ast = Dsl.parse_file strat_path in
   let rebalance = Option.value (Dsl.rebalance_of ~filename:strat_path ast) ~default:false in
@@ -775,6 +835,16 @@ let decide ?provisional_close ?previous_session ?equity ?tw_balance
         maturity_rollover_legs ~session_date ~symbol ~exchange:exchanges.(i) details) symbols)
         |> List.concat in
       let legs = rollover @ legs_of_plan ~codes:symbols ~exchanges ~prices plan in
+      let () = match mode with
+        | Paper -> ()
+        | Live ->
+            let contract_infos = match tw_contract_infos with
+              | Some infos -> infos
+              | None -> Array.map (fun code -> Shioaji.contract_info ~code) symbols in
+            let limits = match tw_trading_limits with
+              | Some limits -> limits
+              | None -> Shioaji.trading_limits () in
+            check_tw_budget ~log:tw_log ~symbols ~snapshots ~contract_infos ~limits legs in
       { fetched_through; equity; cash; debit = loan; legs;
         assets = Array.mapi (fun i symbol ->
           let cs, ms, _, _, _, _ = totals.(i) in

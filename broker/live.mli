@@ -209,7 +209,19 @@ val tw_server_mode_ok : mode -> Shioaji.info -> (unit, string) result
 val tw_startup_ok :
   mode -> equity:float option -> Shioaji.info -> (unit, string) result
 
-(** Compute one live decision without submitting an order. *)
+(** Log each contract, reject suspended symbols, then check all cash and margin
+    buy holds separately without sell offsets, rollover and refinance rebuys included.
+    Common buys use the upper band (reference times 1.10 if absent); odd buys
+    use the snapshot ask. Reject non-finite or non-positive buy prices and
+    non-finite or negative hold sums or allowances with [Failure]. *)
+val check_tw_budget :
+  log:(string -> unit) -> symbols:string array ->
+  snapshots:Shioaji.snapshot array -> contract_infos:Shioaji.contract_info array ->
+  limits:Shioaji.trading_limits -> leg list -> unit
+
+(** Compute one live decision without submitting an order. TW production
+    checks contract suspensions and the complete buy budget before returning;
+    Paper does not read contract info or limits. Audit logs default to stderr. *)
 val decide :
   ?provisional_close:float ->
   ?previous_session:string ->
@@ -219,6 +231,9 @@ val decide :
   ?tw_positions:Shioaji.position list ->
   ?tw_position_details:Shioaji.position_detail list ->
   ?tw_snapshots:Shioaji.snapshot array ->
+  ?tw_contract_infos:Shioaji.contract_info array ->
+  ?tw_trading_limits:Shioaji.trading_limits ->
+  ?tw_log:(string -> unit) ->
   mode ->
   session_date:string ->
   strat_path:string ->

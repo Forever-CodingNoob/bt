@@ -7493,6 +7493,102 @@ let test_multi_stock_one_stock_pins () =
        { Live.code = "2330"; exchange = "TSE"; action = "Sell"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 1 };
        { Live.code = "2330"; exchange = "TSE"; action = "Buy"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 1 }]))
 
+let tw_test_info : Shioaji.contract_info =
+  { reference = 10.; limit_up = Some 11.; limit_down = 9.; day_trade = "Yes";
+    unit = 1000.; margin_loan_ratio = 0.6; trading_suspended = false }
+
+let tw_test_limits : Shioaji.trading_limits =
+  { trading_limit = 1000000000.; trading_used = 0.;
+    trading_available = 1000000000.; margin_limit = 1000000000.;
+    margin_used = 0.; margin_available = 1000000000. }
+
+let test_tw_buy_budget () =
+  let symbols = [|"2330"; "2890"|] in
+  let snapshot ask : Shioaji.snapshot =
+    { datetime = "2026-05-26T13:20:00+08:00"; open_ = 10.; high = 10.;
+      low = 10.; close = 10.; bid = 9.; ask; total_volume = 0. } in
+  let snapshots = [|snapshot 10.; snapshot 20.|] in
+  let cash : Live.leg =
+    { code = "2330"; exchange = "TSE"; action = "Buy"; cond = "Cash";
+      lot = Shioaji.Common; quantity = 2 } in
+  let odd = { cash with code = "2890"; exchange = "OTC";
+    lot = Shioaji.IntradayOdd; quantity = 3 } in
+  let margin = { cash with code = "2890"; exchange = "OTC";
+    cond = "MarginTrading"; quantity = 1 } in
+  let infos = [|tw_test_info; { tw_test_info with limit_up = Some 22. }|] in
+  let run infos limits legs = Live.check_tw_budget ~log:(fun _ -> ())
+    ~symbols ~snapshots ~contract_infos:infos ~limits legs in
+  let fails expected function_ = match function_ () with
+    | () -> assert false
+    | exception Failure actual -> assert (actual = expected) in
+  (* Cash = 11*2*1000 + 20*3 = 22060; margin = 22*1*1000 = 22000.
+     Equality passes. A sell never offsets either sum. *)
+  let limits = { tw_test_limits with trading_available = 22060.;
+    margin_available = 22000. } in
+  let legs = [{ cash with action = "Sell" }; cash; odd; margin] in
+  let () = run infos limits legs in
+  let () = fails "TW buy budget short: planned 22060, available 22059"
+    (fun () -> run infos { limits with trading_available = 22059. } legs) in
+  let () = fails "TW margin budget short: planned 22000, available 21999"
+    (fun () -> run infos { limits with margin_available = 21999. } legs) in
+  (* A rebuy is still a buy hold; no special exemption for the preceding sale. *)
+  let () = fails "TW margin budget short: planned 22000, available 0"
+    (fun () -> run infos { limits with margin_available = 0. }
+      [{ margin with action = "Sell" }; margin]) in
+  (* NaN comparisons cannot establish an allowance or a positive buy price. *)
+  let () = fails "TW budget inputs are not finite" (fun () ->
+    Live.check_tw_budget ~log:(fun _ -> ()) ~symbols
+      ~snapshots:[|snapshots.(0); snapshot Float.nan|]
+      ~contract_infos:infos ~limits [odd]) in
+  let () = fails "TW budget inputs are not finite" (fun () ->
+    run infos { limits with trading_available = Float.nan } [cash]) in
+  let () = fails "TW budget inputs are not finite" (fun () ->
+    run [|{ tw_test_info with reference = Float.nan; limit_up = None };
+      infos.(1)|] limits [cash]) in
+  let messages = ref [] in
+  let fallback_infos = [|{ tw_test_info with reference = 100.; limit_up = None };
+    infos.(1)|] in
+  let () = Live.check_tw_budget ~log:(fun text -> messages := text :: !messages)
+    ~symbols ~snapshots ~contract_infos:fallback_infos
+    ~limits:{ limits with trading_available = 221000. } [cash] in
+  (* No band: 100*1.10*2*1000 = 220000; no snapshot-close pricing. *)
+  let () = assert (List.exists (fun line -> contains line
+    "code=2330 budget-price-fallback=reference*1.10 price=110") !messages) in
+  let () = assert (List.exists (fun line -> contains line
+    "buy-hold=220000 trading-available=221000 margin-hold=0 margin-available=22000") !messages) in
+  fails "TW symbol 2890 is suspended" (fun () -> run
+    [|infos.(0); { infos.(1) with trading_suspended = true }|] limits [])
+
+let test_tw_decide_production_precheck () =
+  with_tw_decision_cache (fun data_dir ->
+    with_temp_strategy
+      "stock \"tw/2330\" as a\nstock \"tw/2890\" as b\nrebalance daily\na.target 0.2\nb.target 0.3\n"
+      (fun strat_path ->
+        let snapshot : Shioaji.snapshot =
+          { datetime = "2026-05-26T13:20:00+08:00"; open_ = 10.; high = 10.;
+            low = 10.; close = 10.; bid = 10.; ask = 10.; total_volume = 0. } in
+        let choose mode infos limits = Live.decide
+          ~previous_session:"2026-05-22"
+          ?equity:(match mode with Live.Paper -> Some 100000. | Live.Live -> None)
+          ~tw_balance:100000.
+          ~tw_settlements:[{ Shioaji.day = 0; amount = 0. };
+            { Shioaji.day = 1; amount = 0. }; { Shioaji.day = 2; amount = 0. }]
+          ~tw_positions:[] ~tw_position_details:[]
+          ~tw_snapshots:[|snapshot; snapshot|]
+          ~tw_contract_infos:infos ~tw_trading_limits:limits ~tw_log:(fun _ -> ())
+          mode ~session_date:"2026-05-26" ~strat_path ~data_dir in
+        let baseline = choose Live.Paper [||]
+          { tw_test_limits with trading_available = 0.; margin_available = 0. } in
+        let funded = choose Live.Live [|tw_test_info; tw_test_info|] tw_test_limits in
+        (* Zero inventory and zero settlements give the same 100000 cash/equity;
+           simulation's zero allowances are deliberately not consulted. *)
+        let () = assert (funded = baseline) in
+        match choose Live.Live
+          [|tw_test_info; { tw_test_info with trading_suspended = true }|]
+          tw_test_limits with
+        | _ -> assert false
+        | exception Failure message -> assert (message = "TW symbol 2890 is suspended")))
+
 let test_tw_live_decide_override () =
   with_temp_market "tw" (fun data_dir tw_dir ->
     let symbol_dir = Filename.concat tw_dir "2330" in
@@ -7553,6 +7649,8 @@ let test_tw_live_decide_override () =
           ~previous_session:"2026-05-22" ~tw_balance:2000000.
           ~tw_settlements:production_settlements
           ~tw_positions:[production_position] ~tw_position_details:[]
+          ~tw_contract_infos:[|tw_test_info|]
+          ~tw_trading_limits:tw_test_limits ~tw_log:(fun _ -> ())
           Live.Live ~session_date:"2026-05-26" ~strat_path ~data_dir
       in
       (* Spendable cash is 2,000,000 - 107 = TWD 1,999,893. Adding one
@@ -7611,6 +7709,8 @@ let test_tw_live_decide_override () =
                  { amount = 0.; day = 1 };
                  { amount = 0.; day = 2 }]
               ~tw_positions:[{ drift_position with last_price = 180. }]
+              ~tw_contract_infos:[|tw_test_info|]
+              ~tw_trading_limits:tw_test_limits ~tw_log:(fun _ -> ())
               ~tw_position_details:[] Live.Live
               ~session_date:"2026-05-26" ~strat_path:daily_strat_path
               ~data_dir)
@@ -7634,6 +7734,8 @@ let test_tw_live_decide_override () =
                 ~tw_positions:
                   [{ drift_position with cond = "MarginTrading";
                      loan_amount = 2600000.; interest = 10000. }]
+                ~tw_contract_infos:[|tw_test_info|]
+                ~tw_trading_limits:tw_test_limits ~tw_log:(fun _ -> ())
                 ~tw_position_details:[] Live.Live
                 ~session_date:"2026-05-26" ~strat_path:daily_strat_path
                 ~data_dir
@@ -9106,6 +9208,8 @@ let () =
   let () = test_us_pair_execution () in
   let () = test_us_pair_restart_routing () in
   let () = test_live_pair_cli_guards () in
+  let () = test_tw_buy_budget () in
+  let () = test_tw_decide_production_precheck () in
   let () = test_tw_live_decide_override () in
   let () = test_tw_execution_stops_on_predecessor () in
   let () = test_tw_execution_times_out () in
