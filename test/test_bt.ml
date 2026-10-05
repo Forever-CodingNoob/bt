@@ -9223,6 +9223,145 @@ let test_us_pair_restart_routing () =
          Failure of SPY's finish/error log cannot prevent QQQ's finish. *)
       assert (finished = ["SPY"; "QQQ"])) [false; true]) [false; true]
 
+let test_us_open_sell_restart_end_to_end () =
+  let date = "2025-06-24" in
+  let initial : Alpaca.clock_t =
+    { timestamp = date ^ "T15:45:00-04:00"; is_open = true;
+      next_open = "2025-06-25T09:30:00-04:00";
+      next_close = date ^ "T16:00:00-04:00" } in
+  let decision = us_pair_decision
+    [|Live.Order { side = `Sell; qty = 1.; id = "bt-SPY-2025-06-24" };
+      Live.Order { side = `Buy; qty = 1.; id = "bt-QQQ-2025-06-24" }|] in
+  let run outcome =
+    let polls = ref 0 and decisions = ref 0 and retries = ref 0 in
+    let continued = ref 0 and posted = ref [] and finished = ref [] in
+    let events = ref [] in
+    let emit text = events := text :: !events in
+    let output = capture_stdout (fun () ->
+      Live.us_step ~symbols:[|"SPY"; "QQQ"|]
+        ~lookup:(fun id ->
+          let () = emit ("lookup:" ^ id) in
+          if id = "bt-SPY-2025-06-24" then
+            Some (us_fixture_order "SPY" "sell" "accepted") else None)
+        ~decide:(fun actual_date ->
+          let () = assert (actual_date = date) in
+          let () = incr decisions in decision)
+        ~execute:(fun existing clock actual ->
+          let () = assert (actual.Live.assets.(0).action = Live.Skip "existing order") in
+          Live.execute_decision ~existing
+            ~order_by_client_id:(fun _ id ->
+              if id <> "bt-SPY-2025-06-24" then None
+              else
+                let () = incr polls in
+                let status = if outcome = "rejected" then "rejected"
+                  else if outcome = "filled" && !polls = 2 then "filled"
+                  else "accepted" in
+                let () = emit ("sell:" ^ status) in
+                Some (us_fixture_order "SPY" "sell" status))
+            ~clock:(fun _ ->
+              if outcome = "open-at-cutoff" then
+                { initial with timestamp = date ^ "T15:58:00-04:00" } else initial)
+            ~sleep:(fun seconds ->
+              let () = assert (seconds = 15.) in emit "wait-sell")
+            ~submit_market:(fun _ ~symbol ~qty ~side ~client_order_id ->
+              let () = assert (symbol = "QQQ" && qty = 1. && side = `Buy
+                && client_order_id = "bt-QQQ-2025-06-24") in
+              let () = assert (outcome = "filled" && !polls = 2) in
+              let () = posted := symbol :: !posted in
+              let () = emit "post:QQQ" in us_fixture_order symbol "buy" "filled")
+            ~finish:(fun _ _ symbol _ ->
+              let () = finished := symbol :: !finished in emit ("finish:" ^ symbol))
+            Live.Paper date clock.Alpaca.next_close actual)
+        ~finish:(fun _ _ _ _ -> assert false)
+        ~sleep_until:(fun timestamp ->
+          let () = assert (timestamp = initial.next_open) in emit "next-open")
+        ~retry:(fun () -> incr retries)
+        ~continue:(fun () -> incr continued) initial) in
+    (* The restart re-plans once, never resubmits SPY, and ends once without retry. *)
+    let () = assert (!decisions = 1 && !retries = 0 && !continued = 1) in
+    let events = List.rev !events in
+    let () = assert (List.filter (fun event -> contains event "lookup:") events =
+      ["lookup:bt-SPY-2025-06-24"; "lookup:bt-QQQ-2025-06-24"]) in
+    if outcome = "filled" then
+      (* QQQ POST follows the existing sell's second, filled observation. *)
+      let () = assert (!posted = ["QQQ"] && !polls = 2) in
+      let () = assert (List.filter (fun event ->
+        contains event "sell:" || event = "post:QQQ") events =
+        ["sell:accepted"; "sell:filled"; "post:QQQ"]) in
+      assert (List.rev !finished = ["SPY"; "QQQ"])
+    else
+      (* Rejected or cutoff-open sell sends no buy, but still finishes the known sell. *)
+      let () = assert (!posted = [] && List.rev !finished = ["SPY"]) in
+      assert (contains output (if outcome = "rejected" then
+        "error=sell SPY rejected order=skip"
+        else "error=sell SPY open at cutoff order=skip")) in
+  let () = List.iter run ["filled"; "rejected"; "open-at-cutoff"] in
+  let sell = us_fixture_order "SPY" "sell" "accepted" in
+  List.iter (fun fail_at_cutoff ->
+    let cutoff = { initial with timestamp = date ^ "T15:58:00-04:00" } in
+    let clocks = ref [{ initial with timestamp = date ^ "T15:57:59-04:00" }; cutoff] in
+    let events = ref [] in
+    let emit event = events := event :: !events in
+    let step () =
+      let clock = match !clocks with
+        | [] -> assert false
+        | clock :: rest -> let () = clocks := rest in clock in
+      let () = emit ("clock:" ^ clock.Alpaca.timestamp) in
+      Live.us_step ~symbols:[|"SPY"; "QQQ"|]
+        ~lookup:(fun id ->
+          let () = emit ("lookup:" ^ id) in
+          if id = "bt-SPY-2025-06-24" then Some sell
+          else
+            let () = assert (id = "bt-QQQ-2025-06-24") in
+            if fail_at_cutoff && clock = cutoff then failwith "lookup unavailable"
+            else None)
+        ~decide:(fun actual_date ->
+          let () = assert (actual_date = date) in
+          let () = emit "decide" in decision)
+        ~execute:(fun existing clock actual ->
+          let () = emit "execute" in
+          let () = assert (existing = ["SPY", sell]
+            && actual.Live.assets.(0).action = Live.Skip "existing order") in
+          Live.execute_decision ~existing
+            ~order_by_client_id:(fun _ id ->
+              let () = emit ("preflight-lookup:" ^ id) in
+              let () = assert (id = "bt-QQQ-2025-06-24") in
+              failwith "lookup unavailable")
+            ~clock:(fun _ -> let () = emit "preflight-clock" in clock)
+            ~sleep:(fun _ -> emit "wait-sell")
+            ~submit_market:(fun _ ~symbol ~qty:_ ~side:_ ~client_order_id:_ ->
+              let () = emit ("post:" ^ symbol) in
+              us_fixture_order symbol "buy" "filled")
+            ~finish:(fun _ _ symbol _ -> emit ("execute-finish:" ^ symbol))
+            Live.Paper date clock.Alpaca.next_close actual)
+        ~finish:(fun clock actual_date id order ->
+          let () = assert (clock = cutoff && actual_date = date
+            && id = "bt-SPY-2025-06-24" && order = sell) in
+          emit ("finish:" ^ id))
+        ~sleep_until:(fun timestamp -> emit ("sleep:" ^ timestamp))
+        ~retry:(fun () -> emit "retry")
+        ~continue:(fun () -> emit "continue") clock in
+    let output = capture_stdout step in
+    (* At 15:57:59 the executor's QQQ dedupe lookup fails before any POST.
+       The known SPY sell is not a POST: us_step retries without finishing. *)
+    let before_cutoff = ["clock:2025-06-24T15:57:59-04:00";
+      "lookup:bt-SPY-2025-06-24"; "lookup:bt-QQQ-2025-06-24";
+      "decide"; "execute"; "preflight-lookup:bt-QQQ-2025-06-24"; "retry"] in
+    let () = assert (List.rev !events = before_cutoff) in
+    let () = assert (contains output "order=retry") in
+    let output = capture_stdout step in
+    (* At 15:58:00 neither a successful nor failed QQQ lookup can submit.
+       Both Cutoff_passed paths finish the one known sell exactly once,
+       then sleep to the next open and continue, with no second retry. *)
+    let () = assert (List.rev !events = before_cutoff @
+      ["clock:2025-06-24T15:58:00-04:00";
+       "lookup:bt-SPY-2025-06-24"; "lookup:bt-QQQ-2025-06-24";
+       "finish:bt-SPY-2025-06-24";
+       "sleep:2025-06-25T09:30:00-04:00"; "continue"]) in
+    let () = assert (contains output "order=skip"
+      && not (contains output "order=retry")) in
+    assert (!clocks = [])) [false; true]
+
 let test_tw_session_existing_second_code () =
   let date = "2026-05-26" in
   let leg : Live.leg = { code = "2890"; exchange = "OTC"; action = "Buy";
@@ -9506,6 +9645,7 @@ let () =
   let () = test_tw_snapshot_identity () in
   let () = test_us_pair_execution () in
   let () = test_us_pair_restart_routing () in
+  let () = test_us_open_sell_restart_end_to_end () in
   let () = test_live_pair_cli_guards () in
   let () = test_tw_buy_budget () in
   let () = test_tw_decide_production_precheck () in
