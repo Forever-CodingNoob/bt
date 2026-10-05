@@ -37,10 +37,21 @@ type decision = {
   legs : leg list;
 }
 
+type tw_execution_asset = {
+  code : string;
+  exchange : string;
+  bid : float;
+  ask : float;
+  price : float;
+  financing_ratio : float;
+  costs : Engine.costs;
+}
+
 type tw_execution = {
   trades : Shioaji.trade list;
   remaining : leg list;
   stop_reason : string option;
+  cash : float;
 }
 
 let provisional_bar (snapshot : Alpaca.snapshot_t) : Data.bar =
@@ -1248,423 +1259,301 @@ let tw_order_cost (costs : Engine.costs) ~action ~price ~shares =
         Engine.taf_dollars costs ~shares:(float_of_int shares)
       else 0.)
 
-let execute_tw_legs ~mode ~bid ~ask ~now ~sleep ~place_order ~orders_today
-    ~exchange ~code
-    ~date ~price ~financing_ratio ~costs ~cash ~positions legs =
-  let () =
-    if List.exists (fun (leg : leg) ->
-      leg.code <> code || leg.exchange <> exchange) legs then
-      failwith "TW leg code does not match executor code"
-  in
+let execute_tw_legs ~mode ~(assets : tw_execution_asset array)
+    ~now ~sleep ~(place_order : Shioaji.order_request -> Shioaji.placed)
+    ~orders_today ~date ~cash ~positions legs =
   let () = validate_date "order" date in
-  let () =
-    if not (Float.is_finite price) || price <= 0. then
-      failwith "TW execution price must be finite and positive"
-  in
-  let () =
-    if not (Float.is_finite financing_ratio)
-       || financing_ratio < 0. || financing_ratio > 1.
-    then
-      failwith "TW financing ratio must be between zero and one"
-  in
-  let () =
-    if not (Float.is_finite cash) then
-      failwith "TW execution cash is not finite"
-  in
-  let cash_shares, margin_shares, _, _, loans, interests =
-    (position_totals ~symbols:[|code|] ~prices:[|price|] positions).(0)
-  in
-  let cash_shares = int_of_float cash_shares in
-  let margin_lots = int_of_float (margin_shares /. 1000.) in
-  let () =
-    if margin_lots = 0 && (loans <> 0. || interests <> 0.) then
-      failwith "TW margin liabilities have no margin inventory"
-  in
+  let () = if not (Float.is_finite cash) then
+    failwith "TW execution cash is not finite" in
+  let symbols = Array.map (fun (a : tw_execution_asset) -> a.code) assets in
+  let prices = Array.map (fun (a : tw_execution_asset) -> a.price) assets in
+  let () = Array.iter (fun (a : tw_execution_asset) ->
+    let () = if not (Float.is_finite a.price) || a.price <= 0. then
+      failwith "TW execution price must be finite and positive" in
+    if not (Float.is_finite a.financing_ratio)
+      || a.financing_ratio < 0. || a.financing_ratio > 1. then
+      failwith "TW financing ratio must be between zero and one") assets in
+  let index (leg : leg) =
+    let rec find i =
+      if i = Array.length assets then
+        failwith "TW leg code does not match executor code"
+      else if assets.(i).code = leg.code then
+        if assets.(i).exchange = leg.exchange then i
+        else failwith "TW leg code does not match executor code"
+      else find (i + 1) in
+    find 0 in
+  let () = List.iter (fun leg -> ignore (index leg)) legs in
+  let totals = position_totals ~symbols ~prices positions in
+  let cash_shares = Array.map (fun (cs, _, _, _, _, _) -> int_of_float cs) totals in
+  let margin_lots = Array.map (fun (_, ms, _, _, _, _) -> int_of_float (ms /. 1000.)) totals in
+  let loans = Array.map (fun (_, _, _, _, loan, _) -> loan) totals in
+  let interests = Array.map (fun (_, _, _, _, _, interest) -> interest) totals in
+  let () = Array.iteri (fun i lots ->
+    if lots = 0 && (loans.(i) <> 0. || interests.(i) <> 0.) then
+      failwith "TW margin liabilities have no margin inventory") margin_lots in
+  let cash = ref cash in
+  let trades = ref [] in
+  let stop_reason = ref None in
+  let set_stop reason = if !stop_reason = None then stop_reason := Some reason in
   let open_window () =
     let timestamp = now () in
-    timestamp_date timestamp = date && taipei_phase ~now:timestamp = `Decide
-  in
+    timestamp_date timestamp = date && taipei_phase ~now:timestamp = `Decide in
   let submission_window () =
     let timestamp = now () in
-    let local =
-      Unix.gmtime (float_of_int (rfc3339_seconds timestamp + (8 * 60 * 60)))
-    in
-    timestamp_date timestamp = date
-    && taipei_phase ~now:timestamp = `Decide
+    let local = Unix.gmtime
+      (float_of_int (rfc3339_seconds timestamp + (8 * 60 * 60))) in
+    timestamp_date timestamp = date && taipei_phase ~now:timestamp = `Decide
     && (local.tm_hour * 60 + local.tm_min) * 60 + local.tm_sec
-       < (13 * 60 + 24) * 60 + 30
-  in
-  let leg_shares (leg : leg) quantity =
-    match leg.lot with
+      < (13 * 60 + 24) * 60 + 30 in
+  let shares (leg : leg) quantity = match leg.lot with
     | Shioaji.Common -> quantity * 1000
-    | Shioaji.IntradayOdd -> quantity
-  in
-  let cash_required (leg : leg) quantity execution_price =
-    let shares = leg_shares leg quantity in
-    let notional = float_of_int shares *. execution_price in
-    let cost =
-      tw_order_cost costs ~action:"Buy" ~price:execution_price ~shares
-    in
+    | Shioaji.IntradayOdd -> quantity in
+  let cash_required i (leg : leg) quantity price =
+    let amount = shares leg quantity in
+    let value = float_of_int amount *. price in
+    let cost = tw_order_cost assets.(i).costs ~action:"Buy" ~price ~shares:amount in
     match leg.cond with
-    | "Cash" -> notional +. cost
-    | "MarginTrading" ->
-        ((1. -. financing_ratio) *. notional) +. cost
-    | cond -> failwith (Printf.sprintf "unsupported TW buy condition %s" cond)
-  in
-  let affordable_quantity leg available maximum execution_price =
+    | "Cash" -> value +. cost
+    | "MarginTrading" -> ((1. -. assets.(i).financing_ratio) *. value) +. cost
+    | cond -> failwith ("unsupported TW buy condition " ^ cond) in
+  let affordable_quantity i leg maximum quote =
     let rec search low high =
       if low >= high then low
-      else
-        let middle = low + ((high - low + 1) / 2) in
-        if cash_required leg middle execution_price <= available then
-          search middle high
-        else
-          search low (middle - 1)
-    in
-    search 0 maximum
-  in
-  let trade_cash_effect ~margin_lots ~loans ~interests
-      (leg : leg) (trade : Shioaji.trade) =
-    let execution_price =
-      match trade.deal_price with
-      | Some value when Float.is_finite value && value > 0. -> value
-      | Some _ | None -> failwith "filled TW order has no valid deal price"
-    in
-    let shares = leg_shares leg trade.deal_quantity in
-    let notional = float_of_int shares *. execution_price in
-    let cost =
-      tw_order_cost costs ~action:leg.action ~price:execution_price ~shares
-    in
+      else let middle = low + ((high - low + 1) / 2) in
+        if cash_required i leg middle quote <= Float.max 0. !cash then search middle high
+        else search low (middle - 1) in
+    search 0 maximum in
+  let reserve_inventory i (leg : leg) direction =
     match leg.action, leg.cond with
-    | "Sell", "Cash" -> notional -. cost, loans, interests
-    | "Sell", "MarginTrading" ->
-        let () =
-          if margin_lots <= 0 then
-            failwith "TW margin sell has no margin inventory"
-        in
-        let fraction =
-          float_of_int trade.deal_quantity /. float_of_int margin_lots
-        in
-        let repayment = loans *. fraction in
-        let interest = interests *. fraction in
-        notional -. repayment -. interest -. cost,
-        loans -. repayment, interests -. interest
-    | "Buy", "Cash" ->
-        -. cash_required leg trade.deal_quantity execution_price,
-        loans, interests
-    | "Buy", "MarginTrading" ->
-        -. cash_required leg trade.deal_quantity execution_price,
-        loans +. (financing_ratio *. notional), interests
-    | action, _ ->
-        failwith (Printf.sprintf "unsupported TW order action %s" action)
-  in
-  let status_matches (leg : leg) (trade : Shioaji.trade) =
-    trade.code = code && trade.action = leg.action && trade.cond = leg.cond
-    && trade.lot = leg.lot
-  in
-  let poll leg order_id =
-    let rec loop remaining =
-      if not (open_window ()) then
-        Error
-          (Printf.sprintf "order %s status unconfirmed at cutoff" order_id,
-           None)
+    | "Sell", "Cash" -> cash_shares.(i) <- cash_shares.(i) + direction * shares leg leg.quantity
+    | "Sell", "MarginTrading" -> margin_lots.(i) <- margin_lots.(i) + direction * leg.quantity
+    | "Buy", _ -> ()
+    | _ -> assert false in
+  let settle i (leg : leg) reserved repayment interest
+      (trade : Shioaji.trade) =
+    let price = match trade.deal_price with Some price -> price | None -> assert false in
+    let amount = shares leg trade.deal_quantity in
+    let value = float_of_int amount *. price in
+    let cost = tw_order_cost assets.(i).costs ~action:leg.action ~price ~shares:amount in
+    let cash_effect = match leg.action, leg.cond with
+      | "Sell", "Cash" -> value -. cost
+      | "Sell", "MarginTrading" ->
+          value -. repayment -. interest -. cost
+      | "Buy", "Cash" ->
+          let () = cash_shares.(i) <- cash_shares.(i) + amount in
+          -. (value +. cost)
+      | "Buy", "MarginTrading" ->
+          let () = margin_lots.(i) <- margin_lots.(i) + trade.deal_quantity in
+          let () = loans.(i) <- loans.(i) +. assets.(i).financing_ratio *. value in
+          -. (((1. -. assets.(i).financing_ratio) *. value) +. cost)
+      | _ -> assert false in
+    let () = cash := !cash +. reserved +. cash_effect in
+    if !cash < -. 1e-9 then set_stop (Printf.sprintf
+      "confirmed fill exceeded cash budget by %.10g" (-. !cash)) in
+  let rejected status = List.mem status ["Failed"; "Inactive"; "Cancelled"; "Rejected"] in
+  let classify (leg : leg) order_id history =
+    let error reason observed = `Uncertain ("order " ^ order_id ^ " " ^ reason, observed) in
+    match history with
+    | Error reason -> error ("status unavailable: " ^ reason) None
+    | Ok history ->
+        match List.filter (fun (t : Shioaji.trade) -> t.order_id = order_id) history with
+        | [] -> error "has no status" None
+        | _ :: _ :: _ -> error "has ambiguous status" None
+        | [trade] ->
+            if trade.code <> leg.code || trade.action <> leg.action
+              || trade.cond <> leg.cond || trade.lot <> leg.lot then
+              error "status does not match request" (Some trade)
+            else if trade.status = "Filled" && trade.deal_quantity = leg.quantity
+              && trade.order_quantity = leg.quantity then
+              (match trade.deal_price with
+               | Some price when Float.is_finite price && price > 0. -> `Filled trade
+               | Some _ | None -> error "filled without a valid price" (Some trade))
+            else if trade.status = "Filled" || trade.status = "PartFilled" then
+              error (Printf.sprintf "partially filled %d of %d"
+                trade.deal_quantity leg.quantity) (Some trade)
+            else if rejected trade.status && trade.deal_quantity = 0 then `Rejected trade
+            else if List.mem trade.status ["PendingSubmit"; "PreSubmitted"; "Submitted"] then
+              if trade.deal_quantity <> 0 then error "has unconfirmed partial exposure" (Some trade)
+              else if trade.order_quantity <> 0 && trade.order_quantity <> leg.quantity then
+                error "status quantity does not match request" (Some trade)
+              else `Pending trade
+            else error ("has unsupported status " ^ trade.status) (Some trade) in
+  let histories = Array.make (Array.length assets) None in
+  let poll_group pending =
+    let record = function None -> () | Some trade -> trades := trade :: !trades in
+    let rec round remaining pending =
+      if pending = [] then ()
+      else if not (open_window ()) then
+        List.iter (fun (_, _, id, _, _, _) ->
+          set_stop ("order " ^ id ^ " status unconfirmed at cutoff")) pending
       else
-        match
-          try Ok (orders_today ~code ~today:date)
-          with error ->
-            Error
-              (Printf.sprintf "order %s status unavailable: %s" order_id
-                 (error_text error))
-        with
-        | Error reason -> Error (reason, None)
-        | Ok trades ->
-            (match List.filter
-                     (fun (trade : Shioaji.trade) -> trade.order_id = order_id)
-                     trades with
-             | [] ->
-                 Error
-                   (Printf.sprintf "order %s has no status" order_id, None)
-             | _ :: _ :: _ ->
-                 Error
-                   (Printf.sprintf "order %s has ambiguous status" order_id,
-                    None)
-             | [trade] when not (status_matches leg trade) ->
-                 Error
-                   (Printf.sprintf "order %s status does not match request"
-                      order_id, Some trade)
-             | [trade] ->
-                 match trade.status with
-                 | "Filled"
-                   when trade.deal_quantity = leg.quantity
-                        && trade.order_quantity = leg.quantity ->
-                     (match trade.deal_price with
-                      | Some value when Float.is_finite value && value > 0. ->
-                          Ok trade
-                      | Some _ | None ->
-                          Error
-                            (Printf.sprintf
-                               "order %s filled without a valid price"
-                               order_id, Some trade))
-                 | "Filled" | "PartFilled" ->
-                     Error
-                       (Printf.sprintf "order %s partially filled %d of %d"
-                          order_id trade.deal_quantity leg.quantity,
-                        Some trade)
-                 | "Failed" | "Inactive" | "Cancelled" | "Rejected" ->
-                     Error
-                       (Printf.sprintf "order %s %s" order_id
-                          (String.lowercase_ascii trade.status),
-                        Some trade)
-                 | "PendingSubmit" | "PreSubmitted" | "Submitted" ->
-                     if trade.deal_quantity <> 0 then
-                       Error
-                         (Printf.sprintf
-                            "order %s has unconfirmed partial exposure"
-                            order_id, Some trade)
-                     else if trade.order_quantity <> 0
-                             && trade.order_quantity <> leg.quantity
-                     then
-                       Error
-                         (Printf.sprintf
-                            "order %s status quantity does not match request"
-                            order_id, Some trade)
-                     else if remaining = 1 then
-                       Error
-                         (Printf.sprintf "order %s status timed out" order_id,
-                          Some trade)
-                     else
-                       let () = sleep 1. in
-                       loop (remaining - 1)
-                 | status ->
-                     Error
-                       (Printf.sprintf "order %s has unsupported status %s"
-                          order_id status, Some trade))
-    in
-    loop 5
-  in
+        let () = Array.fill histories 0 (Array.length histories) None in
+        let history i = match histories.(i) with
+          | Some result -> result
+          | None ->
+              let result = try Ok (orders_today ~code:assets.(i).code ~today:date)
+                with error -> Error (error_text error) in
+              let () = histories.(i) <- Some result in
+              result in
+        let rec observe waiting = function
+          | [] -> List.rev waiting
+          | ((i, (leg : leg), id, reserved, repayment, interest) as item) :: rest ->
+              let outcome = classify leg id (history i) in
+              let () = match outcome with
+                | `Filled trade ->
+                    let () = record (Some trade) in
+                    settle i leg reserved repayment interest trade
+                | `Rejected trade ->
+                    let () = record (Some trade) in
+                    let () = reserve_inventory i leg 1 in
+                    let () = loans.(i) <- loans.(i) +. repayment in
+                    let () = interests.(i) <- interests.(i) +. interest in
+                    let () = cash := !cash +. reserved in
+                    let reason = "order " ^ id ^ " " ^ String.lowercase_ascii trade.status in
+                    let () = log "code=%s submitted=skip:%s" leg.code reason in
+                    if leg.action = "Sell" then set_stop reason
+                | `Uncertain (reason, trade) ->
+                    let () = record trade in set_stop reason
+                | `Pending trade when remaining = 1 ->
+                    let () = record (Some trade) in set_stop ("order " ^ id ^ " status timed out")
+                | `Pending _ -> () in
+              let waiting = match outcome with
+                | `Pending _ when remaining > 1 -> item :: waiting
+                | _ -> waiting in
+              observe waiting rest in
+        let waiting = observe [] pending in
+        if waiting <> [] then let () = sleep 1. in round (remaining - 1) waiting in
+    round 5 pending in
   let custom_field = "bt" ^ String.sub date 5 2 ^ String.sub date 8 2 in
-  let rec submit cash cash_shares margin_lots loans interests previous trades =
-    function
-    | [] -> { trades = List.rev trades; remaining = []; stop_reason = None }
-    | (leg : leg) :: rest ->
-        let stop reason remaining =
-          { trades = List.rev trades; remaining; stop_reason = Some reason }
-        in
-        let continue cash cash_shares margin_lots loans interests previous
-            trades =
-          submit cash cash_shares margin_lots loans interests previous trades
-            rest
-        in
-        let dependency_filled =
-          match previous with
-          | Some ((predecessor : leg), filled)
-            when predecessor.action = "Sell"
-                 && leg.action = "Buy" && leg.cond = "MarginTrading"
-                 && predecessor.quantity = leg.quantity
-                 && predecessor.lot = leg.lot ->
-              Some filled
-          | _ -> None
-        in
-        if dependency_filled = Some false then
-          stop
-            (Printf.sprintf "dependent %s %s %d needs complete sell fill"
-               leg.action leg.cond leg.quantity) (leg :: rest)
-        else if leg.lot = Shioaji.IntradayOdd && mode = Paper then
-          let () = log "submitted=skip:odd-lot-unsupported-in-simulation" in
-          continue cash cash_shares margin_lots loans interests None trades
-        else
-          let quote =
-            match leg.lot, leg.action with
-            | Shioaji.Common, _ -> price
-            | Shioaji.IntradayOdd, "Buy" -> ask
-            | Shioaji.IntradayOdd, "Sell" -> bid
-            | _, action ->
-                failwith (Printf.sprintf "unsupported TW order action %s" action)
-          in
-          if not (Float.is_finite quote) || quote <= 0. then
-            let () = log "submitted=skip:odd-lot-quote-unavailable" in
-            continue cash cash_shares margin_lots loans interests None trades
+  let run_group dependent group =
+    let pending = ref [] in
+    let hard_stop reason remaining = let () = set_stop reason in remaining in
+    let rec place = function
+      | [] -> []
+      | (leg : leg) :: rest ->
+          let i = index leg in
+          if leg.lot = Shioaji.IntradayOdd && mode = Paper then
+            let () = log "submitted=skip:odd-lot-unsupported-in-simulation" in place rest
           else
-            let available =
-              match leg.action with
-              | "Buy" ->
-                  affordable_quantity leg (Float.max 0. cash) leg.quantity quote
-              | "Sell" -> leg.quantity
-              | action ->
-                  failwith (Printf.sprintf "unsupported TW order action %s" action)
-            in
-            if Option.is_some dependency_filled && available <> leg.quantity then
-              stop
-                (Printf.sprintf "dependent %s %s %d is not fully funded"
-                   leg.action leg.cond leg.quantity) (leg :: rest)
-            else if available = 0 then
-              stop
-                (Printf.sprintf "insufficient confirmed cash for %s %s %d"
-                   leg.action leg.cond leg.quantity) (leg :: rest)
+            let quote = match leg.lot, leg.action with
+              | Shioaji.Common, _ -> assets.(i).price
+              | Shioaji.IntradayOdd, "Buy" -> assets.(i).ask
+              | Shioaji.IntradayOdd, "Sell" -> assets.(i).bid
+              | _, action -> failwith ("unsupported TW order action " ^ action) in
+            if not (Float.is_finite quote) || quote <= 0. then
+              let () = log "submitted=skip:odd-lot-quote-unavailable" in place rest
             else
-              let submitted = { leg with quantity = available } in
-              let shares = leg_shares submitted available in
-              let inventory_ok =
-                match submitted.action, submitted.cond, submitted.lot with
-                | "Sell", "Cash", _ -> shares <= cash_shares
-                | "Sell", "MarginTrading", Shioaji.Common ->
-                    available <= margin_lots
-                | "Buy", ("Cash" | "MarginTrading"), _ -> true
-                | _, cond, _ ->
-                    failwith
-                      (Printf.sprintf "unsupported TW order condition %s" cond)
-              in
-              if not inventory_ok then
-                stop
-                  (Printf.sprintf "insufficient %s inventory for %d shares"
-                     submitted.cond shares) (leg :: rest)
+              let quantity = match leg.action with
+                | "Buy" -> affordable_quantity i leg leg.quantity quote
+                | "Sell" -> leg.quantity
+                | action -> failwith ("unsupported TW order action " ^ action) in
+              if dependent && quantity <> leg.quantity then
+                hard_stop (Printf.sprintf "dependent %s %s %d is not fully funded"
+                  leg.action leg.cond leg.quantity) (leg :: rest)
+              else if quantity = 0 then
+                hard_stop (Printf.sprintf "insufficient confirmed cash for %s %s %d"
+                  leg.action leg.cond leg.quantity) (leg :: rest)
               else
-                let guarded =
-                  match submitted.lot with
-                  | Shioaji.Common -> Ok ()
-                  | Shioaji.IntradayOdd ->
-                      (match
-                         try Ok (orders_today ~code ~today:date)
-                         with error -> Error (error_text error)
-                       with
-                       | Error reason ->
-                           Error ("odd-lot trade history unavailable: " ^ reason)
-                       | Ok history ->
-                           if List.exists
-                                (fun (trade : Shioaji.trade) ->
-                                  trade.lot = Shioaji.IntradayOdd
-                                  && trade.action <> submitted.action
-                                  && trade.deal_quantity > 0)
-                                history
-                           then Error "opposite-direction odd-lot fill today"
-                           else Ok ())
-                in
-                match guarded with
-                | Error reason -> stop reason (leg :: rest)
-                | Ok () ->
-                    let request : Shioaji.order_request =
-                      { exchange; code; action = submitted.action;
-                        lot = submitted.lot; quantity = submitted.quantity;
-                        price = (if submitted.lot = Shioaji.Common then 0. else quote);
-                        cond = submitted.cond; custom_field }
-                    in
-                    if not (submission_window ()) then
-                      stop
-                        (Printf.sprintf "submission window closed before %s %s %d"
-                           leg.action leg.cond leg.quantity) (leg :: rest)
-                    else match
-                      try Ok (place_order request)
-                      with error ->
-                        Error
-                          (Printf.sprintf "order submission uncertain: %s"
-                             (error_text error))
-                    with
-                    | Error reason -> stop reason rest
-                    | Ok placed
-                      when submitted.lot = Shioaji.IntradayOdd
-                           && List.mem placed.status
-                                ["Failed"; "Inactive"; "Cancelled"; "Rejected"] ->
-                        let () = log "submitted=skip:odd-lot-rejected" in
-                        continue cash cash_shares margin_lots loans interests
-                          None trades
-                    | Ok (placed : Shioaji.placed) when placed.order_id = "" ->
-                        stop "order submission returned no order id" rest
-                    | Ok _ when submitted.lot = Shioaji.IntradayOdd ->
-                        (* test_tw_odd_sell_never_precedes_buy: no later buy spends ROD sale proceeds. *)
-                        let cash =
-                          if submitted.action = "Buy" then
-                            cash -. cash_required submitted available quote
-                          else cash
-                        in
-                        let cash_shares =
-                          if submitted.action = "Sell" then
-                            cash_shares - shares
-                          else cash_shares
-                        in
-                        let () =
-                          log "submitted=intraday-odd-rod-pending quantity=%d"
-                            available
-                        in
-                        if available <> leg.quantity then
-                          stop
-                            (Printf.sprintf
-                               "capped %s %s from %d to %d funded shares"
-                               leg.action leg.cond leg.quantity available)
-                            ({ leg with quantity = leg.quantity - available }
-                             :: rest)
-                        else
-                          continue cash cash_shares margin_lots loans interests
-                            None trades
-                    | Ok placed ->
-                        (match poll submitted placed.order_id with
-                         | Error (reason, observed) ->
-                             let trades =
-                               match observed with
-                               | None -> trades
-                               | Some trade -> trade :: trades
-                             in
-                             let rejected =
-                               match observed with
-                               | Some trade ->
-                                   trade.deal_quantity = 0
-                                   && List.mem trade.status
-                                        ["Failed"; "Inactive"; "Cancelled";
-                                         "Rejected"]
-                               | None -> false
-                             in
-                             if rejected then
-                               continue cash cash_shares margin_lots loans
-                                 interests (Some (submitted, false)) trades
-                             else
-                               { trades = List.rev trades; remaining = rest;
-                                 stop_reason = Some reason }
-                         | Ok trade ->
-                             let cash_effect, loans, interests =
-                               trade_cash_effect ~margin_lots ~loans ~interests
-                                 submitted trade
-                             in
-                             let cash = cash +. cash_effect in
-                             let cash_shares, margin_lots =
-                               match submitted.action, submitted.cond with
-                               | "Sell", "Cash" ->
-                                   cash_shares - shares, margin_lots
-                               | "Sell", "MarginTrading" ->
-                                   cash_shares, margin_lots - available
-                               | "Buy", "Cash" ->
-                                   cash_shares + shares, margin_lots
-                               | "Buy", "MarginTrading" ->
-                                   cash_shares, margin_lots + available
-                               | _ -> assert false
-                             in
-                             let residual =
-                               if available = leg.quantity then rest
-                               else { leg with
-                                      quantity = leg.quantity - available }
-                                    :: rest
-                             in
-                             if cash < -. 1e-9 then
-                               { trades = List.rev (trade :: trades);
-                                 remaining = residual;
-                                 stop_reason =
-                                   Some
-                                     (Printf.sprintf
-                                        "confirmed fill exceeded cash budget by %.10g"
-                                        (-. cash)) }
-                             else if available <> leg.quantity then
-                               { trades = List.rev (trade :: trades);
-                                 remaining = residual;
-                                 stop_reason =
-                                   Some
-                                     (Printf.sprintf
-                                        "capped %s %s from %d to %d funded lots"
-                                        leg.action leg.cond leg.quantity
-                                        available) }
-                             else
-                               continue cash cash_shares margin_lots loans
-                                 interests (Some (submitted, true))
-                                 (trade :: trades))
-  in
-  submit cash cash_shares margin_lots loans interests None [] legs
+                let submitted = { leg with quantity } in
+                let inventory_ok = match submitted.action, submitted.cond, submitted.lot with
+                  | "Sell", "Cash", _ -> shares submitted quantity <= cash_shares.(i)
+                  | "Sell", "MarginTrading", Shioaji.Common -> quantity <= margin_lots.(i)
+                  | "Buy", ("Cash" | "MarginTrading"), _ -> true
+                  | _, cond, _ -> failwith ("unsupported TW order condition " ^ cond) in
+                if not inventory_ok then hard_stop (Printf.sprintf
+                  "insufficient %s inventory for %d shares" leg.cond
+                  (shares submitted quantity)) (leg :: rest)
+                else
+                  let guarded = match submitted.lot with
+                    | Shioaji.Common -> Ok ()
+                    | Shioaji.IntradayOdd ->
+                        (try
+                          let history = orders_today ~code:submitted.code ~today:date in
+                          if List.exists (fun (trade : Shioaji.trade) ->
+                            trade.code = submitted.code && trade.lot = Shioaji.IntradayOdd
+                            && trade.action <> submitted.action && trade.deal_quantity > 0)
+                            history then Error "opposite-direction odd-lot fill today"
+                          else Ok ()
+                         with error -> Error ("odd-lot trade history unavailable: " ^ error_text error)) in
+                  match guarded with
+                  | Error reason -> hard_stop reason (leg :: rest)
+                  | Ok () ->
+                      let request : Shioaji.order_request =
+                        { exchange = submitted.exchange; code = submitted.code;
+                          action = submitted.action; lot = submitted.lot;
+                          quantity; price = (if submitted.lot = Shioaji.Common then 0. else quote);
+                          cond = submitted.cond; custom_field } in
+                      if not (submission_window ()) then hard_stop (Printf.sprintf
+                        "submission window closed before %s %s %d"
+                        leg.action leg.cond leg.quantity) (leg :: rest)
+                      else
+                        let reserved = if submitted.action = "Buy" then
+                          cash_required i submitted quantity quote else 0. in
+                        let repayment, interest =
+                          if submitted.action = "Sell" && submitted.cond = "MarginTrading" then
+                            let fraction = float_of_int quantity /. float_of_int margin_lots.(i) in
+                            loans.(i) *. fraction, interests.(i) *. fraction
+                          else 0., 0. in
+                        let () = cash := !cash -. reserved in
+                        let () = reserve_inventory i submitted (-1) in
+                        let () = loans.(i) <- loans.(i) -. repayment in
+                        let () = interests.(i) <- interests.(i) -. interest in
+                        match (try Ok (place_order request) with error -> Error (error_text error)) with
+                        | Error reason -> hard_stop ("order submission uncertain: " ^ reason) rest
+                        | Ok placed when rejected placed.Shioaji.status ->
+                            let () = cash := !cash +. reserved in
+                            let () = reserve_inventory i submitted 1 in
+                            let () = loans.(i) <- loans.(i) +. repayment in
+                            let () = interests.(i) <- interests.(i) +. interest in
+                            let () = log "code=%s submitted=skip:%s-rejected" submitted.code
+                              (if submitted.lot = Shioaji.IntradayOdd then "odd-lot" else "common") in
+                            let () = if submitted.action = "Sell" then set_stop
+                              ("order " ^ placed.order_id ^ " " ^ String.lowercase_ascii placed.status) in
+                            place rest
+                        | Ok placed when placed.Shioaji.order_id = "" ->
+                            hard_stop "order submission returned no order id" rest
+                        | Ok placed ->
+                            let () = match submitted.lot with
+                              | Shioaji.Common -> pending :=
+                                  (i, submitted, placed.order_id, reserved, repayment, interest) :: !pending
+                              | Shioaji.IntradayOdd ->
+                                  log "submitted=intraday-odd-rod-pending quantity=%d" quantity in
+                            if quantity <> leg.quantity then hard_stop (Printf.sprintf
+                              "capped %s %s from %d to %d funded %s" leg.action leg.cond
+                              leg.quantity quantity
+                              (match leg.lot with Shioaji.Common -> "lots" | Shioaji.IntradayOdd -> "shares"))
+                              ({ leg with quantity = leg.quantity - quantity } :: rest)
+                            else place rest in
+    let remaining = place group in
+    let () = poll_group (List.rev !pending) in
+    remaining in
+  let paired (sell : leg) (buy : leg) =
+    sell.code = buy.code && sell.exchange = buy.exchange
+    && sell.action = "Sell" && buy.action = "Buy"
+    && buy.cond = "MarginTrading" && sell.lot = Shioaji.Common
+    && buy.lot = Shioaji.Common && sell.quantity = buy.quantity in
+  let rec take_pairs acc = function
+    | sell :: buy :: rest when paired sell buy ->
+        take_pairs ((true, [buy]) :: (false, [sell]) :: acc) rest
+    | rest -> List.rev acc, rest in
+  let leading, rest = take_pairs [] legs in
+  let rec take_sells acc = function
+    | sell :: buy :: _ as rest when paired sell buy -> List.rev acc, rest
+    | (leg : leg) :: rest when leg.action = "Sell" -> take_sells (leg :: acc) rest
+    | rest -> List.rev acc, rest in
+  let sells, rest = take_sells [] rest in
+  let refinances, buys = take_pairs [] rest in
+  let () = if List.exists (fun (leg : leg) -> leg.action <> "Buy") buys then
+    failwith "TW legs are not in phase order" in
+  let groups = leading @ [false, sells] @ refinances @ [false, buys] in
+  let rec execute = function
+    | [] -> []
+    | (dependent, group) :: rest ->
+        let remaining = run_group dependent group in
+        if !stop_reason = None then execute rest
+        else remaining @ List.concat_map snd rest in
+  let remaining = execute groups in
+  { trades = List.rev !trades; remaining; stop_reason = !stop_reason; cash = !cash }
 let run_tw mode ~equity ~symbol ~strat_path ~data_dir ~rebalance_choice =
   let info = Shioaji.info () in
   let () =
@@ -1803,11 +1692,13 @@ let run_tw mode ~equity ~symbol ~strat_path ~data_dir ~rebalance_choice =
                       match decision.legs with
                       | [] -> "skip:no-order-legs", []
                       | legs ->
-                          let execution = execute_tw_legs ~mode ~bid:snapshot.bid
-                            ~ask:snapshot.ask ~now:taipei_now ~sleep:Unix.sleepf
+                          let execution = execute_tw_legs ~mode
+                            ~assets:[|{ code = symbol; exchange; bid = snapshot.bid;
+                              ask = snapshot.ask; price = asset.provisional.c;
+                              financing_ratio; costs }|]
+                            ~now:taipei_now ~sleep:Unix.sleepf
                             ~place_order:Shioaji.place_order ~orders_today:Shioaji.orders_today
-                            ~exchange ~code:symbol ~date ~price:asset.provisional.c
-                            ~financing_ratio ~costs ~cash ~positions legs in
+                            ~date ~cash ~positions legs in
                           let () = List.iter (log_tw_trade date) execution.trades in
                           let outcome = match execution.stop_reason with
                             | None -> "complete"

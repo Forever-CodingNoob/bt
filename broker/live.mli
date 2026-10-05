@@ -40,12 +40,24 @@ type decision = {
   legs : leg list;
 }
 
+(** Per-code quote and contract inputs for TW execution. *)
+type tw_execution_asset = {
+  code : string;
+  exchange : string;
+  bid : float;
+  ask : float;
+  price : float;
+  financing_ratio : float;
+  costs : Engine.costs;
+}
+
 (** TW submission result. [remaining] was never posted; [trades] holds
     observed Common statuses. Pending odd ROD orders reconcile after close. *)
 type tw_execution = {
   trades : Shioaji.trade list;
   remaining : leg list;
   stop_reason : string option;
+  cash : float;
 }
 
 (** Build today's provisional OHLCV bar from an Alpaca snapshot. *)
@@ -136,28 +148,17 @@ val taipei_phase :
   now:string ->
   [`Weekend | `Before_fetch | `Fetch | `Decide | `After_close]
 
-(** Submit TW legs in order. Common fills settle before the next leg;
-    intraday-odd ROD orders reserve buy cash without waiting for final fills.
-    Raise [Failure] before submission if any leg code or exchange differs
-    from the executor's one-code contract. *)
+(** Ordinary Common sells/buys place then batch-poll; rollover/refinance
+    pairs are sequential. Odd ROD sells are unpolled and provide no
+    same-session cash. Every leg must match one declared execution asset.
+    Result cash includes pending-buy reservations. *)
 val execute_tw_legs :
-  mode:mode ->
-  bid:float ->
-  ask:float ->
-  now:(unit -> string) ->
-  sleep:(float -> unit) ->
+  mode:mode -> assets:tw_execution_asset array ->
+  now:(unit -> string) -> sleep:(float -> unit) ->
   place_order:(Shioaji.order_request -> Shioaji.placed) ->
   orders_today:(code:string -> today:string -> Shioaji.trade list) ->
-  exchange:string ->
-  code:string ->
-  date:string ->
-  price:float ->
-  financing_ratio:float ->
-  costs:Engine.costs ->
-  cash:float ->
-  positions:Shioaji.position list ->
-  leg list ->
-  tw_execution
+  date:string -> cash:float -> positions:Shioaji.position list ->
+  leg list -> tw_execution
 
 val strategy_market : (string option * string * string) list -> string
 val align_history :

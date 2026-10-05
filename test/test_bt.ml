@@ -7263,16 +7263,19 @@ let tw_trade id (leg : Live.leg) status deal_quantity : Shioaji.trade =
     deal_price = if deal_quantity = 0 then None else Some 10. }
 
 let execute_tw_test ?(mode = Live.Live) ?(bid = 10.) ?(ask = 10.)
-    ?(price = 10.)
+    ?(price = 10.) ?assets
     ?(now = fun () -> "2026-05-22T13:20:00+08:00")
     ?(sleep = fun _ -> ())
     ?(place_order = fun _ ->
       { Shioaji.order_id = "1"; status = "PendingSubmit" })
     ?(orders_today = fun ~code:_ ~today:_ -> [])
     ?(costs = zero_costs) ~cash ~positions legs =
-  Live.execute_tw_legs ~mode ~bid ~ask ~now ~sleep ~place_order
-    ~orders_today ~exchange:"TSE" ~code:"2330" ~date:"2026-05-22"
-    ~price ~financing_ratio:0.6 ~costs ~cash ~positions legs
+  let assets = match assets with
+    | Some assets -> assets
+    | None -> [|{ Live.code = "2330"; exchange = "TSE"; bid; ask; price;
+        financing_ratio = 0.6; costs }|] in
+  Live.execute_tw_legs ~mode ~assets ~now ~sleep ~place_order ~orders_today
+    ~date:"2026-05-22" ~cash ~positions legs
 
 let test_tw_live_input_guards () =
   let fails message function_ =
@@ -7330,6 +7333,8 @@ let scripted_placements entries =
     match Queue.take_opt entries with
     | None -> failwith "unexpected TW test order"
     | Some (order_id, (expected : Live.leg)) ->
+        let () = assert (request.code = expected.code) in
+        let () = assert (request.exchange = expected.exchange) in
         let () = assert (request.action = expected.action) in
         let () = assert (request.cond = expected.cond) in
         let () = assert (request.lot = expected.lot) in
@@ -8356,22 +8361,19 @@ let test_tw_execution_rechecks_cutoff () =
   let second : Live.leg =
     { code = "2330"; exchange = "TSE"; action = "Buy"; cond = "MarginTrading"; lot = Shioaji.Common; quantity = 1 }
   in
-  let times =
-    Queue.of_seq
-      (List.to_seq
-         ["2026-05-22T13:20:00+08:00";
-          "2026-05-22T13:20:00+08:00";
-          "2026-05-22T13:25:00+08:00"])
+  let timestamp = ref "2026-05-22T13:24:29+08:00" in
+  let result = execute_tw_test ~now:(fun () -> !timestamp)
+    ~place_order:(fun request ->
+      let () = assert (request.Shioaji.cond = "Cash") in
+      let () = timestamp := "2026-05-22T13:24:30+08:00" in
+      { Shioaji.order_id = "1"; status = "Submitted" })
+    ~orders_today:(fun ~code:_ ~today:_ -> [tw_trade "1" first "Filled" 1])
+    ~cash:20000. ~positions:[] [first; second]
   in
-  let result =
-    execute_tw_test ~now:(fun () -> Queue.take times)
-      ~place_order:(scripted_placements ["1", first])
-      ~orders_today:(fun ~code:_ ~today:_ ->
-        [tw_trade "1" first "Filled" 1])
-      ~cash:20000. ~positions:[] [first; second]
-  in
-  (* The 13:25 successor check leaves the second leg unsubmitted. *)
+  (* The 13:24:30 successor check leaves the second leg unsubmitted,
+     while the first still polls and settles before 13:25. *)
   let () = assert (result.Live.remaining = [second]) in
+  let () = assert (result.Live.trades = [tw_trade "1" first "Filled" 1]) in
   (* The submission-window cutoff stops the remaining leg. *)
   assert (Option.is_some result.Live.stop_reason)
 
@@ -8482,6 +8484,240 @@ let test_tw_execution_tracks_refinanced_loan () =
   in
   (* Capping the ordinary buy stops execution with its remainder retained. *)
   assert (Option.is_some result.Live.stop_reason)
+
+let tw_pair_assets : Live.tw_execution_asset array =
+  [|{ code = "2330"; exchange = "TSE"; price = 10.; bid = 9.; ask = 11.;
+      financing_ratio = 0.6; costs = zero_costs };
+    { code = "2890"; exchange = "OTC"; price = 20.; bid = 19.; ask = 21.;
+      financing_ratio = 0.5; costs = zero_costs }|]
+
+let test_tw_pair_sell_barrier () =
+  let sell : Live.leg = { code = "2330"; exchange = "TSE"; action = "Sell";
+    cond = "Cash"; lot = Shioaji.Common; quantity = 1 } in
+  let second = { sell with code = "2890"; exchange = "OTC" } in
+  let buy = { second with action = "Buy" } in
+  let positions : Shioaji.position list =
+    [{ id = 0; code = "2330"; cond = "Cash"; shares = 1000;
+       last_price = 10.; loan_amount = 0.; interest = 0. };
+     { id = 1; code = "2890"; cond = "Cash"; shares = 1000;
+       last_price = 20.; loan_amount = 0.; interest = 0. }] in
+  let run outcome =
+    let events = ref [] in
+    let emit text = events := text :: !events in
+    let result = execute_tw_test ~assets:tw_pair_assets ~cash:0. ~positions
+      ~place_order:(fun request ->
+        let () = emit ("post:" ^ request.Shioaji.action ^ ":" ^ request.code) in
+        if outcome = "uncertain" && request.code = "2890" && request.action = "Sell"
+        then failwith "lost response"
+        else { Shioaji.order_id = request.action ^ request.code;
+          status = if outcome = "placement-rejected" && request.action = "Sell"
+            && request.code = "2330" then "Rejected" else "Submitted" })
+      ~orders_today:(fun ~code ~today:_ ->
+        let () = emit ("poll:" ^ code) in
+        let leg = if code = "2330" then sell else second in
+        let status = if code = "2330" && outcome = "rejected" then "Rejected"
+          else if code = "2330" && outcome = "killed" then "Cancelled" else "Filled" in
+        let filled = if status = "Filled" then 1 else 0 in
+        let trade = { (tw_trade ("Sell" ^ code) leg status filled) with
+          Shioaji.deal_price = if filled = 0 then None
+            else Some (if code = "2330" then 10. else 20.) } in
+        [trade; { (tw_trade "Buy2890" buy "Filled" 1) with deal_price = Some 20. }])
+      [sell; second; buy] in
+    result, List.rev !events in
+  let complete, events = run "filled" in
+  (* Both 1000-share sales precede status reads. Cash buy needs 20000 cash;
+     10000+20000 proceeds fund it, leaving 10000. *)
+  let () = assert (events = ["post:Sell:2330"; "post:Sell:2890";
+    "poll:2330"; "poll:2890"; "post:Buy:2890"; "poll:2890"]) in
+  let () = assert (complete.remaining = [] && complete.stop_reason = None) in
+  let () = assert_close 10000. complete.cash in
+  let () = List.iter (fun outcome ->
+    let result, events = run outcome in
+    (* A rejected, killed or uncertain sell forbids every refinance/buy;
+       the confirmed first/sibling order is still observed after placements stop. *)
+    let () = assert (result.remaining = [buy]) in
+    let () = assert (Option.is_some result.stop_reason) in
+    let () = assert (not (List.mem "post:Buy:2890" events)) in
+    if outcome = "uncertain" then assert (result.trades = [tw_trade "Sell2330" sell "Filled" 1]))
+    ["rejected"; "killed"; "placement-rejected"; "uncertain"] in
+  let odd = { sell with lot = Shioaji.IntradayOdd; quantity = 1 } in
+  let odd_buy = { buy with cond = "MarginTrading" } in
+  let events = ref [] in
+  let odd_result = execute_tw_test ~assets:tw_pair_assets ~cash:10000. ~positions
+    ~place_order:(fun request ->
+      let () = events := ("post:" ^ request.Shioaji.code) :: !events in
+      { Shioaji.order_id = request.code; status = "Submitted" })
+    ~orders_today:(fun ~code ~today:_ ->
+      let () = events := ("read:" ^ code) :: !events in
+      if code = "2330" then []
+      else [{ (tw_trade "2890" odd_buy "Filled" 1) with deal_price = Some 20. }])
+    [odd; odd_buy] in
+  (* Cross-code equal-quantity sell/buy is not a dependent pair (TW5-XDEP).
+     The one odd-sell history read is its round-trip guard, not a fill poll.
+     Pending odd proceeds add zero; the pre-existing 10000 alone funds the buy. *)
+  let () = assert (List.rev !events = ["read:2330"; "post:2330";
+    "post:2890"; "read:2890"]) in
+  let () = assert (odd_result.stop_reason = None) in
+  let () = assert_close 0. odd_result.cash in
+  let common_sell = { sell with quantity = 2 } in
+  let cross_buy = { common_sell with code = "2890"; action = "Buy";
+    cond = "MarginTrading" } in
+  let capped_buy = { cross_buy with quantity = 1 } in
+  let assets = [|tw_pair_assets.(0);
+    { tw_pair_assets.(1) with exchange = "TSE"; price = 40. }|] in
+  let result = execute_tw_test ~assets ~cash:0.
+    ~positions:[tw_position "Cash" 2]
+    ~place_order:(scripted_placements ["sell", common_sell; "buy", capped_buy])
+    ~orders_today:(fun ~code ~today:_ ->
+      if code = "2330" then [tw_trade "sell" common_sell "Filled" 2]
+      else [{ (tw_trade "buy" capped_buy "Filled" 1) with
+        Shioaji.deal_price = Some 40. }])
+    [common_sell; cross_buy] in
+  (* TW5-XDEP: equal Common quantity and exchange do not pair different codes.
+     Sale proceeds are 2 * 1000 * 10 = 20000; at 50% financing the other
+     code costs 1000 * 40 * 0.5 = 20000 per lot. An independent buy caps
+     to one lot, whereas a dependent rebuy would demand both or send neither. *)
+  let () = assert (result.remaining = [capped_buy]) in
+  let () = assert (result.stop_reason =
+    Some "capped Buy MarginTrading from 2 to 1 funded lots") in
+  let () = assert (List.length result.trades = 2) in
+  assert_close 0. result.cash
+
+let test_tw_sell_stop_before_refinance () =
+  let sell : Live.leg = { code = "2330"; exchange = "TSE"; action = "Sell";
+    cond = "Cash"; lot = Shioaji.Common; quantity = 1 } in
+  let odd = { sell with code = "2890"; exchange = "OTC";
+    lot = Shioaji.IntradayOdd; quantity = 1 } in
+  let rebuy = { sell with action = "Buy"; cond = "MarginTrading" } in
+  let buy = { sell with code = "2890"; exchange = "OTC"; action = "Buy" } in
+  let posted = ref [] in
+  let result = execute_tw_test ~assets:tw_pair_assets ~cash:100000.
+    ~positions:[{ (tw_position "Cash" 2) with Shioaji.code = "2330" };
+      { (tw_position "Cash" 1) with code = "2890"; shares = 1 }]
+    ~place_order:(fun request ->
+      let () = posted := (request.Shioaji.code, request.lot) :: !posted in
+      { Shioaji.order_id = request.code; status = "Submitted" })
+    ~orders_today:(fun ~code ~today:_ ->
+      if code = "2890" then [] else [tw_trade "2330" sell "Cancelled" 0])
+    [sell; odd; sell; rebuy; buy] in
+  (* Ordinary Common sale is FOK-killed. Even ample cash cannot bypass the
+     sell barrier to submit the cash-to-margin refinance pair or the other buy. *)
+  let () = assert (List.rev !posted = ["2330", Shioaji.Common;
+    "2890", Shioaji.IntradayOdd]) in
+  let () = assert (result.remaining = [sell; rebuy; buy]) in
+  assert (result.stop_reason = Some "order 2330 cancelled")
+
+let test_tw_uncertain_buy_reconciles_sibling () =
+  let buy : Live.leg = { code = "2330"; exchange = "TSE"; action = "Buy";
+    cond = "Cash"; lot = Shioaji.Common; quantity = 1 } in
+  let second = { buy with code = "2890"; exchange = "OTC" } in
+  let third = { buy with cond = "MarginTrading" } in
+  let events = ref [] in
+  let result = execute_tw_test ~assets:tw_pair_assets ~cash:40000. ~positions:[]
+    ~place_order:(fun request ->
+      let () = events := ("post:" ^ request.Shioaji.code) :: !events in
+      if request.code = "2890" then failwith "lost response"
+      else { Shioaji.order_id = "first"; status = "Submitted" })
+    ~orders_today:(fun ~code ~today:_ ->
+      let () = events := ("poll:" ^ code) :: !events in
+      [{ (tw_trade "first" buy "Filled" 1) with Shioaji.deal_price = Some 9. }])
+    [buy; second; third] in
+  (* Second POST is uncertain: third is unsent, but first is still polled.
+     Keep the unknown 20000 hold and settle first at 9000: 40000-20000-9000=11000. *)
+  let () = assert (List.rev !events = ["post:2330"; "post:2890"; "poll:2330"]) in
+  let () = assert (result.remaining = [third]) in
+  let () = assert (result.trades =
+    [{ (tw_trade "first" buy "Filled" 1) with Shioaji.deal_price = Some 9. }]) in
+  let () = assert (result.stop_reason = Some "order submission uncertain: lost response") in
+  assert_close 11000. result.cash
+
+let test_tw_pair_buy_reservations () =
+  let buy : Live.leg = { code = "2330"; exchange = "TSE"; action = "Buy";
+    cond = "Cash"; lot = Shioaji.Common; quantity = 1 } in
+  let second = { buy with code = "2890"; exchange = "OTC" } in
+  let third = { buy with quantity = 1 } in
+  let run ?(cash = 30000.) status quantity more =
+    let events = ref [] in
+    let result = execute_tw_test ~assets:tw_pair_assets ~cash ~positions:[]
+      ~place_order:(fun request ->
+        let () = events := ("post:" ^ request.Shioaji.code ^ ":" ^
+          string_of_int request.quantity) :: !events in
+        { Shioaji.order_id = request.code; status = "Submitted" })
+      ~orders_today:(fun ~code ~today:_ ->
+        let () = events := ("poll:" ^ code) :: !events in
+        let leg = if code = "2330" then buy
+          else { second with quantity = (if quantity = 2 then 1 else quantity) } in
+        let status = if code = "2330" then status else "Filled" in
+        let filled = if status = "Filled" then leg.quantity else 0 in
+        [{ (tw_trade code leg status filled) with
+          Shioaji.deal_price = if filled = 0 then None
+            else Some (if code = "2330" then 9. else 19.) }])
+      ([buy; { second with quantity }] @ more) in
+    result, List.rev !events in
+  let filled, events = run "Filled" 1 [] in
+  (* Reserve 10000+20000 before polling; actual costs are 9000+19000.
+     Final cash is 30000-28000=2000, not 0 and not credited twice. *)
+  let () = assert (events = ["post:2330:1"; "post:2890:1";
+    "poll:2330"; "poll:2890"]) in
+  let () = assert_close 2000. filled.cash in
+  let failed, events = run "Cancelled" 1 [] in
+  (* FOK kill with no fill on a buy cannot suppress sibling 2890.
+     Release 2330's 10000 reservation; only 19000 is ultimately spent. *)
+  let () = assert (failed.stop_reason = None && failed.remaining = []) in
+  let () = assert (events = ["post:2330:1"; "post:2890:1";
+    "poll:2330"; "poll:2890"]) in
+  let () = assert_close 11000. failed.cash in
+  let capped, events = run "Filled" 2 [third] in
+  (* First reserves 10000, leaving 20000: second requests two 20000 lots
+     but sends one. Third and the second's unfunded lot stay unsubmitted. *)
+  let () = assert (events = ["post:2330:1"; "post:2890:1";
+    "poll:2330"; "poll:2890"]) in
+  let () = assert (capped.remaining = [second; third]) in
+  let () = assert (capped.stop_reason =
+    Some "capped Buy Cash from 2 to 1 funded lots") in
+  let () = assert_close 2000. capped.cash in
+  let reserved, events = run "Filled" 1 [third] in
+  (* A third lot cannot spend the future 2000 refund before fills are read. *)
+  let () = assert (reserved.remaining = [third]) in
+  assert (events = ["post:2330:1"; "post:2890:1"; "poll:2330"; "poll:2890"])
+
+let test_tw_phase_poll_rounds () =
+  let buy : Live.leg = { code = "2330"; exchange = "TSE"; action = "Buy";
+    cond = "Cash"; lot = Shioaji.Common; quantity = 1 } in
+  let margin = { buy with cond = "MarginTrading" } in
+  let reads = ref 0 and posts = ref 0 in
+  let result = execute_tw_test ~cash:20000. ~positions:[]
+    ~place_order:(fun _ ->
+      let () = incr posts in
+      { Shioaji.order_id = string_of_int !posts; status = "Submitted" })
+    ~orders_today:(fun ~code ~today:_ ->
+      let () = assert (code = "2330" && !posts = 2) in
+      let () = incr reads in
+      [tw_trade "1" buy "Filled" 1;
+       tw_trade "2" margin (if !reads = 1 then "Submitted" else "Filled")
+         (if !reads = 1 then 0 else 1)]) [buy; margin] in
+  (* Two orders in 2330 share one read in round one. Cash order settles once;
+     only margin is still pending in round two. Spend 10000+4000, leave 6000. *)
+  let () = assert (!reads = 2 && !posts = 2) in
+  let () = assert (result.stop_reason = None) in
+  assert_close 6000. result.cash
+
+let test_tw_margin_sale_reservations () =
+  let sell : Live.leg = { code = "2330"; exchange = "TSE"; action = "Sell";
+    cond = "MarginTrading"; lot = Shioaji.Common; quantity = 1 } in
+  let posted = ref 0 in
+  let result = execute_tw_test ~cash:0.
+    ~positions:[{ (tw_position "MarginTrading" 2) with
+      Shioaji.loan_amount = 12000.; interest = 200. }]
+    ~place_order:(fun _ ->
+      let () = incr posted in
+      { Shioaji.order_id = string_of_int !posted; status = "Submitted" })
+    ~orders_today:(fun ~code:_ ~today:_ ->
+      [tw_trade "1" sell "Filled" 1; tw_trade "2" sell "Filled" 1]) [sell; sell] in
+  (* Reserve each 1000-share sale and its proportional liability before polling:
+     20000 proceeds - 12000 principal - 200 interest = 7800, no double repayment. *)
+  let () = assert (result.stop_reason = None) in
+  assert_close 7800. result.cash
 
 let test_tw_execution_remaining_stops () =
   let buy : Live.leg = { code = "2330"; exchange = "TSE"; action = "Buy"; cond = "Cash"; lot = Shioaji.Common; quantity = 1 } in
@@ -9198,6 +9434,12 @@ let () =
   let () = test_tw_live_legs_split () in
   let () = test_tw_live_pair_legs () in
   let () = test_tw_position_totals_set () in
+  let () = test_tw_pair_sell_barrier () in
+  let () = test_tw_pair_buy_reservations () in
+  let () = test_tw_sell_stop_before_refinance () in
+  let () = test_tw_uncertain_buy_reconciles_sibling () in
+  let () = test_tw_phase_poll_rounds () in
+  let () = test_tw_margin_sale_reservations () in
   let () = test_tw_live_input_guards () in
   let () = test_tw_live_startup_guard () in
   let () = test_tw_maturity_rollover_legs () in
