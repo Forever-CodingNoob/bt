@@ -6755,6 +6755,9 @@ let test_shioaji_orders_today_parse () =
        deal_price = Some 27.1 }]
   in
   let () = assert (actual = expected) in
+  (* Omitting the code filter retains today's 2890 trade on the whole account. *)
+  let () = assert (Shioaji.parse_orders_today ~today:"2026-05-20" raw = expected) in
+  let () = assert (Shioaji.parse_orders_today ~today:"2026-05-21" raw = []) in
   (* Filtering the 2026-05-20 fixture for 2026-05-21 leaves no rows. *)
   let () =
     assert
@@ -6785,6 +6788,10 @@ let test_shioaji_orders_today_parse () =
          timestamp_raw
        = expected_timestamp_trade)
   in
+  (* The account-wide parser uses the same Taipei date for timestamp-only rows. *)
+  let () = assert (Shioaji.parse_orders_today ~today:"2026-09-11"
+    timestamp_raw = expected_timestamp_trade) in
+  let () = assert (Shioaji.parse_orders_today ~today:"2026-09-12" timestamp_raw = []) in
   (* The timestamp fixture is dated 2026-09-11, so 2026-09-12 has no rows. *)
   assert
     (Shioaji.parse_orders_today ~code:"2890" ~today:"2026-09-12"
@@ -7578,11 +7585,20 @@ let test_tw_buy_budget () =
   let () = fails "TW margin budget short: planned 22000, available 0"
     (fun () -> run infos { limits with margin_available = 0. }
       [{ margin with action = "Sell" }; margin]) in
-  (* NaN comparisons cannot establish an allowance or a positive buy price. *)
-  let () = fails "TW budget inputs are not finite" (fun () ->
+  (* An unusable finite ask is skipped by the executor: the odd buy holds 0.
+     A zero cash allowance must therefore suffice, without a sell offset. *)
+  let () = List.iter (fun ask ->
     Live.check_tw_budget ~log:(fun _ -> ()) ~symbols
-      ~snapshots:[|snapshots.(0); snapshot "2890" Float.nan|]
-      ~contract_infos:infos ~limits [odd]) in
+      ~snapshots:[|snapshots.(0); snapshot "2890" ask|]
+      ~contract_infos:infos ~limits:{ limits with trading_available = 0. } [odd])
+    [0.; -1.] in
+  (* NaN and infinite asks cannot establish an allowance or a buy hold. *)
+  let () = List.iter (fun ask ->
+    fails "TW budget inputs are not finite" (fun () ->
+      Live.check_tw_budget ~log:(fun _ -> ()) ~symbols
+        ~snapshots:[|snapshots.(0); snapshot "2890" ask|]
+        ~contract_infos:infos ~limits [odd]))
+    [Float.nan; Float.infinity; Float.neg_infinity] in
   let () = fails "TW budget inputs are not finite" (fun () ->
     run infos { limits with trading_available = Float.nan } [cash]) in
   let () = fails "TW budget inputs are not finite" (fun () ->
@@ -9370,20 +9386,29 @@ let test_tw_session_existing_second_code () =
   let run orders =
     let events = ref [] in
     let record text = events := text :: !events in
-    let () = Live.tw_session_step ~symbols:[|"2330"; "2890"|] ~date
-      ~orders_today:(fun ~code ~today ->
+    let () = Live.tw_session_step ~date
+      ~trades_today:(fun ~today ->
         let () = assert (today = date) in
-        let () = record ("read:" ^ code) in
-        if List.mem code orders then [existing] else [])
+        let () = record "read:all" in
+        List.map (fun code -> { existing with Shioaji.code;
+          lot = Shioaji.IntradayOdd }) orders)
       ~skip:(fun () -> record "skip")
       ~submit:(fun () -> record "submit") () in
     List.rev !events in
-  (* A second-code order skips the entire session, including the first code.
-     All codes are read before either session branch can run. *)
-  let () = assert (run ["2890"] = ["read:2330"; "read:2890"; "skip"]) in
-  let () = assert (run ["2330"] = ["read:2330"; "read:2890"; "skip"]) in
-  (* With no orders on either code, the joint session runs exactly once. *)
-  assert (run [] = ["read:2330"; "read:2890"; "submit"])
+  (* One account-wide read skips the entire session for an order on either
+     declared code, without N separate per-code reads. *)
+  let () = assert (run ["2890"] = ["read:all"; "skip"]) in
+  let () = assert (run ["2330"] = ["read:all"; "skip"]) in
+  (* A resting order on a removed code still reserves account cash and must
+     skip the session even though 0050 is outside the current strategy. *)
+  let () = assert (run ["0050"] = ["read:all"; "skip"]) in
+  (* With no orders today on any code, the joint session runs exactly once. *)
+  let () = assert (run [] = ["read:all"; "submit"]) in
+  (* A failed history read cannot select either session branch. *)
+  assert_failure (fun () ->
+    Live.tw_session_step ~date
+      ~trades_today:(fun ~today:_ -> failwith "history unavailable")
+      ~skip:(fun () -> assert false) ~submit:(fun () -> assert false) ())
 
 let test_live_pair_cli_guards () =
   let binary = locate ["_build/default/bin/bt.exe"; "../bin/bt.exe"] in

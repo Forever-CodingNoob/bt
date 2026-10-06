@@ -398,11 +398,14 @@ let parse_trade = function
        | false -> failwith "invalid Shioaji trade quantities")
   | _ -> failwith "invalid Shioaji trades response"
 
-let parse_orders_today ~code ~today raw =
+let parse_orders_today ?code ~today raw =
+  let code_arg = match code with
+    | Some code -> ["--arg"; "code"; code]
+    | None -> ["--argjson"; "code"; "null"] in
   jq_rows
-    ~args:["--arg"; "code"; code; "--arg"; "today"; today]
+    ~args:(code_arg @ ["--arg"; "today"; today])
     "trades"
-    "def order_time: if (.status.order_datetime | type) == \"string\" then .status.order_datetime elif (.status.order_ts | type) == \"number\" then ((.status.order_ts | floor) + 28800 | strftime(\"%Y-%m-%dT%H:%M:%S\")) + \"+08:00\" else error(\"invalid trade timestamp\") end; map(select(.contract.code == $code and (order_time | startswith($today)))) | map(if ((.status.order_quantity | type) == \"number\" and (.status.deal_quantity | type) == \"number\" and (.status.deals | type) == \"array\" and all(.status.deals[]; (.price | type) == \"number\" and (.quantity | type) == \"number\")) then [.order.id, .contract.code, .order.action, .order.order_cond, .order.order_lot, .status.status, (.status.order_quantity | tostring), (.status.deal_quantity | tostring), (.status.deals | map((.price | tostring) + \",\" + (.quantity | tostring)) | join(\";\")), order_time] | @tsv else error(\"invalid trade fields\") end) | join(\"\\n\")"
+    "def order_time: if (.status.order_datetime | type) == \"string\" then .status.order_datetime elif (.status.order_ts | type) == \"number\" then ((.status.order_ts | floor) + 28800 | strftime(\"%Y-%m-%dT%H:%M:%S\")) + \"+08:00\" else error(\"invalid trade timestamp\") end; map(select(($code == null or .contract.code == $code) and (order_time | startswith($today)))) | map(if ((.status.order_quantity | type) == \"number\" and (.status.deal_quantity | type) == \"number\" and (.status.deals | type) == \"array\" and all(.status.deals[]; (.price | type) == \"number\" and (.quantity | type) == \"number\")) then [.order.id, .contract.code, .order.action, .order.order_cond, .order.order_lot, .status.status, (.status.order_quantity | tostring), (.status.deal_quantity | tostring), (.status.deals | map((.price | tostring) + \",\" + (.quantity | tostring)) | join(\";\")), order_time] | @tsv else error(\"invalid trade fields\") end) | join(\"\\n\")"
     raw
   |> List.map parse_trade
 
@@ -553,3 +556,8 @@ let orders_today ~code ~today =
   let body = {|{}|} in
   request ~method_:"POST" ~body ~path:"/api/v1/order/trades" ()
   |> expect_ok "order status" (parse_orders_today ~code ~today)
+
+let trades_today ~today =
+  let body = {|{}|} in
+  request ~method_:"POST" ~body ~path:"/api/v1/order/trades" ()
+  |> expect_ok "trade history" (parse_orders_today ~today)

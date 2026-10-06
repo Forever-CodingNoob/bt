@@ -695,12 +695,14 @@ let check_tw_budget ~log ~symbols ~snapshots ~contract_infos
       let price = match leg.lot with
         | Shioaji.Common -> prices.(i)
         | Shioaji.IntradayOdd -> snapshots.(i).Shioaji.ask in
-      let () = if not (Float.is_finite price && price > 0.) then
+      let () = if not (Float.is_finite price)
+        || (leg.lot = Shioaji.Common && price <= 0.) then
         failwith "TW budget inputs are not finite" in
       let hold = match leg.lot with
         | Shioaji.Common -> price *. float_of_int leg.quantity
             *. contract_infos.(i).unit
-        | Shioaji.IntradayOdd -> price *. float_of_int leg.quantity in
+        | Shioaji.IntradayOdd ->
+            if price <= 0. then 0. else price *. float_of_int leg.quantity in
       match leg.cond with
       | "Cash" -> cash +. hold, margin
       | "MarginTrading" -> cash, margin +. hold
@@ -1565,10 +1567,8 @@ let execute_tw_legs ~mode ~(assets : tw_execution_asset array)
   let remaining = execute groups in
   { trades = List.rev !trades; remaining; stop_reason = !stop_reason; cash = !cash }
 
-let tw_session_step ~symbols ~orders_today ~date ~skip ~submit () =
-  let existing = Array.to_list symbols
-    |> List.concat_map (fun code -> orders_today ~code ~today:date) in
-  match existing with
+let tw_session_step ~trades_today ~date ~skip ~submit () =
+  match trades_today ~today:date with
   | _ :: _ -> skip ()
   | [] -> submit ()
 
@@ -1666,7 +1666,7 @@ let run_tw mode ~equity ~symbols ~strat_path ~data_dir ~rebalance_choice =
                  | Some (_, previous_session) -> previous_session
                  | None -> assert false
                in
-               tw_session_step ~symbols ~orders_today:Shioaji.orders_today ~date
+               tw_session_step ~trades_today:Shioaji.trades_today ~date
                  ~skip:(fun () ->
                     let () = log
                       "date=%s fetched-through=%s equity=%.10g cash=- debit=- submitted=skip:existing-orders"

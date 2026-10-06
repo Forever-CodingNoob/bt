@@ -148,12 +148,11 @@ val taipei_phase :
   now:string ->
   [`Weekend | `Before_fetch | `Fetch | `Decide | `After_close]
 
-(** Read today's orders for every strategy code before selecting one session
-    branch. Any existing order skips the whole session; otherwise submit once.
+(** Read today's trades on any code in one request before selecting one session
+    branch. Any existing trade skips the whole session; otherwise submit once.
     A failed read raises before either callback runs. *)
 val tw_session_step :
-  symbols:string array ->
-  orders_today:(code:string -> today:string -> Shioaji.trade list) ->
+  trades_today:(today:string -> Shioaji.trade list) ->
   date:string -> skip:(unit -> unit) -> submit:(unit -> unit) -> unit -> unit
 
 (** Ordinary Common sells/buys place then batch-poll; rollover/refinance
@@ -221,8 +220,10 @@ val tw_startup_ok :
 (** Log each contract, reject suspended symbols, then check all cash and margin
     buy holds separately without sell offsets, rollover and refinance rebuys included.
     Common buys use the upper band (reference times 1.10 if absent); odd buys
-    use the snapshot ask. Reject non-finite or non-positive buy prices and
-    non-finite or negative hold sums or allowances with [Failure].
+    use the snapshot ask, with zero hold when the finite ask is non-positive
+    because the executor skips that leg. Reject non-finite buy prices,
+    non-positive Common buy prices, and non-finite or negative hold sums or
+    allowances with [Failure].
     Match quotes and contract info by code, rejecting missing, extra or duplicate codes. *)
 val check_tw_budget :
   log:(string -> unit) -> symbols:string array ->

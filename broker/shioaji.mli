@@ -135,8 +135,8 @@ val parse_settlements : string -> settlement list
 (** Parse the initial result of placing an order. *)
 val parse_placed : string -> placed
 
-(** Parse and retain today's trades for one stock code. *)
-val parse_orders_today : code:string -> today:string -> string -> trade list
+(** Parse and retain today's trades, optionally restricting to one stock code. *)
+val parse_orders_today : ?code:string -> today:string -> string -> trade list
 
 (** Fetch server simulation-mode information. *)
 val info : unit -> info
@@ -170,3 +170,6 @@ val place_order : order_request -> placed
 
 (** Fetch trades and retain today's entries for one stock code. *)
 val orders_today : code:string -> today:string -> trade list
+
+(** Fetch all trades in one request and retain today's entries on any code. *)
+val trades_today : today:string -> trade list
