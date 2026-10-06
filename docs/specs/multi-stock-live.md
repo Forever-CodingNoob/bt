@@ -1,7 +1,7 @@
 # Design: multi-stock live trading
 
 Date: 2026-10-04
-Status: approved, not implemented
+Status: approved, stage 2 implemented on branch multi-stock-2, production acceptance pending
 
 > [!IMPORTANT]
 > Live trading must behave like the backtest and the strategy file. A strategy with N `stock` lines trades all N symbols live through one decision, one planner call, and one execution, as `bt run` plans them. One code path serves every N, including N = 1.

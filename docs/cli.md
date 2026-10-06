@@ -258,7 +258,6 @@ These checks apply to `bt target` and `bt live` in both markets.
 | `live trading needs distinct symbols: SYMBOL` | A broker symbol declared twice fails the command, even under distinct aliases. |
 | `--provisional-close needs a one-stock strategy` | `bt target` fails before any broker call. |
 | `history gap in SYMBOL within the last 5 sessions` | The decision fails on the first symbol, in declaration order, that misses one of the last five dates in the union of cached dates. `bt target` exits 1, the US daemon retries until the cutoff, and the TW daemon skips the day. |
-| `TW live trading needs one stock in this release` | `bt live` with a multi-code TW strategy does not start. |
 
 History is loaded and freshness-checked per symbol. A gap in any of the last five union dates fails the decision; older gaps pass. Every symbol is then filtered to the common dates, as `bt run` does, before its provisional bar is appended. The DSL compiler runs once with all assets, and `Engine.effective_targets` scales the final and previous target rows jointly. Under on_change, a symbol whose effective target is unchanged keeps its drift. When every symbol is unchanged, US skips before planning.
 
@@ -404,9 +403,37 @@ leg: Buy Cash Common 86
 leg: Buy Cash IntradayOdd 580
 ```
 
+In production, `bt target` also prints the [budget pre-check](#failure-handling-1) audit lines to standard error before its standard output, without the `date=DATE` prefix the daemon adds: one contract line per code, one fallback line per code without a usable `limit_up`, and one budget line. Standard output keeps the account fields and symbol blocks above. Simulation prints neither.
+
+```text
+code=CODE reference=VALUE limit-up=VALUE limit-down=VALUE day-trade=VALUE unit=VALUE margin-loan-ratio=VALUE trading-suspended=BOOL
+code=CODE budget-price-fallback=reference*1.10 price=VALUE
+buy-hold=VALUE trading-available=VALUE margin-hold=VALUE margin-available=VALUE
+```
+
 #### Failure handling
 
 The [strategy validation](#strategy-validation) checks apply first. The mode mismatch guard refuses simulation commands against a production server and refuses `--live` against a simulation server. The decision fails when the dated `position_detail` quantities of a margin position, counted in 1000-share lots, exceed its held margin shares.
+
+`bt target --live` and the TW production daemon both run the decision through `Live.decide`, so both read contract info for each code and the trading limits once, then check the planned buys before any order. `bt target` places no order either way. Simulation makes neither read.
+
+| Buy leg | Production budget hold |
+|---|---|
+| `Common`, `Cash` | `limit_up x lots x unit`, summed against `trading_available`. |
+| `Common`, `MarginTrading` | `limit_up x lots x unit`, summed against `margin_available`, not discounted by the financing ratio. |
+| `IntradayOdd`, `Cash` | The snapshot ask, which is the order's `LMT` price, times the shares, summed against `trading_available`. A zero or negative ask holds nothing, because the executor skips that buy. |
+| Rollover or refinance rebuy | Counted once in the `MarginTrading` sum. |
+
+A code with an absent, null, or non-positive `limit_up` uses `reference x 1.10` in its place and logs `code=CODE budget-price-fallback=reference*1.10 price=VALUE`. The check never offsets a buy hold with a sell and never relies on an FOK kill releasing a hold. It assumes the broker holds a market buy at `limit_up` and that a filled sell adds nothing to `trading_available`; the [stage 2 acceptance](./specs/multi-stock-live.md#stage-2-tw-production) measures both. On the production account with 0050, `trading_used` reset daily, a cancel released its hold at once, and an order rejected at placement held nothing ([Measured and unmeasured](./specs/multi-stock-live.md#measured-and-unmeasured)). `margin_limit` read 0 at every probe reading, so any margin buy fails while `margin_available` stays 0.
+
+| Message | Effect |
+|---|---|
+| `TW symbol CODE is suspended` | A `trading_suspended` contract fails the whole decision; no symbol trades. |
+| `TW buy budget short: planned X, available Y` | The cash buy holds exceed `trading_available`; no order is submitted. |
+| `TW margin budget short: planned X, available Y` | The margin buy holds exceed `margin_available`; no order is submitted. |
+| `TW budget inputs are not finite` | A `Common` hold price is not finite and positive, an odd-lot ask is not finite, or a hold sum or available figure is negative or not finite; no order is submitted. |
+
+A failed pre-check makes `bt target` exit 1 without an order. The TW daemon logs `date=DATE error=MESSAGE order=skip` and skips the day; it does not retry the check within the session.
 
 > [!WARNING]
 > `--equity` is the total equity you supply for simulation; `bt` does not read it from broker cash or `account_balance`. Over the strategy's symbol set, `bt` infers simulation cash as equity minus the summed cash and margin inventory values of all strategy positions, plus their summed loan principal and interest. It rejects a nonzero holding in any code outside the strategy.
@@ -421,7 +448,7 @@ Both market arms share these options.
 
 | Argument or option | Default | Description |
 |---|---|---|
-| `STRAT` | required | Read one daily strategy with N distinct symbols in one market. US trades every symbol; TW needs one symbol in this release. |
+| `STRAT` | required | Read one daily strategy with N distinct US or TW symbols, all in one market. The account may hold only those strategy symbols. |
 | `--data-dir DIR` | `data/` | Set the Tiingo or FinMind cache directory selected by the strategy market. |
 | `-h`, `-help`, `--help` | - | Print the live options and exit with code 0. |
 
@@ -522,7 +549,7 @@ A failed [account check](#failure-handling) before the cutoff logs `error=Failur
 
 Install the official `shioaji` command, create the server `.env` shown in the TW target section, and start `shioaji server start`.
 
-TW `bt target` supports N distinct codes. TW `bt live` still needs one code in this release and fails at startup with `TW live trading needs one stock in this release`; N-code TW execution belongs to stage 2.
+TW `bt target` and `bt live` both support every distinct code the strategy declares. The single-price `--provisional-close` override still requires one stock.
 
 #### Options
 
@@ -549,13 +576,17 @@ The Shioaji server may still need its own keys to log in. `bt` never fails becau
 | Phase | Taipei timing | Implemented TW action |
 |---|---|---|
 | Prepare | 13:05 | Check that a snapshot is dated today, query FinMind's independent trading calendar for the previous session, fetch prices through that session, refresh adjustment datasets through today, and require an exact price-cache end date. |
-| Decide | 13:20 | Request a fresh snapshot, validate its session and OHLCV values, append the provisional bar, evaluate the final and previous effective targets, read aggregate positions in shares and dated margin details, derive simulation or production cash and equity, prepend due 18-month rollover pairs, and plan ordinary cash, margin, and refinancing legs in absolute TWD. Under `rebalance daily`, the plan returns to the effective target every session. Under `rebalance on_change` or without a declaration, an unchanged effective target preserves drift, and a changed target trades from current inventory. |
-| Execute | New orders before 13:24:30; status polls before 13:25 | Split legs into `Common` and `IntradayOdd` orders as in `bt target` and submit them sequentially. Recheck the date and the 13:24:30 order cutoff immediately before every order, and the date and 13:25 during every status poll. Continuous trading ends at 13:25, so the 30-second margin reduces the chance that a checked order reaches the broker in the closing call. |
-| Reconcile | After 13:30 | Query and log today's resulting trades, including fill status, deal quantity, and weighted deal price. |
+| Decide | 13:20 | Skip the session when today's trades, read once for the whole account, hold any order on any code. Otherwise request a fresh snapshot for every code, validate its session and OHLCV values, append the provisional bars, evaluate the final and previous effective targets, read aggregate positions in shares and dated margin details, derive simulation or production cash and equity, prepend due 18-month rollover pairs, and plan ordinary cash, margin, and refinancing legs in absolute TWD. In production, read contract info for each code and the trading limits, then run the [budget pre-check](#failure-handling-1). Under `rebalance daily`, the plan returns to the effective target every session. Under `rebalance on_change` or without a declaration, an unchanged effective target preserves drift, and a changed target trades from current inventory. |
+| Execute | New orders before 13:24:30; status polls before 13:25 | Split legs into `Common` and `IntradayOdd` orders as in `bt target` and run them in four phases: rollover pairs, ordinary sells, refinance pairs, and ordinary buys. Recheck the date and the 13:24:30 order cutoff immediately before every order, and the date and 13:25 during every status poll. Continuous trading ends at 13:25, so the 30-second margin reduces the chance that a checked order reaches the broker in the closing call. |
+| Reconcile | After 13:30 | Query and log today's trades for every strategy code, including fill status, deal quantity, and weighted deal price. A code without trades logs `date=DATE code=CODE fill-status=none`. |
+
+> [!IMPORTANT]
+> The existing-orders check filters today's trades by date only, not by code or origin. A manual order placed that day on any code, inside or outside the strategy, skips the bot's TW session once the server lists it.
 
 | Order | Request | Confirmation |
 |---|---|---|
-| `Common` | `MKT` + `IOC`, quantity in lots. | Poll today's trades up to five times, one second apart, for one matching `Filled` record with the full quantity and a finite positive weighted price. |
+| `Common` ordinary leg | `MKT` + `FOK`, price 0, quantity in lots. | FOK asks for a complete fill or none, and the partial-fill check stays as a guard. The placed orders of one phase are polled together: up to five rounds, one second apart, with at most one read of today's trades per code per round. Each needs one matching `Filled` record with the full quantity and a finite positive weighted price, or a no-fill `Failed`, `Inactive`, `Cancelled`, or `Rejected` record. |
+| `Common` pair leg | `MKT` + `FOK`, price 0, quantity in lots. | Sell, then rebuy the full original lot count, one leg at a time. Each sell must be confirmed filled, and the rebuy must be fully funded. |
 | `IntradayOdd` | Limit `ROD`, quantity 1 to 999 shares, priced at the snapshot ask for a buy and the snapshot bid for a sell. | None. The executor logs `submitted=intraday-odd-rod-pending quantity=N` and moves on. |
 
 TWSE intraday odd-lot trading accepts only limit `ROD` orders of 1 to 999 shares and no margin or securities-lending sales ([TWSE intraday odd-lot rules](https://www.twse.com.tw/downloads/zh/trading/introduce/introduce4-1.pdf)). The Shioaji server exposes no odd-lot quote, so the limit comes from the regular-book snapshot. An accepted odd-lot buy reserves its full cost from the cash budget at once. An odd-lot sale never adds proceeds to the same session's cash.
@@ -563,44 +594,47 @@ TWSE intraday odd-lot trading accepts only limit `ROD` orders of 1 to 999 shares
 | Odd-lot case | Behavior |
 |---|---|
 | Simulation server | Skip the order, log `submitted=skip:odd-lot-unsupported-in-simulation`, and continue with later legs. |
-| Snapshot ask or bid missing | Skip the order, log `submitted=skip:odd-lot-quote-unavailable`, and continue. |
-| Broker rejects the placement | Log `submitted=skip:odd-lot-rejected` and continue. |
+| Snapshot ask or bid missing | Skip the order, log `submitted=skip:odd-lot-quote-unavailable`, and continue. In production, the budget pre-check gives an odd-lot buy with a zero ask no hold, so that buy reaches this skip. |
+| Broker rejects the placement | Log `code=CODE submitted=skip:odd-lot-rejected`. A rejected buy lets later legs continue; a rejected sell stops the session before the next phase. |
 | Today's trades hold an opposite-direction `IntradayOdd` fill for the symbol | Stop with `opposite-direction odd-lot fill today`; nothing else is submitted. |
 | Today's trades cannot be read | Stop with `odd-lot trade history unavailable: REASON`. |
 
 The opposite-direction guard prevents a same-day odd-lot round trip. The daemon skips a session that already has orders, and a plan never holds an odd-lot sell and an odd-lot buy together, so the guard is a backstop.
 
-A refinance or rollover sell and its rebuy are sequential dependent orders, not an atomic broker operation. The rebuy runs only after the full sell is confirmed and only when its complete original lot count is funded. An ordinary buy may be floored to the confirmed cash budget; if capped, its remainder and every later leg stay unsubmitted.
+Within a phase, the executor places every leg first and then polls the placed `Common` orders together. Every ordinary `Common` sell must be confirmed filled before the refinance pairs and ordinary buys start. A pending odd-lot `ROD` sell is exempt from that barrier. Each buy reserves its cost at its quote price from one running cash balance before the next buy is sized, and a confirmed fill replaces the reservation with the deal-price cost. A refinance or rollover sell and its rebuy are sequential dependent orders, not an atomic broker operation. An ordinary buy may be floored to the remaining cash; if capped, its remainder and every later leg stay unsubmitted.
 
 Live planning and execution both use SinoPac's settlement-debit list rate of 14.25 bps with a TWD 1 minimum per order, because the broker debits the list rate at settlement and rebates the discount later. Execution funds each buy and carries cash after each fill at that rate. Backtests use the 2.85 bps default commission. A cash leg split into a `Common` order and an `IntradayOdd` order pays two minimums.
 
 #### Output and logs
 
-Each daemon line starts with a UTC timestamp in `YYYY-MM-DDTHH:MM:SSZ` format. The production `startup` line also records `acc-balance`, `t0`, `t1`, `t2`, spendable `cash`, and `equity`. Each decision logs one account line followed by one line for its one supported live symbol:
+Each daemon line starts with a UTC timestamp in `YYYY-MM-DDTHH:MM:SSZ` format. The production `startup` line also records `acc-balance`, `t0`, `t1`, `t2`, spendable `cash`, and `equity`. Production decisions first log one contract line per code, a fallback line for each code without a usable `limit_up`, and one budget line, all before any placement. Each decision then logs one account line and one line per code in declaration order:
 
 ```text
+date=DATE code=CODE reference=VALUE limit-up=VALUE limit-down=VALUE day-trade=VALUE unit=VALUE margin-loan-ratio=VALUE trading-suspended=BOOL
+date=DATE code=CODE budget-price-fallback=reference*1.10 price=VALUE
+date=DATE buy-hold=VALUE trading-available=VALUE margin-hold=VALUE margin-available=VALUE
 date=DATE fetched-through=DATE equity=VALUE cash=VALUE debit=VALUE submitted=OUTCOME
 date=DATE symbol=CODE provisional-close=VALUE target=VALUE cash-shares=VALUE margin-shares=VALUE loan=VALUE planned-legs=LEGS
 ```
 
-OUTCOME is `complete`, `skip:no-order-legs`, `skip:existing-orders`, or `stop:REASON remaining:LEGS`. LEGS lists `ACTION:CONDITION:LOT:QUANTITY` entries, or `none`. In an existing-orders skip, `cash`, `debit`, and every symbol value except `planned-legs=none` print `-`, and `equity` is the startup equity. Odd-lot orders add their own `submitted=` lines. Trade lines record `code`, `order-id`, `action`, `cond`, `lot`, `fill-status`, `deal-quantity` in the trade's lot unit, and `fill-price`. `custom_field` remains `btMMDD`. Lot orders stay sequential `MKT` + `IOC`, and odd lots stay `LMT` + `ROD`, in this release.
+A code without a usable `limit_up` prints `limit-up=-` on its contract line. Simulation logs neither contract nor budget lines. OUTCOME is `complete`, `skip:no-order-legs`, `skip:existing-orders`, or `stop:REASON remaining:LEGS`. LEGS lists `ACTION:CONDITION:LOT:QUANTITY` entries, or `none`. In an existing-orders skip, `cash`, `debit`, and every symbol value except `planned-legs=none` print `-` for every strategy code, and `equity` is the startup equity. Rejected placements and no-fill `Common` ends add `code=CODE submitted=skip:...` lines, and odd-lot orders add their own `submitted=` lines. Trade lines record `code`, `order-id`, `action`, `cond`, `lot`, `fill-status`, `deal-quantity` in the trade's lot unit, and `fill-price`. `custom_field` remains `btMMDD`. Lot orders use `MKT` + `FOK`, and odd lots stay `LMT` + `ROD`.
 
 #### Failure handling
 
 The [strategy validation](#strategy-validation) checks apply at startup and in each decision. The mode mismatch guard requires simulation commands to see `info.simulation = true` and `--live` to see `info.simulation = false`. The daemon re-reads server info at the start of each unsubmitted daily Decide phase; if the server mode changed after startup, it logs the mismatch and skips the day's action before any order can be submitted. The day also stops when the dated `position_detail` quantities of a margin position, counted in 1000-share lots, exceed its held margin shares.
 
-A `Common` order that ends `Failed`, `Inactive`, `Cancelled`, or `Rejected` with no fill lets later independent legs run. A sell that ends this way blocks its dependent rebuy and every leg after it. A partial, missing, ambiguous, mismatched, timed-out, cutoff, or uncertain result stops all later legs.
+A failed [budget pre-check](#failure-handling-1) skips the day before any order. A rejected or uncertain sell, or a `Common` sell that ends `Failed`, `Inactive`, `Cancelled`, or `Rejected` with no fill, stops the session before the refinance and buy phases. An FOK kill counts as such a no-fill end only when the broker reports one of those statuses; any other status is uncertain. The first uncertain result stops the remaining placements, but the orders already placed are still polled and logged. A failed buy is logged, and its sibling buys continue. Odd-lot `ROD` sells stay unpolled and may still be pending when buys start; their proceeds are never spent that session. A partial, missing, ambiguous, mismatched, timed-out, or cutoff result stops all later legs.
 
 No execution path guarantees exactly once across concurrent daemon processes or every crash timing; the pre-submit query only reduces duplicate risk.
 
 > [!WARNING]
-> Simulation equity is a user-supplied sizing input, and simulation skips every odd-lot order. Real MKT fills, odd-lot limit fills in the separate odd-lot book, unfilled ROD orders, the spread, partial or cancelled IOC quantities, broker margin rules, settlements, and concurrent processes can make TW daemon execution differ from a daily close-fill backtest.
+> Simulation equity is a user-supplied sizing input, and simulation skips every odd-lot order. Real MKT fills, odd-lot limit fills in the separate odd-lot book, unfilled ROD orders, the spread, FOK kills, the retained partial-fill guard, broker margin rules, settlements, and concurrent processes can make TW daemon execution differ from a daily close-fill backtest.
 
 > [!IMPORTANT]
-> A stale cache, fetch or snapshot error, or evaluation error logs one error line and stops the TW action for the day. TW never submits a leg after a `Common` order whose result is unconfirmed, and it records that stop as `submitted=stop:REASON remaining:LEGS`.
+> A stale cache, fetch or snapshot error, or evaluation error logs one error line and stops the TW action for the day. TW starts no later phase while a placed `Common` order's result is unconfirmed, and it records that stop as `submitted=stop:REASON remaining:LEGS`.
 
 > [!NOTE]
-> The TW path queries today's orders before planning and carries only confirmed `Common` fills and pending odd-lot buy costs between legs. This reduces duplicate risk but is not an exactly-once guarantee for concurrent processes.
+> The TW path queries today's orders before planning and carries confirmed `Common` fills, quote-price reservations for placed buys, and pending odd-lot buy costs between legs. This reduces duplicate risk but is not an exactly-once guarantee for concurrent processes.
 
 Pending T+1 and T+2 settlements never suppress a production session; their signed amounts change the available cash passed to the unchanged planner and executor. T+0 must still be present and appears in the startup log, but `acc_balance` already reflects it.
 

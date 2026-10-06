@@ -9,7 +9,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - `bt target` prints `cash` and `debit` after `equity` for US and TW decisions: the free cash and margin loan the fill planner sizes from.
-- Multi-stock US live trading in one market, with one joint decision and fill plan for all strategy symbols. TW `bt target` also plans N codes; TW `bt live` remains one-code in this release and fails at startup with `TW live trading needs one stock in this release`.
+- Multi-stock US live trading in one market, with one joint decision and fill plan for all strategy symbols.
+- Multi-stock TW live execution in one market and one account, with per-code snapshots, inventory, exchange, financing ratio, and costs. `bt live` now executes every declared TW code; the stage 1 startup check `TW live trading needs one stock in this release` is gone.
+- TW production decisions pre-check all buy holds against `trading_available` and `margin_available`, rollover and refinance rebuys included, and fail the session with `TW symbol CODE is suspended`, `TW buy budget short: planned X, available Y`, or `TW margin budget short: planned X, available Y` before any order. They log the seven contract fields per code and the planned and available budgets; a code without a usable `limit_up` is priced at `reference x 1.10` and logged. `bt target --live` runs the same check and prints these lines to standard error. Simulation skips these reads.
+- `Shioaji.contract_info` reads `GET /api/v1/data/contracts/CODE/info` and `Shioaji.trading_limits` reads `POST /api/v1/portfolio/trading_limits`, with `parse_contract_info`, `parse_trading_limits`, their records, and recorded fixtures. `Live.check_tw_budget` runs the pre-check, and `Live.decide` takes `?tw_contract_infos`, `?tw_trading_limits`, and `?tw_log` for injected inputs and audit lines.
+- `Shioaji.trades_today` reads today's trades on every code in one request. `Live.tw_session_step` skips the whole session when it returns any order, including one on a code outside the strategy.
 - Shared live decisions reject mixed markets, duplicate symbols, multi-stock provisional-price overrides, and history gaps in the last five union sessions.
 
 ### Changed
@@ -22,6 +26,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `Alpaca.positions` lists the account's open position symbols, and `Alpaca.order_t` carries the order `side`.
 - `Shioaji.snapshot` fetches every requested contract in one request and matches the responses by code, rejecting missing, duplicate, or extra codes.
 - `Live.decision` holds the account fields plus one `asset_decision` per symbol, and TW legs carry their `code` and `exchange`. `Data.common_dates` gives `bt run` and live decisions one date intersection.
+- TW execution batches ordinary sells and ordinary buys by phase, with rollover and refinance pairs still run one leg at a time. A rejected or uncertain sell, or a `Common` sell that FOK kills with no fill, stops the session before the refinance pairs and buys, including at N = 1. Pending `IntradayOdd` `ROD` sells are exempt from the `Common` confirmation barrier and provide no same-session proceeds. A failed buy is logged and its siblings continue.
+- TW `Common` lot legs use `MKT` + `FOK` instead of `MKT` + `IOC`; `IntradayOdd` legs remain `LMT` + `ROD`.
+- The `Shioaji.snapshot` record carries its response `code`, and the `Shioaji.contract_info` record carries the requested `code`. `Live.execute_tw_legs` takes one `tw_execution_asset` per code, with its code, exchange, bid, ask, price, financing ratio, and costs, in place of the scalar per-code arguments, and its result carries the remaining `cash`.
 
 ## [0.11.0] - 2026-09-29
 
