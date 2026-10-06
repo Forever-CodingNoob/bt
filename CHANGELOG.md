@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-06
+
+Live trading in this release ships on test evidence only: the US paper acceptance run (five sessions from 2026-10-06) and the TW production acceptance are pending, and fixes from them follow as patch releases.
+
 ### Added
 
 - `bt target` prints `cash` and `debit` after `equity` for US and TW decisions: the free cash and margin loan the fill planner sizes from.
@@ -248,7 +252,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Return-based engine with daily close-to-close signal prices.
 - TW dividend back-adjustment via FinMind factors.
 
-[Unreleased]: https://github.com/Forever-CodingNoob/bt/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/Forever-CodingNoob/bt/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/Forever-CodingNoob/bt/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/Forever-CodingNoob/bt/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/Forever-CodingNoob/bt/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/Forever-CodingNoob/bt/compare/v0.9.0...v0.10.0
