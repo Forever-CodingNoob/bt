@@ -8757,6 +8757,37 @@ let test_tw_phase_poll_rounds () =
   let () = assert (result.stop_reason = None) in
   assert_close 6000. result.cash
 
+let test_tw_phase_poll_rechecks_cutoff () =
+  let buy : Live.leg = { code = "2330"; exchange = "TSE"; action = "Buy";
+    cond = "Cash"; lot = Shioaji.Common; quantity = 1 } in
+  let second = { buy with code = "2890"; exchange = "OTC" } in
+  let third = buy in
+  let timestamp = ref "2026-05-22T13:24:29+08:00" in
+  let reads = ref [] in
+  let result = execute_tw_test ~assets:tw_pair_assets ~cash:40000. ~positions:[]
+    ~now:(fun () -> !timestamp)
+    ~place_order:(scripted_placements ["first", buy; "second", second; "third", third])
+    ~orders_today:(fun ~code ~today:_ ->
+      let () = reads := code :: !reads in
+      let () = timestamp := "2026-05-22T13:25:01+08:00" in
+      if code = "2330" then [tw_trade "first" buy "Filled" 1;
+        { (tw_trade "third" third "Filled" 1) with Shioaji.deal_price = Some 9. }]
+      else [{ (tw_trade "second" second "Filled" 1) with
+        Shioaji.deal_price = Some 20. }])
+    [buy; second; third] in
+  (* All three buys are posted before 13:24:30. The first status read crosses
+     13:25, so the second code must not be read or treated as confirmed. *)
+  let () = assert (List.rev !reads = ["2330"]) in
+  let () = assert (result.stop_reason =
+    Some "order second status unconfirmed at cutoff") in
+  (* Both 2330 fills are cached before cutoff and must still settle, even
+     with uncached 2890 between them. Spend 10000+9000, keep 2890's 20000
+     hold, and leave 40000-10000-9000-20000 = 1000 cash. *)
+  let () = assert (result.trades = [tw_trade "first" buy "Filled" 1;
+    { (tw_trade "third" third "Filled" 1) with Shioaji.deal_price = Some 9. }]) in
+  let () = assert (result.remaining = []) in
+  assert_close 1000. result.cash
+
 let test_tw_margin_sale_reservations () =
   let sell : Live.leg = { code = "2330"; exchange = "TSE"; action = "Sell";
     cond = "MarginTrading"; lot = Shioaji.Common; quantity = 1 } in
@@ -9659,6 +9690,7 @@ let () =
   let () = test_tw_sell_stop_before_refinance () in
   let () = test_tw_uncertain_buy_reconciles_sibling () in
   let () = test_tw_phase_poll_rounds () in
+  let () = test_tw_phase_poll_rechecks_cutoff () in
   let () = test_tw_margin_sale_reservations () in
   let () = test_tw_live_input_guards () in
   let () = test_tw_live_startup_guard () in

@@ -1409,6 +1409,10 @@ let execute_tw_legs ~mode ~(assets : tw_execution_asset array)
               result in
         let rec observe waiting = function
           | [] -> List.rev waiting
+          | (i, _, id, _, _, _) :: rest
+              when histories.(i) = None && not (open_window ()) ->
+              let () = set_stop ("order " ^ id ^ " status unconfirmed at cutoff") in
+              observe waiting rest
           | ((i, (leg : leg), id, reserved, repayment, interest) as item) :: rest ->
               let outcome = classify leg id (history i) in
               let () = match outcome with
