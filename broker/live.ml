@@ -667,10 +667,11 @@ let check_tw_budget ~log ~symbols ~snapshots ~contract_infos
   let () = Array.iteri (fun i code ->
     let info : Shioaji.contract_info = contract_infos.(i) in
     log (Printf.sprintf
-      "code=%s reference=%.10g limit-up=%s limit-down=%.10g day-trade=%s unit=%.10g margin-loan-ratio=%.10g trading-suspended=%b"
+      "code=%s reference=%.10g limit-up=%s limit-down=%.10g day-trade=%s unit=%.10g margin-loan-ratio=%s trading-suspended=%b"
       code info.reference
       (match info.limit_up with None -> "-" | Some v -> Printf.sprintf "%.10g" v)
-      info.limit_down info.day_trade info.unit info.margin_loan_ratio
+      info.limit_down info.day_trade info.unit
+      (match info.margin_loan_ratio with None -> "-" | Some v -> Printf.sprintf "%.10g" v)
       info.trading_suspended)) symbols in
   let () = Array.iteri (fun i code ->
     if contract_infos.(i).Shioaji.trading_suspended then

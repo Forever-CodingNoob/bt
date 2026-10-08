@@ -38,7 +38,7 @@ type contract_info = {
   limit_down : float;
   day_trade : string;
   unit : float;
-  margin_loan_ratio : float;
+  margin_loan_ratio : float option;
   trading_suspended : bool;
 }
 
@@ -216,7 +216,7 @@ let parse_info raw =
 
 let parse_contract_info ~code raw =
   match jq_fields "contract info"
-    "if ((.reference | type) == \"number\" and (.limit_down | type) == \"number\" and (.day_trade | type) == \"string\" and (.unit | type) == \"number\" and (.margin_loan_ratio | type) == \"number\" and (.trading_suspended | type) == \"boolean\" and (.limit_up == null or (.limit_up | type) == \"number\") and ((has(\"code\") | not) or (.code | type) == \"string\")) then [(has(\"code\") | tostring), (.code // \"\"), (.reference | tostring), (if .limit_up == null then \"\" else (.limit_up | tostring) end), (.limit_down | tostring), .day_trade, (.unit | tostring), (.margin_loan_ratio | tostring), (.trading_suspended | tostring)] | @tsv else error(\"invalid contract info fields\") end" raw with
+    "if ((.reference | type) == \"number\" and (.limit_down | type) == \"number\" and (.day_trade | type) == \"string\" and (.unit | type) == \"number\" and (.margin_loan_ratio == null or (.margin_loan_ratio | type) == \"number\") and (.trading_suspended | type) == \"boolean\" and (.limit_up == null or (.limit_up | type) == \"number\") and ((has(\"code\") | not) or (.code | type) == \"string\")) then [(has(\"code\") | tostring), (.code // \"\"), (.reference | tostring), (if .limit_up == null then \"\" else (.limit_up | tostring) end), (.limit_down | tostring), .day_trade, (.unit | tostring), (if .margin_loan_ratio == null then \"\" else (.margin_loan_ratio | tostring) end), (.trading_suspended | tostring)] | @tsv else error(\"invalid contract info fields\") end" raw with
   | [has_code; response_code; reference; limit_up; limit_down; day_trade; unit;
      margin_loan_ratio; trading_suspended] ->
       let () = if bool_field "contract info has_code" has_code && response_code <> code
@@ -225,9 +225,12 @@ let parse_contract_info ~code raw =
         | "" -> None
         | value -> let value = float_field "contract info limit_up" value in
             if value > 0. then Some value else None in
-      let ratio = nonnegative_float_field "contract info margin_loan_ratio"
-        margin_loan_ratio in
-      let () = if ratio > 1. then failwith "invalid Shioaji contract info ratio" in
+      let ratio = match margin_loan_ratio with
+        | "" -> None
+        | value ->
+            let value = nonnegative_float_field "contract info margin_loan_ratio" value in
+            let () = if value > 1. then failwith "invalid Shioaji contract info ratio" in
+            Some value in
       let reference = positive_float_field "contract info reference" reference in
       let limit_down = nonnegative_float_field "contract info limit_down" limit_down in
       let unit = float_field "contract info unit" unit in

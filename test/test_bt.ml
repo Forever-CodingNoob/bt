@@ -6509,9 +6509,29 @@ let test_shioaji_contract_info_parse () =
      one Common lot is 1000 shares, margin ratio is 0.6, not suspended. *)
   let expected : Shioaji.contract_info =
     { code = "0050"; reference = 112.8; limit_up = Some 124.05; limit_down = 101.55;
-      day_trade = "Yes"; unit = 1000.; margin_loan_ratio = 0.6;
+      day_trade = "Yes"; unit = 1000.; margin_loan_ratio = Some 0.6;
       trading_suspended = false } in
   let () = assert (actual = expected) in
+  (* Null changes only the ratio: all other 0050 fields retain their values. *)
+  let null_ratio = Shioaji.parse_contract_info ~code:"0050"
+    (shioaji_fixture "contract_info_null_ratio.json") in
+  let () = assert (null_ratio = { expected with margin_loan_ratio = None }) in
+  let with_ratio field = Shioaji.parse_contract_info ~code:"0050"
+    ("{\"reference\":100,\"limit_up\":110,\"limit_down\":90,\"day_trade\":\"No\"," ^
+     "\"unit\":1000,\"trading_suspended\":false" ^ field ^ "}") in
+  (* Absent/null is unknown, not zero; the numeric endpoints remain valid. *)
+  let () = List.iter (fun field ->
+    assert ((with_ratio field).Shioaji.margin_loan_ratio = None))
+    [""; ",\"margin_loan_ratio\":null"] in
+  let () = List.iter (fun (field, expected_ratio) ->
+    assert ((with_ratio field).Shioaji.margin_loan_ratio = Some expected_ratio))
+    [(",\"margin_loan_ratio\":0", 0.); (",\"margin_loan_ratio\":1", 1.)] in
+  (* Only numbers in [0, 1] or an unavailable ratio are accepted. *)
+  let () = List.iter (fun field ->
+    assert_failure (fun () -> ignore (with_ratio field)))
+    [",\"margin_loan_ratio\":-0.1"; ",\"margin_loan_ratio\":1.1";
+     ",\"margin_loan_ratio\":\"0.6\""; ",\"margin_loan_ratio\":true";
+     ",\"margin_loan_ratio\":[]"; ",\"margin_loan_ratio\":{}"] in
   (* A response naming a different stock cannot inherit the request's identity. *)
   let () = assert_failure (fun () -> ignore (Shioaji.parse_contract_info ~code:"2330"
     (shioaji_fixture "contract_info.json"))) in
@@ -7534,7 +7554,7 @@ let test_multi_stock_one_stock_pins () =
 
 let tw_test_info : Shioaji.contract_info =
   { code = "2330"; reference = 10.; limit_up = Some 11.; limit_down = 9.; day_trade = "Yes";
-    unit = 1000.; margin_loan_ratio = 0.6; trading_suspended = false }
+    unit = 1000.; margin_loan_ratio = Some 0.6; trading_suspended = false }
 
 let tw_test_limits : Shioaji.trading_limits =
   { trading_limit = 1000000000.; trading_used = 0.;
@@ -7605,11 +7625,17 @@ let test_tw_buy_budget () =
     run [|{ tw_test_info with reference = Float.nan; limit_up = None };
       infos.(1)|] limits [cash]) in
   let messages = ref [] in
-  let fallback_infos = [|{ tw_test_info with reference = 100.; limit_up = None };
-    infos.(1)|] in
+  let fallback_infos = [|{ tw_test_info with reference = 100.; limit_up = None;
+    margin_loan_ratio = None }; infos.(1)|] in
   let () = Live.check_tw_budget ~log:(fun text -> messages := text :: !messages)
     ~symbols ~snapshots ~contract_infos:fallback_infos
     ~limits:{ limits with trading_available = 221000. } [cash] in
+  (* Unknown financing eligibility is logged as "-", without changing buy holds;
+     the second code retains the numeric 0.6 log. *)
+  let () = assert (List.exists (fun line -> contains line
+    "code=2330 reference=100 limit-up=- limit-down=9 day-trade=Yes unit=1000 margin-loan-ratio=- trading-suspended=false") !messages) in
+  let () = assert (List.exists (fun line -> contains line
+    "code=2890 reference=10 limit-up=22 limit-down=9 day-trade=Yes unit=1000 margin-loan-ratio=0.6 trading-suspended=false") !messages) in
   (* No band: 100*1.10*2*1000 = 220000; no snapshot-close pricing. *)
   let () = assert (List.exists (fun line -> contains line
     "code=2330 budget-price-fallback=reference*1.10 price=110") !messages) in

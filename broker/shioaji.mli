@@ -35,7 +35,7 @@ type position_detail = {
   lots : int;
 }
 
-(** Code-tagged contract price bands, lot unit, financing ratio and suspension status. *)
+(** Code-tagged contract price bands, lot unit, optional financing ratio and suspension status. *)
 type contract_info = {
   code : string;
   reference : float;
@@ -43,7 +43,7 @@ type contract_info = {
   limit_down : float;
   day_trade : string;
   unit : float;
-  margin_loan_ratio : float;
+  margin_loan_ratio : float option;
   trading_suspended : bool;
 }
 

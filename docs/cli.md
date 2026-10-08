@@ -617,6 +617,8 @@ date=DATE fetched-through=DATE equity=VALUE cash=VALUE debit=VALUE submitted=OUT
 date=DATE symbol=CODE provisional-close=VALUE target=VALUE cash-shares=VALUE margin-shares=VALUE loan=VALUE planned-legs=LEGS
 ```
 
+An absent or null `margin_loan_ratio` prints `margin-loan-ratio=-` on the contract line.
+
 A code without a usable `limit_up` prints `limit-up=-` on its contract line. Simulation logs neither contract nor budget lines. OUTCOME is `complete`, `skip:no-order-legs`, `skip:existing-orders`, or `stop:REASON remaining:LEGS`. LEGS lists `ACTION:CONDITION:LOT:QUANTITY` entries, or `none`. In an existing-orders skip, `cash`, `debit`, and every symbol value except `planned-legs=none` print `-` for every strategy code, and `equity` is the startup equity. Rejected placements and no-fill `Common` ends add `code=CODE submitted=skip:...` lines, and odd-lot orders add their own `submitted=` lines. Trade lines record `code`, `order-id`, `action`, `cond`, `lot`, `fill-status`, `deal-quantity` in the trade's lot unit, and `fill-price`. `custom_field` remains `btMMDD`. Lot orders use `MKT` + `FOK`, and odd lots stay `LMT` + `ROD`.
 
 #### Failure handling

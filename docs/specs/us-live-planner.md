@@ -189,7 +189,7 @@ Gates: the build and the full suite exit 0. `engine/` does not change.
 
 ## Acceptance
 
-Run a paper session on `/sandbox/research/strategies/us/paper_probe/main.strat`. The file declares `stock "us/TQQQ"` and `target 0.2`. The paper account must hold no symbol other than TQQQ.
+Run a paper session on a strategy file kept outside the repository. Once step 1 adds `rebalance daily`, the file declares `stock "us/TQQQ"`, `rebalance daily`, and `target 0.2`. The paper account must hold no symbol other than TQQQ.
 
 1. Add `rebalance daily` to the file.
 2. Run `bt live main.strat` on paper for at least three sessions: target 0.2, then 1.25 for one session, then 0.2 again.

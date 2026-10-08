@@ -751,7 +751,7 @@ Commit only after the coordinator confirms; use the co-author trailer the coordi
 
 ## Coordinator acceptance after the branch
 
-After all offline gates, the coordinator alone performs the paper-session acceptance in `docs/specs/us-live-planner.md` on `/sandbox/research/strategies/us/paper_probe/main.strat`: declare `rebalance daily`, hold only TQQQ, observe three sessions at 0.2, 1.5, 0.2, inspect `cash:`/`debit:` immediately after `equity:` each session, compare post-trade exposure with the cached-bar backtest trade's `to_exposure` to four decimals while excluding refinance rows, and confirm the levered middle session reports zero free cash and a debit around half equity. A 3x ETF at 1.5 exposure has a 112.5%-of-equity overnight maintenance requirement, so hold 1.5 for only one session. This is not a task to execute from this plan; no implementer invokes broker-facing commands.
+After all offline gates, the coordinator alone performs the paper-session acceptance in `docs/specs/us-live-planner.md` on a strategy file, kept outside the repository, declaring `stock "us/TQQQ"`, `rebalance daily`, and `target 0.2`: hold only TQQQ, observe three sessions at 0.2, 1.5, 0.2, inspect `cash:`/`debit:` immediately after `equity:` each session, compare post-trade exposure with the cached-bar backtest trade's `to_exposure` to four decimals while excluding refinance rows, and confirm the levered middle session reports zero free cash and a debit around half equity. A 3x ETF at 1.5 exposure has a 112.5%-of-equity overnight maintenance requirement, so hold 1.5 for only one session. This is not a task to execute from this plan; no implementer invokes broker-facing commands.
 
 ## Self-Review
 

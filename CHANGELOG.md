@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- TW production decisions accept an absent or null Shioaji contract `margin_loan_ratio` instead of failing with `invalid Shioaji contract info response`. The optional ratio logs as `margin-loan-ratio=-` when unavailable; numeric ratios still require a value from 0 to 1, and sizing continues to use the cached stockinfo financing ratio.
+
 ## [0.12.0] - 2026-10-06
 
 Live trading in this release ships on test evidence only: the US paper acceptance run (five sessions from 2026-10-06) and the TW production acceptance are pending, and fixes from them follow as patch releases.
