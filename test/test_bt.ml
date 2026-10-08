@@ -6818,6 +6818,40 @@ let test_shioaji_orders_today_parse () =
        timestamp_raw
      = [])
 
+let test_shioaji_fok_filled_parse () =
+  let raw = shioaji_fixture "trades_fok_filled.json" in
+  (* The filled FOK reports status quantity 0 but requested 2 Common lots;
+     its sole deal is 2 lots at 32.26, so the weighted price is 32.26.
+     Null order_datetime falls back to 1791436801 = Oct 8 13:20:01 Taipei. *)
+  let expected : Shioaji.trade list =
+    [{ order_id = "b25ed200"; code = "00981A"; action = "Buy"; cond = "Cash";
+       lot = Shioaji.Common; status = "Filled"; order_quantity = 2;
+       deal_quantity = 2; deal_price = Some 32.26 }] in
+  let () = assert (Shioaji.parse_orders_today ~code:"00981A"
+    ~today:"2026-10-08" raw = expected) in
+  (* Account-wide history retains the same fill; other dates/codes exclude it. *)
+  let () = assert (Shioaji.parse_orders_today ~today:"2026-10-08" raw = expected) in
+  let () = assert (Shioaji.parse_orders_today ~today:"2026-10-09" raw = []) in
+  let () = assert (Shioaji.parse_orders_today ~code:"0056"
+    ~today:"2026-10-08" raw = []) in
+  let with_quantities request status deal confirmed =
+    Shioaji.parse_orders_today ~today:"2026-10-08"
+      (Printf.sprintf
+        {|[{"contract":{"code":"00981A"},"order":{"id":"quantities","action":"Buy","order_cond":"Cash","order_lot":"Common","quantity":%s},"status":{"status":"Filled","order_quantity":%s,"deal_quantity":%d,"order_datetime":null,"order_ts":1791436801.0,"deals":[{"price":32.26,"quantity":%d}]}}]|}
+        request status deal confirmed) in
+  (* Nonzero status quantity 3 stays authoritative despite request quantity 1. *)
+  let () = match with_quantities "1" "3" 2 2 with
+    | [trade] -> assert (trade.Shioaji.order_quantity = 3)
+    | _ -> assert false in
+  (* Both quantity bounds and confirmed-deal equality must still hold.
+     Fallback quantities must remain nonnegative integers, not strings/null. *)
+  List.iter (fun (request, status, deal, confirmed) ->
+    assert_failure (fun () ->
+      ignore (with_quantities request status deal confirmed)))
+    [("1", "0", 2, 2); ("3", "1", 2, 2); ("2", "0", 2, 1);
+     ("-2", "0", 2, 2); ("2.5", "0", 2, 2); ("\"2\"", "0", 2, 2);
+     ("null", "0", 2, 2); ("2", "-1", 2, 2)]
+
 
 let test_tw_live_phase () =
   (* 13:04:59 is one second before the 13:05 preparation window. *)
@@ -9701,6 +9735,7 @@ let () =
   let () = test_shioaji_placed_parse () in
   let () = test_shioaji_parser_rejections () in
   let () = test_shioaji_orders_today_parse () in
+  let () = test_shioaji_fok_filled_parse () in
   let () = test_tw_session_existing_second_code () in
   let () = test_tw_live_phase () in
   let () = test_tw_live_exchange () in

@@ -1,0 +1,50 @@
+[
+ {
+  "contract": {
+   "security_type": "STK",
+   "region": "TW",
+   "exchange": "TSE",
+   "code": "00981A"
+  },
+  "order": {
+   "id": "b25ed200",
+   "seqno": "115318",
+   "ordno": "X0LC7",
+   "action": "Buy",
+   "price": 0.0,
+   "quantity": 2,
+   "order_type": "FOK",
+   "price_type": "MKT",
+   "custom_field": "bt1008",
+   "order_cond": "Cash",
+   "order_lot": "Common",
+   "account": {
+    "account_type": "S",
+    "broker_id": "REDACTED",
+    "account_id": "REDACTED"
+   }
+  },
+  "status": {
+   "id": "b25ed200",
+   "status": "Filled",
+   "status_code": "00",
+   "web_id": "137",
+   "order_datetime": null,
+   "order_ts": 1791436801.0,
+   "msg": "",
+   "modified_ts": 1791436801.0,
+   "modified_price": 0.0,
+   "order_quantity": 0,
+   "deal_quantity": 2,
+   "cancel_quantity": 0,
+   "deals": [
+    {
+     "seq": "695123",
+     "price": 32.26,
+     "quantity": 2,
+     "ts": 1791436801.0
+    }
+   ]
+  }
+ }
+]
