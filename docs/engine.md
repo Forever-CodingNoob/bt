@@ -10,11 +10,14 @@ This guide explains how the bt engine simulates trades, computes equity, and app
   - [Share quantum](#share-quantum)
   - [Equity accounting](#equity-accounting)
   - [End-of-data close](#end-of-data-close)
+  - [Short positions](#short-positions)
+  - [Overnight cadence](#overnight-cadence)
 - [Daily market behavior](#daily-market-behavior)
   - [US market (us)](#us-market-us)
     - [Data source](#data-source)
     - [Costs and taxes](#costs-and-taxes)
     - [Margin financing](#margin-financing)
+    - [Short selling](#short-selling)
     - [Dividends](#dividends)
     - [Live trading fidelity](#live-trading-fidelity)
     - [Gaps between simulation and the real market](#gaps-between-simulation-and-the-real-market)
@@ -56,10 +59,10 @@ Sells take margin inventory before cash inventory.
 
 Each market profile sets a share quantum for each inventory. The planner converts every planned value to shares at the fill price and the `--capital` scale, floors the count to a multiple of the quantum, and converts the count back to value. The floored remainder stays in cash.
 
-| Market | Cash inventory | Margin inventory |
-|---|---|---|
-| US | Fractional (quantum 0) | Fractional (quantum 0) |
-| Taiwan | Whole shares (quantum 1) | 1000-share lots (quantum 1000) |
+| Market | Cash inventory | Margin inventory | Short leg |
+|---|---|---|---|
+| US | Fractional (quantum 0) | Fractional (quantum 0) | Whole shares (quantum 1) |
+| Taiwan | Whole shares (quantum 1) | 1000-share lots (quantum 1000) | Not supported |
 
 Cash buys and cash sells use the cash quantum. Margin buys, margin sells, both sides of every refinance, maturity rollovers, and margin-call sales use the margin quantum. Other forced sales use the quantum of the inventory they sell. With a positive quantum, the engine also carries each inventory as a share count between bars. A quantum of 0 skips the floor.
 
@@ -72,14 +75,40 @@ Each margin purchase opens its own loan lot, which records the origination bar, 
 The engine computes equity as:
 
 ```
-equity = cash + cash_inventories + margin_inventories + dividend_receivables - loan_principal - accrued_interest - residual_debt
+equity = cash + cash_inventories + margin_inventories + dividend_receivables - short_values - loan_principal - accrued_interest - residual_debt - accrued_borrow
 ```
 
-After a complete frozen sell-refinance-buy sequence, cash is never below zero; any deficit becomes residual debt.
+After a complete frozen cover-sell-refinance-buy-open sequence, cash is never below zero; any deficit becomes residual debt.
 
 ### End-of-data close
 
-At the end of the data, the engine sells every open inventory at its last close with normal sell costs. Margin-sale proceeds settle loan principal and accrued interest, with the settlement tail capped at that same last bar. Trip statistics use per-leg VWAP returns.
+At the end of the data, the engine sells every open long inventory and covers every open short at its last close with normal costs. Margin-sale proceeds settle loan principal and accrued interest, with the settlement tail capped at that same last bar; a cover settles its accrued borrow fee. Trip statistics use per-leg VWAP returns.
+
+### Short positions
+
+A negative effective target is a short. Each asset carries a nonnegative short value, the cash reserved against it, and its accrued borrow fee beside the long inventories; the sign lives in the target. The profile fields that shape a short are:
+
+| Field | Meaning | US | Taiwan |
+|---|---|---|---|
+| `short_initial_ratio` | Collateral reserved per unit of proceeds; the position is held at `1 + ratio` times proceeds | 0.5 (Reg T 150%) | n/a |
+| `short_maintenance` | Tiers of `price_below`, `per_share`, `rate`, or `Unsupported` | $2.50/share or 100% below $5; $5/share or 30% at $5 and above | `Unsupported` |
+| `default_borrow_rate` | Annual borrow fee on the short value, per `interest_day_count` | 0 (easy to borrow); `--borrow-rate` overrides | n/a |
+| `short_owes_dividends` | The short pays the cash dividend on the ex-date | true | n/a |
+| `short_share_quantum` | Minimum short share increment | 1 (whole shares) | n/a |
+
+Opening a short sells `|target| x equity` at the fill price, floored to whole shares, pays the sell-side charge, and raises cash by the proceeds. Values stay normalized to the starting capital: the share count is `short_value x capital / price`, and every per-share amount (the per-share maintenance floor, a cash dividend) multiplies that count and is divided by `capital` before it enters cash or the requirement, so for USD 1,000 of capital and three shares a USD 1 dividend is `3 x 1 / 1000 = 0.003` engine units.
+
+The planner reserves `(1 + short_initial_ratio) x proceeds` of cash, so the proceeds cannot buy longs and the collateral comes from equity: the own-equity cost of a short is `short_initial_ratio x |target|`, which the effective-target scaling adds to the long down payments in one joint need. A short open that would need more collateral than the available cash is cut to what fits and counts as a funding clamp. The leverage test for the long leg uses the sum of the positive targets only, so long 1.5 with short -0.5 is financed as a levered book.
+
+Covering buys back at the fill price, pays the buy-side charge, releases the reserve in proportion, and settles the same share of the accrued borrow fee. Within one bar the planner covers before the long sells and opens after the long buys, so a sign flip closes the old leg (its fill row ends at 0) before the new leg opens from 0.
+
+Between bars a short is marked to the price and accrues `short_value x borrow_rate x days / interest_day_count` per calendar night as a liability. On an ex-date it pays `shares x cash_per_share / capital` from cash with no withholding, where the long receipt is booked. The maintenance requirement adds, per short, `max(per_share x shares / capital, rate x short_value)` from the tier whose `price_below` is strictly above the mark price; `--short-maintenance-ratio PCT` replaces the tiers with one flat rate. The close check and the next-open cure also run for a loan-free short book. A breach cures longs first, then shorts by the smallest whole-share cover that restores the requirement. Bankruptcy covers every short. The margin line in the report appears whenever the book had a loan or a short on some bar.
+
+### Overnight cadence
+
+`overnight` runs a third cadence beside `--fill close` and `--fill open`, which are unchanged. On each bar after the first: at the open, the engine marks the overnight position, books ex-date dividends on it (a long receives, a short pays), runs the solvency guard, and if solvent exits every asset to 0 at the open price with normal costs; a call pending from the previous close is dropped, since the exit covers it. At the close the engine enters the bar's effective target at the close price, unless the account went bankrupt at the open. Interest and borrow accrue for the calendar nights between consecutive bars; the last bar accrues nothing because the end-of-data close liquidates at its close.
+
+The exit never updates the previous-target memory, so `rebalance on_change` compares each close against the last close entry: an unchanged target exits at the open and places no entry. The equity curve keeps one point per bar at the close. The fill log gives up to two ordinary cadence rows per asset per date (the open exit, then the close entry) plus the end-of-data close as a third row on the final date when the last bar holds a position. The close entry of a date is the row for that symbol and date whose `to_exposure` is nonzero.
 
 ## Daily market behavior
 
@@ -130,11 +159,15 @@ A breach at the close schedules a minimum cure at the next open. The engine sell
 
 If equity is zero or less at any close, the solvency guard sells all inventories, keeps any unpaid debt as a residual liability, and freezes the account. TW shares the same bankruptcy and solvency-guard logic.
 
+#### Short selling
+
+A US file may declare `short`. The profile reserves 150% of the proceeds (Reg T), charges no borrow fee by default (`--borrow-rate PCT` sets one), floors shorts to whole shares, makes the short pay dividends on the ex-date, and applies the per-share-or-rate maintenance table above ($2.50/share or 100% below $5, $5/share or 30% at $5 and above; `--short-maintenance-ratio PCT` flattens it). Leveraged-ETF short requirements and hard-to-borrow locates are not modeled. See [Short positions](#short-positions).
+
 #### Dividends
 
 US dividends use the same two-plane design as TW. The signal plane adjusts for dividends and splits. The money plane adjusts for splits only.
 
-A US dividend becomes cash on its ex-date, with no receivable period. When dividend cash arrives, the engine runs one normal cost-bearing fill pass toward the current targets.
+A US dividend becomes cash on its ex-date, with no receivable period. When dividend cash arrives, the engine runs one normal cost-bearing fill pass toward the current targets. A short pays the dividend from cash on the ex-date; a payment does not trigger a fill pass.
 
 #### Live trading fidelity
 
@@ -144,12 +177,11 @@ Under `rebalance on_change` or without a declaration, the daemon preserves each 
 
 #### Gaps between simulation and the real market
 
-- The engine does not auto-classify leveraged-ETF house requirements (2x 50%, 3x 75%) or short tiers. Use `--maintenance-ratio` to set the correct rate.
+- The engine does not auto-classify leveraged-ETF house requirements (2x 50%, 3x 75%) on either side. Use `--maintenance-ratio` to set the long rate and `--short-maintenance-ratio` to set the short rate; without the override, shorts use the per-share-or-rate table in [Short selling](#short-selling).
 - The engine does not model the concentration rule, under which a single position at 70% of equities value with a margin balance of $100,000 or more has its requirement raised to 50%.
 - Intraday buying power (4x) and the intraday margin framework are out of scope because the engine works end-of-day.
 - Alpaca's margin rates (6.50% non-elite, 5.00% elite) differ from the 6.25% backtest default; use `--financing-rate` to select either rate for a backtest. Live account data includes posted interest but not the unposted accrual.
 - The engine does not model CAT fee pass-throughs.
-- The engine models neither short selling nor borrow costs.
 - The engine does not model pattern-day-trader rules.
 
 ### Taiwan market (tw)

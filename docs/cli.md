@@ -67,6 +67,7 @@ bt run STRAT... [--baseline M/SYM] [--from D] [--to D]
        [--per-share-fee F] [--per-share-cap F]
        [--financing-rate PERCENT] [--maintenance-ratio PERCENT]
        [--financing-ratio PERCENT] [--loan-term-months N] [--dividend-tax PERCENT]
+       [--borrow-rate PERCENT] [--short-maintenance-ratio PERCENT]
        --capital AMOUNT [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]
 bt daytrade STRAT... [--baseline us/SYM] [--fill open|close] [--leverage N] [--from YYYY-MM-DD] [--to YYYY-MM-DD] [-p name=value] --capital USD [--fee-bps F] [--tax-bps F] [--slip-bps F] [--per-share-fee F] [--per-share-cap F] [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]
 bt target STRAT [--live] [--equity TWD] [--data-dir DIR] [--provisional-close PRICE]
@@ -263,6 +264,8 @@ These checks apply to `bt target` and `bt live` in both markets.
 | `live trading needs one market` | A strategy that mixes US and TW stocks is a usage error, exit 2. |
 | `live trading needs distinct symbols: SYMBOL` | A broker symbol declared twice fails the command, even under distinct aliases. |
 | `--provisional-close needs a one-stock strategy` | `bt target` fails before any broker call. |
+| `<file>: short targets are not supported for tw`, `<file>: overnight is not supported for tw` | A TW strategy that declares `short` or `overnight` fails at parse validation, exit 1, before any broker call. The same messages apply to `bt run`. |
+| `short and overnight are not supported by bt target and bt live yet` | A US strategy that declares `short` or `overnight` fails before any broker call; live support is a later stage. |
 | `history gap in SYMBOL within the last 5 sessions` | The decision fails on the first symbol, in declaration order, that misses one of the last five dates in the union of cached dates. `bt target` exits 1, the US daemon retries until the cutoff, and the TW daemon skips the day. |
 
 History is loaded and freshness-checked per symbol. A gap in any of the last five union dates fails the decision; older gaps pass. Every symbol is then filtered to the common dates, as `bt run` does, before its provisional bar is appended. The DSL compiler runs once with all assets, and `Engine.effective_targets` scales the final and previous target rows jointly. Under on_change, a symbol whose effective target is unchanged keeps its drift. When every symbol is unchanged, US skips before planning.
@@ -662,7 +665,7 @@ Pending T+1 and T+2 settlements never suppress a production session; their signe
 | `--from YYYY-MM-DD` | first cached common date | Set the first date to load. |
 | `--to YYYY-MM-DD` | last cached common date | Set the last date to load. |
 | `-p name=value` | - | Override each matching strategy `param` with a float value. Repeat for more parameters. The command rejects a name that no strategy declares. |
-| `--fill open\|close` | `close` | Select the fill mode. |
+| `--fill open\|close` | `close` | Select the fill mode. A strategy that declares `overnight` sets its own cadence; passing `--fill` with such a file fails with `overnight does not take --fill`. |
 | `--capital AMOUNT` | required | Set the positive finite portfolio starting value in the market's currency: TWD for Taiwan, USD for US. The engine converts exposure to share counts at this scale and charges the minimum fee and per-share fees in money terms. |
 | `--fee-bps F` | per market | Override the fee in basis points for all strategies and the baseline. |
 | `--tax-bps F` | per symbol class | Override the sell tax in basis points for all strategies and the baseline. |
@@ -675,6 +678,8 @@ Pending T+1 and T+2 settlements never suppress a production session; their signe
 | `--per-share-cap F` | US 9.79, TW 0 | Override the per-share sell fee cap in dollars per order. Use 0 for uncapped. |
 | `--financing-ratio PERCENT` | TW 60, US 50 | Set the fresh-loan financing ratio for every asset. TW defaults from cached stockinfo (TWSE/TPEX 60%). US defaults to the Reg T initial-margin ratio of 50%. |
 | `--loan-term-months N` | `18` | Set the TW margin-loan term in calendar months. Use 0 for open-ended TW loans. US loans are always open-ended. |
+| `--borrow-rate PERCENT` | US 0 | Set the annual short borrow fee as a percent of the short value, accrued per calendar day over the market's day count. |
+| `--short-maintenance-ratio PERCENT` | US per-share-or-rate table | Set a flat short maintenance requirement as a percent of the short value, replacing the tiered table ($2.50/share or 100% below $5, $5/share or 30% at $5 and above). |
 | `--data-dir DIR` | `data/` | Set the cache directory. |
 | `--out-dir DIR` | `out/` | Set the output directory. |
 | `--out-name NAME` | strategy names joined with `_vs_` | Set the equity CSV and PNG stem. |
@@ -682,13 +687,13 @@ Pending T+1 and T+2 settlements never suppress a production session; their signe
 | `-h`, `-help`, `--help` | - | Print the run options to standard output and exit with code 0. |
 
 > [!NOTE]
-> The four margin options and `--dividend-tax` apply to every strategy and the baseline. US assets ignore `--loan-term-months`.
+> The four margin options, the two short options, and `--dividend-tax` apply to every strategy and the baseline. US assets ignore `--loan-term-months`; TW assets ignore the short options because TW files cannot declare `short`.
 
 A strategy without `rebalance daily` or `rebalance on_change` rebalances only on a bar where its effective target changes or dividend cash lands. Margin-call sales and TW maturity rollovers trade under either choice. `bt run` prints `warning: <file> does not declare rebalance; trading only when the target changes` to standard error once for each undeclared file; the report on standard output is unchanged. The `--baseline` run always trades on_change. See [Targets and drift](./engine.md#targets-and-drift).
 
 [engine.md](./engine.md) covers the margin and dividend engine in full.
 
-The engine floors Taiwan cash quantities to whole shares and Taiwan margin quantities to 1000-share lots; the floored remainder stays in cash. US quantities stay fractional. See [Share quantum](./engine.md#share-quantum).
+The engine floors Taiwan cash quantities to whole shares and Taiwan margin quantities to 1000-share lots; the floored remainder stays in cash. US long quantities stay fractional; US short quantities are whole shares. See [Share quantum](./engine.md#share-quantum) and [Short positions](./engine.md#short-positions).
 
 The command applies `--from` and `--to` to every input, then keeps only the trading dates common to all strategies and the optional baseline, so every report column covers the same dates. The command stops if fewer than two common dates remain.
 
@@ -696,6 +701,8 @@ The command applies `--from` and `--to` to every input, then keeps only the trad
 > Strategy names must be unique. `one/a.strat` and `two/a.strat` both have the name `a` and produce a duplicate-basename error. A strategy with the basename `baseline` conflicts with `--baseline`.
 
 `--baseline` is shorthand for an always-long target exposure of 1.0. It adds a report and equity column named `baseline`. Strategy metrics get a `W` marker when they are equal to or better than the baseline and an `L` marker when they are worse. Higher is better for Total return, CAGR, Sharpe, and Calmar. Lower is better for MaxDD.
+
+`bt run` fails with `<file>: duplicate short declaration`, `<file>: short applies to daily strategies only`, `<file>: duplicate overnight declaration`, `<file>: overnight applies to daily strategies only`, `<file>: short targets are not supported for tw`, or `<file>: overnight is not supported for tw` at parse validation, before any cache read. See [strategy.md](./strategy.md#short-targets).
 
 ### Cost defaults
 
@@ -718,19 +725,21 @@ With `--fill close`, the target for a bar fills at the close of that bar. The ol
 
 With `--fill open`, the target for a bar fills at the next bar's open. The old exposure earns the return from the previous close to that open. The new exposure then earns the return from the open to the close. Under `rebalance on_change`, if the target does not change, the current exposure earns the full close-to-close return. Under `rebalance daily`, the engine re-plans at every open.
 
-The engine closes a final open exposure at the last close in both modes. It applies the fee, sell tax, and slippage to this close.
+A strategy that declares `overnight` enters its target at each bar's close and exits it at the next bar's open, without `--fill`. The report line prints `fill: overnight` when any strategy in the run declares it; the other strategies and the baseline keep the `--fill` cadence. See [Overnight cadence](./engine.md#overnight-cadence).
+
+The engine closes a final open exposure, long or short, at the last close in every mode. It applies the fee, sell tax, and slippage to a long close and the fee and slippage to a cover.
 
 ## Run outputs
 
 `bt run` prints a report table to standard output. The table has one column for each strategy and, when requested, one baseline column. It shows Total return, CAGR, Sharpe, MaxDD, and Calmar. Below the table, each strategy gets a `name:` line with its stock labels joined by `+`, its trade count, and its win rate. A final line shows the common date range and the fill mode. When the same symbol appears under multiple aliases, the label carries a `#alias` suffix (for example `tw/00685L#core+tw/00685L#trade`).
 
-If a strategy had a loan on at least one bar, `bt run` also prints a margin line:
+If a strategy had a loan or a short on at least one bar, `bt run` also prints a margin line:
 
 ```text
 channel_ladder: margin - financing 6.35%/yr, min maintenance 145.20%, margin calls 1, refinances 3, clamps 0
 ```
 
-A strategy that never had a loan has no margin line.
+A strategy that never had a loan or a short has no margin line. Under `overnight` the fill log gives up to two ordinary cadence rows per asset per date (the open exit, then the close entry) plus the end-of-data close as a third row on the final date when the last bar holds a position.
 
 The default stem joins strategy names in argument order with `_vs_`. A single strategy uses its name as the stem. The optional baseline does not change the stem. `--out-name NAME` replaces this default stem.
 

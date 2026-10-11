@@ -6,6 +6,8 @@ A strategy file is a small script. `bt run` compiles it to a target exposure ser
 
 - [Strategy styles](#strategy-styles)
   - [Target exposure](#target-exposure)
+  - [Short targets](#short-targets)
+  - [Overnight cycle](#overnight-cycle)
   - [Partial orders](#partial-orders)
   - [Legacy entry and exit](#legacy-entry-and-exit)
 - [Multi-stock strategies](#multi-stock-strategies)
@@ -28,6 +30,29 @@ target 0.5 * num(base) + 0.5 * num(base and boost)
 `target` sets the desired exposure for each bar. The expression must give a scalar or a numeric series, and a scalar applies to every bar. `rebalance daily` trades back toward the target every bar. `rebalance on_change` rebalances only on a bar where the effective target changes or dividend cash lands, so positions drift between those bars. Margin-call sales and TW maturity rollovers trade under either choice. A daily file without a rebalance declaration uses on_change, and `bt` prints a warning. [engine.md](./engine.md#targets-and-drift) defines the effective target.
 
 A target above 1.0 requests leveraged exposure. The engine then uses cash and margin inventories with lot-level loan tracking, refinancing, and dividend accounting. [engine.md](./engine.md) is the complete margin and dividend guide.
+
+### Short targets
+
+```
+stock "us/QQQ"
+short
+rebalance daily
+target -0.3
+```
+
+`short` declares that `target` may be negative. A negative target is a short position: the engine sells the shares at the fill price, keeps the proceeds plus the market profile's collateral as reserved cash, and buys them back when the target rises. Without `short`, a target below 0 floors at 0 and nothing fails. With `short`, a target below `-1 / short_initial_ratio` (-2.0 at the US default) floors there. Longs and shorts fund one book: each long needs its down payment and each short its collateral, and the engine scales every target down when the sum exceeds equity. A long and a short never coexist in one stock; a sign change closes the old leg and opens the new one in the same bar. `short` is US only: a TW file fails with `short targets are not supported for tw`. [engine.md](./engine.md#short-positions) describes the short model.
+
+### Overnight cycle
+
+```
+stock "us/QQQ"
+short
+overnight
+rebalance daily
+target -0.3
+```
+
+`overnight` holds each bar's target from that bar's close to the next bar's open and then exits. Every bar enters at the close and exits at the next open; the exit is forced. A negative target needs `short`; without it the target floors at 0. `rebalance daily` re-enters an unchanged target every bar; `rebalance on_change` still exits at the open but skips the entry while the target is unchanged, which leaves the account flat. `bt run --fill` is rejected for an `overnight` file. `overnight` is US only: a TW file fails with `overnight is not supported for tw`. [engine.md](./engine.md#overnight-cadence) describes the cadence.
 
 ### Partial orders
 
@@ -125,6 +150,8 @@ file       ::= { statement }
 statement  ::= "stock" string [ "as" ident ]
              | "bars" positive-integer "m"
              | "rebalance" ( "daily" | "on_change" )
+             | "short"
+             | "overnight"
              | "param" ident "=" number
              | "let" ident "=" expr
              | [ident "."] "entry" "when" expr [ "size" expr ]
@@ -160,6 +187,8 @@ Operator precedence, from low to high: `or`, `and`, `not`, comparisons, `+ -`, `
 - `stock "market/symbol" [as alias]` selects data for the strategy. Use market `tw` or `us`. An unaliased file must contain exactly one `stock` statement. An aliased file may contain one or more, all with aliases.
 - `bars <n>m` declares a timeframe of a positive integer number of minutes, once per file, for one unaliased US stock under `bt daytrade`.
 - `rebalance daily` trades toward the effective target every daily bar; `rebalance on_change` trades when that target changes. Declare at most one per file; it applies to every stock in the file. Without a declaration, a daily strategy uses on_change and bt warns. A `bars` strategy cannot declare rebalance. `rebalance`, `daily`, and `on_change` are reserved words, so you cannot use them as names.
+- `short` declares that targets may be negative, once per file, in daily strategies only. A TW file cannot declare it. `short` is a reserved word.
+- `overnight` holds each bar's target from the close to the next open, once per file, in daily strategies only. A negative target also needs `short`. A TW file cannot declare it. `overnight` is a reserved word.
 - `param name = number` declares a parameter. The CLI flag `-p name=value` can override it.
 - `let name = expr` binds the result of an expression to a name.
 - `entry when expr` and `exit when expr` set boolean conditions. Their dotted forms are `alias.entry when expr` and `alias.exit when expr`. The expression must give a boolean series. Partial orders can repeat these statements and add an inline `size expr`.
@@ -167,7 +196,7 @@ Operator precedence, from low to high: `or`, `and`, `not`, comparisons, `+ -`, `
 - `target expr`, or `alias.target expr`, sets the target exposure. Use it once in target style.
 - `cap number`, or `alias.cap number`, sets the maximum exposure for partial orders. It is optional, and the default is 1.0.
 
-Trips are per stock. Entry and exit prices are the exposure-weighted fill VWAPs, and `net_ret = exit VWAP / entry VWAP - 1`. Trip returns exclude costs and dividends. They are ex-dividend price returns, so dividend cash moves portfolio equity but not the trip win rate.
+Trips are per stock. Entry and exit prices are the exposure-weighted fill VWAPs. A long trip has `net_ret = exit VWAP / entry VWAP - 1`; a short trip opens on the first sale from zero, closes on the cover to zero, and has `net_ret = (entry VWAP - exit VWAP) / entry VWAP`. Trip returns exclude costs, borrow fees, and dividends. They are ex-dividend price returns, so dividend cash moves portfolio equity but not the trip win rate.
 
 ## Values and types
 
