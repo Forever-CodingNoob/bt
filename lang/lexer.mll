@@ -12,6 +12,8 @@ let keyword = function
   | "rebalance" -> REBALANCE
   | "daily" -> DAILY
   | "on_change" -> ON_CHANGE
+  | "short" -> SHORT
+  | "overnight" -> OVERNIGHT
   | "as" -> AS
   | "target" -> TARGET
   | "cap" -> CAP

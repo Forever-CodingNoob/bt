@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - Engine market profiles define short collateral, maintenance tiers, borrow fees, dividend obligations, and share quanta, with US defaults and TW shorts unsupported. `Engine.effective_targets` accepts an optional short collateral ratio to retain signed targets and scale long down payments and short collateral jointly.
+- The strategy parser recognizes `short` and `overnight` declarations. DSL validation rejects duplicate declarations, intraday use, and TW stocks; the single-file compiler validates both and floors short targets at the market collateral cap. Target-style compilation otherwise floors negative targets at zero.
 
 ## [0.12.1] - 2026-10-13
 

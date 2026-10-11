@@ -16,5 +16,7 @@ type stmt =
   | Stock of string * string option
   | Bars of int
   | Rebalance of bool
+  | Short
+  | Overnight
 
 type file = stmt list

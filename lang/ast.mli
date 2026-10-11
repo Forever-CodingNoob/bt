@@ -18,6 +18,8 @@ type stmt =
   | Stock of string * string option
   | Bars of int
   | Rebalance of bool
+  | Short
+  | Overnight
 
 (** A parsed strategy file. *)
 type file = stmt list

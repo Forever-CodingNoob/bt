@@ -180,6 +180,103 @@ let test_rebalance_declaration () =
   with_temp_strategy "rebalance on-change\n" (fun path ->
     assert_failure (fun () -> ignore (Dsl.parse_file path)))
 
+let test_short_declaration () =
+  let parse source function_ =
+    with_temp_strategy source (fun path ->
+      function_ path (Dsl.parse_file path))
+  in
+  let () =
+    parse "stock \"us/SPY\"\nshort\ntarget -1\n" (fun path ast ->
+      (* One short declaration enables shorts but does not imply overnight. *)
+      assert (Dsl.short_of ~filename:path ast);
+      assert (not (Dsl.overnight_of ~filename:path ast)))
+  in
+  let () =
+    parse "stock \"us/SPY\"\novernight\ntarget 1\n" (fun path ast ->
+      (* One overnight declaration enables the cadence, not shorts. *)
+      assert (Dsl.overnight_of ~filename:path ast);
+      assert (not (Dsl.short_of ~filename:path ast)))
+  in
+  let rejects source suffix =
+    parse source (fun path ast ->
+      match Dsl.short_of ~filename:path ast, Dsl.overnight_of ~filename:path ast with
+      | _ -> assert false
+      | exception Failure message -> assert (message = path ^ suffix))
+  in
+  (* Two declarations violate the once-per-file rule. *)
+  rejects "stock \"us/SPY\"\nshort\nshort\ntarget -1\n"
+    ": duplicate short declaration";
+  (* A bars declaration makes the strategy non-daily. *)
+  rejects "stock \"us/SPY\"\nbars 5m\nshort\ntarget -1\n"
+    ": short applies to daily strategies only";
+  (* TW's profile does not support shorts. *)
+  rejects "stock \"tw/0050\"\nshort\ntarget -1\n"
+    ": short targets are not supported for tw";
+  (* The same once-per-file rule applies to overnight. *)
+  rejects "stock \"us/SPY\"\novernight\novernight\ntarget 1\n"
+    ": duplicate overnight declaration";
+  (* Overnight is daily-only even for a long target. *)
+  rejects "stock \"us/SPY\"\nbars 5m\novernight\ntarget 1\n"
+    ": overnight applies to daily strategies only";
+  (* TW does not support the overnight cadence. *)
+  rejects "stock \"tw/0050\"\novernight\ntarget 1\n"
+    ": overnight is not supported for tw";
+  (* Dsl.compile validates like the CLI and derives the market's cap. *)
+  let compile source function_ =
+    with_temp_strategy source (fun path ->
+      function_ path (fun () -> Dsl.compile path ~params:[] sample_bars))
+  in
+  compile "stock \"us/SPY\"\nshort\ntarget -3\n" (fun _ compile ->
+    (* US collateral 0.5 gives a cap of 1 / 0.5 = 2 on all five bars. *)
+    assert_float_array [| -2.; -2.; -2.; -2.; -2. |]
+      (compile ()).Engine.targets.(0));
+  compile "stock \"us/SPY\"\novernight\ntarget 1\n" (fun _ compile ->
+    (* The positive constant target stays 1 on all five bars. *)
+    assert_float_array [| 1.; 1.; 1.; 1.; 1. |] (compile ()).Engine.targets.(0));
+  let compile_rejects source suffix =
+    compile source (fun path compile ->
+      match compile () with
+      | _ -> assert false
+      | exception Failure message -> assert (message = path ^ suffix))
+  in
+  (* File compilation rejects the same duplicate short declaration. *)
+  compile_rejects "stock \"us/SPY\"\nshort\nshort\ntarget -1\n"
+    ": duplicate short declaration";
+  (* File compilation rejects the unsupported TW short profile. *)
+  compile_rejects "stock \"tw/0050\"\nshort\ntarget -1\n"
+    ": short targets are not supported for tw";
+  (* File compilation rejects a short in a non-daily strategy. *)
+  compile_rejects "stock \"us/SPY\"\nbars 5m\nshort\ntarget -1\n"
+    ": short applies to daily strategies only";
+  (* File compilation rejects duplicate overnight declarations. *)
+  compile_rejects "stock \"us/SPY\"\novernight\novernight\ntarget 1\n"
+    ": duplicate overnight declaration";
+  (* File compilation rejects the TW overnight cadence. *)
+  compile_rejects "stock \"tw/0050\"\novernight\ntarget 1\n"
+    ": overnight is not supported for tw";
+  (* File compilation rejects overnight in a non-daily strategy. *)
+  compile_rejects "stock \"us/SPY\"\nbars 5m\novernight\ntarget 1\n"
+    ": overnight applies to daily strategies only";
+  (* A short file without a stock has no market to size the floor. *)
+  compile_rejects "short\ntarget -1\n"
+    ": add a stock statement, e.g. stock \"tw/00685L\""
+
+let test_short_opt_in_clamp () =
+  let compile ?short_cap source =
+    with_temp_strategy source (fun path ->
+      (Dsl.compile_ast ?short_cap (Dsl.parse_file path) ~params:[]
+         ~assets:[ (None, sample_bars) ]).Engine.targets.(0))
+  in
+  (* Without short the zero floor applies and nothing fails. *)
+  assert_float_array [| 0.; 0.; 0.; 0.; 0. |]
+    (compile "stock \"us/SPY\"\ntarget -1\n");
+  (* With short the US cap is 1 / 0.5 = 2; -3 clamps to -2. *)
+  assert_float_array [| -2.; -2.; -2.; -2.; -2. |]
+    (compile ~short_cap:2. "stock \"us/SPY\"\nshort\ntarget -3\n");
+  (* -1 is above the -2 floor, so it stays on all five bars. *)
+  assert_float_array [| -1.; -1.; -1.; -1.; -1. |]
+    (compile ~short_cap:2. "stock \"us/SPY\"\nshort\ntarget -1\n")
+
 let test_parser_aliases () =
   with_temp_strategy
     "stock \"tw/00685L\" as bull\n\
@@ -9648,6 +9745,8 @@ let () =
   test_profile_of_market ();
   test_parser ();
   test_rebalance_declaration ();
+  test_short_declaration ();
+  test_short_opt_in_clamp ();
   test_default_costs ();
   test_parser_aliases ();
   test_filter_dates ();

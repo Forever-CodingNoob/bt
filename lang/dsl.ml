@@ -487,7 +487,44 @@ let rebalance_of ~filename statements =
   in
   chosen
 
-let compile_ast ?extra statements ~params ~assets =
+let declared_once ~filename statements ~name ~tw_message ~matches =
+  let count = List.length (List.filter matches statements) in
+  let () =
+    if count > 1 then
+      failwith
+        (Printf.sprintf "%s: duplicate %s declaration" filename name)
+  in
+  let () =
+    if count = 1
+       && List.exists (function Bars _ -> true | _ -> false) statements
+    then failwith
+      (Printf.sprintf "%s: %s applies to daily strategies only" filename name)
+  in
+  let () =
+    if count = 1
+       && List.exists
+            (function
+              | Stock (spec, _) ->
+                  (match fst (split_spec ~filename spec) with
+                   | "tw" -> true
+                   | _ -> false)
+              | _ -> false)
+            statements
+    then failwith (Printf.sprintf "%s: %s" filename tw_message)
+  in
+  count = 1
+
+let short_of ~filename statements =
+  declared_once ~filename statements ~name:"short"
+    ~tw_message:"short targets are not supported for tw"
+    ~matches:(function Short -> true | _ -> false)
+
+let overnight_of ~filename statements =
+  declared_once ~filename statements ~name:"overnight"
+    ~tw_message:"overnight is not supported for tw"
+    ~matches:(function Overnight -> true | _ -> false)
+
+let compile_ast ?extra ?short_cap statements ~params ~assets =
   let declarations = declared_params_ast statements in
   let () = validate_overrides declarations params in
   let length =
@@ -614,7 +651,7 @@ let compile_ast ?extra statements ~params ~assets =
         | Bars _ ->
             let () = ignore (timeframe statements) in
             environment
-        | Stock _ | Rebalance _ -> environment)
+        | Stock _ | Rebalance _ | Short | Overnight -> environment)
       initial_environment statements
   in
   let () = ignore environment in
@@ -667,14 +704,19 @@ let compile_ast ?extra statements ~params ~assets =
         | [(expression, value)] -> expression, value
         | _ -> assert false
       in
+      let floor_target value =
+        match short_cap with
+        | None -> if value < 0. then 0. else value
+        | Some cap -> if value < -. cap then -. cap else value
+      in
       match value with
-      | Scalar number -> Array.make context.length number
+      | Scalar number -> Array.make context.length (floor_target number)
       | Series series ->
           let () =
             if Array.length series <> context.length then
               fail_expr expression "target series length mismatch"
           in
-          series
+          Array.map floor_target series
       | Bools _ -> fail_expr expression "target must be numeric"
     else if style_2 then
       let () =
@@ -779,11 +821,21 @@ let compile_ast ?extra statements ~params ~assets =
 let compile ?extra source ~params bars =
   let ast = parse_file source in
   let () = ignore (rebalance_of ~filename:source ast) in
-  if not (List.exists (function Stock _ -> true | _ -> false) ast) then
+  let short = short_of ~filename:source ast in
+  let () = ignore (overnight_of ~filename:source ast) in
+  if not short && not (List.exists (function Stock _ -> true | _ -> false) ast)
+  then
     compile_ast ?extra ast ~params ~assets:[ (None, bars) ]
   else
     match stocks_of ~filename:source ast with
-    | [ (None, _, _) ] ->
-        compile_ast ?extra ast ~params ~assets:[ (None, bars) ]
+    | [ (None, market, _) ] ->
+        let short_cap =
+          if short then
+            Some
+              (1.
+               /. (Engine.profile_of_market market).Engine.short_initial_ratio)
+          else None
+        in
+        compile_ast ?extra ?short_cap ast ~params ~assets:[ (None, bars) ]
     | _ ->
         failwith "Dsl.compile supports single unaliased stocks; use compile_ast"

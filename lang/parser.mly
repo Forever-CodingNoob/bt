@@ -5,7 +5,7 @@ open Ast
 %token PARAM LET ENTRY EXIT SIZE WHEN AND OR NOT
 %token NEWLINE TARGET CAP STOCK
 %token BARS
-%token REBALANCE DAILY ON_CHANGE
+%token REBALANCE DAILY ON_CHANGE SHORT OVERNIGHT
 %token <int> MINUTES
 %token ASSIGN EQEQ NEQ LE GE LT GT PLUS MINUS STAR SLASH
 %token LPAREN RPAREN COMMA
@@ -60,6 +60,8 @@ stmt:
 | BARS MINUTES { Bars $2 }
 | REBALANCE DAILY { Rebalance true }
 | REBALANCE ON_CHANGE { Rebalance false }
+| SHORT { Short }
+| OVERNIGHT { Overnight }
 ;
 
 expr:

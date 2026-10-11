@@ -9,6 +9,12 @@ val timeframe : Ast.file -> int option
     Duplicate declarations and use with [bars] name [filename]. *)
 val rebalance_of : filename:string -> Ast.stmt list -> bool option
 
+(** Return whether the file declares [short]. A second declaration, use with [bars], and a tw stock fail with messages that name [filename]. *)
+val short_of : filename:string -> Ast.stmt list -> bool
+
+(** Return whether the file declares [overnight]. A second declaration, use with [bars], and a tw stock fail with messages that name [filename]. *)
+val overnight_of : filename:string -> Ast.stmt list -> bool
+
 (** Extract declared parameter names and defaults in source order. *)
 val declared_params_ast : Ast.stmt list -> (string * float) list
 
@@ -23,16 +29,17 @@ val labels_of_stocks : (string option * string * string) list -> string list
 
 (** Compile a parsed strategy against its aliased asset data.
     [extra] injects predefined numeric series of the same length as the assets.
-    Session series [since_open] and [to_close] require injection by bt daytrade. *)
+    Session series [since_open] and [to_close] require injection by bt daytrade.
+    A target-style series is floored at 0, or at [-short_cap] when [short_cap] is given for a file that declares [short]. *)
 val compile_ast :
   ?extra:(string * float array) list ->
+  ?short_cap:float ->
   Ast.stmt list ->
   params:(string * float) list ->
   assets:(string option * Data.bar array) list ->
   Engine.strategy
 
-(** Parse and compile a single-asset strategy source file, with optional
-    predefined series as in [compile_ast]. *)
+(** Parse and compile a single-asset strategy source file, with optional predefined series as in [compile_ast]. Validates [rebalance], [short], and [overnight] like the CLI; a [short] file floors its targets at the market's [-1 / short_initial_ratio] and needs a stock statement. *)
 val compile :
   ?extra:(string * float array) list ->
   string -> params:(string * float) list -> Data.bar array -> Engine.strategy
