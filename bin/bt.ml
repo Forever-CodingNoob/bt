@@ -9,7 +9,7 @@ let usage =
    \         [--fee-bps F] [--tax-bps F] [--slip-bps F] [--min-fee F]\n\
    \         [--per-share-fee F] [--per-share-cap F]\n\
    \         [--dividend-tax PCT] [--financing-rate PCT] [--maintenance-ratio PCT] [--financing-ratio PCT]\n\
-   \         [--loan-term-months N]\n\
+   \         [--loan-term-months N] [--borrow-rate PCT] [--short-maintenance-ratio PCT]\n\
    \         --capital AMOUNT [--data-dir DIR] [--out-dir DIR] [--out-name NAME] [--no-plot]\n\
    \  bt daytrade STRAT... [--baseline us/SYM] [--fill open|close] [--leverage N]\n\
    \              [--from D] [--to D] [-p name=value] --capital USD\n\
@@ -149,6 +149,8 @@ let load_asset ~market ~symbol ~from_ ~to_ ~data_dir =
 type strategy_input = {
   name : string;
   rebalance : bool;
+  short : bool;
+  overnight : bool;
   stocks : (string option * string * string) list;
   ast : Ast.file;
   declarations : (string * float) list;
@@ -179,11 +181,14 @@ let run argv =
   let maintenance_ratio = ref None in
   let financing_ratio = ref None in
   let loan_term_months = ref 18 in
+  let borrow_rate = ref None in
+  let short_maintenance_ratio = ref None in
   let data_dir = ref "data" in
   let out_dir = ref "out" in
   let out_name = ref None in
   let no_plot = ref false in
   let fill = ref Engine.Close_same in
+  let fill_given = ref false in
   let rec options =
     [ ("--from", Arg.String (fun value -> from_ := Some value), "start date");
       ("--to", Arg.String (fun value -> to_ := Some value), "end date");
@@ -195,6 +200,7 @@ let run argv =
       ("--fill",
        Arg.String
          (fun value ->
+           let () = fill_given := true in
            match value with
            | "open" -> fill := Engine.Open_next
            | "close" -> fill := Engine.Close_same
@@ -230,6 +236,12 @@ let run argv =
       ("--loan-term-months",
        Arg.Set_int loan_term_months,
        "TW margin-loan term in months; 0 disables (default 18)");
+      ("--borrow-rate",
+       Arg.Float (fun value -> borrow_rate := Some value),
+       "annual short borrow fee percent (default: market profile)");
+      ("--short-maintenance-ratio",
+       Arg.Float (fun value -> short_maintenance_ratio := Some value),
+       "flat short maintenance ratio percent (default: market profile tiers)");
       ("--data-dir", Arg.Set_string data_dir, "cache directory");
       ("--out-dir", Arg.Set_string out_dir, "output directory");
       ("--out-name", Arg.String (fun value -> out_name := Some value), "output stem");
@@ -272,9 +284,15 @@ let run argv =
       (fun path name ->
         let ast = Dsl.parse_file path in
         let rebalance = Dsl.rebalance_of ~filename:path ast in
+        let short = Dsl.short_of ~filename:path ast in
+        let overnight = Dsl.overnight_of ~filename:path ast in
         let () =
           if List.exists (function Ast.Bars _ -> true | _ -> false) ast then
             failwith "day trading strategies run under bt daytrade"
+        in
+        let () =
+          if overnight && !fill_given then
+            failwith "overnight does not take --fill"
         in
         let () =
           if rebalance = None then
@@ -284,12 +302,12 @@ let run argv =
         in
         let stocks = Dsl.stocks_of ~filename:path ast in
         (name, ast, stocks, Dsl.declared_params_ast ast,
-         Option.value rebalance ~default:false))
+         Option.value rebalance ~default:false, short, overnight))
       strategy_files names
   in
   let all_markets =
     List.concat_map
-      (fun (_, _, stocks, _, _) ->
+      (fun (_, _, stocks, _, _, _, _) ->
         List.map (fun (_, market, _) -> market) stocks)
       parsed
   in
@@ -306,6 +324,21 @@ let run argv =
         else usage_error "run: all stocks must share one market"
   in
   let profile = Engine.profile_of_market market in
+  let profile =
+    match !borrow_rate with
+    | Some v -> { profile with Engine.default_borrow_rate = v /. 100. }
+    | None -> profile
+  in
+  let profile =
+    match !short_maintenance_ratio with
+    | Some v ->
+        { profile with
+          Engine.short_maintenance =
+            Engine.Tiers
+              [ { price_below = Float.infinity; per_share = 0.;
+                  rate = v /. 100. } ] }
+    | None -> profile
+  in
   let financing_rate =
     match !financing_rate with
     | Some v -> v
@@ -331,13 +364,13 @@ let run argv =
   in
   let inputs =
     List.map
-      (fun (name, ast, stocks, declarations, rebalance) ->
+      (fun (name, ast, stocks, declarations, rebalance, short, overnight) ->
         let assets =
           List.map
             (fun (_, market, symbol) -> load_cached ~market ~symbol)
             stocks
         in
-        { name; stocks; ast; declarations; rebalance; assets })
+        { name; stocks; ast; declarations; rebalance; short; overnight; assets })
       parsed
   in
   let baseline_asset =
@@ -417,7 +450,11 @@ let run argv =
             input.stocks input.assets
         in
         let strategy =
-          Dsl.compile_ast input.ast ~params ~assets:assets_for_compile
+          Dsl.compile_ast
+            ?short_cap:
+              (if input.short then Some (1. /. profile.Engine.short_initial_ratio)
+               else None)
+            input.ast ~params ~assets:assets_for_compile
         in
         let labels = Dsl.labels_of_stocks input.stocks in
         let engine_assets =
@@ -462,7 +499,8 @@ let run argv =
           Engine.run ~dividends
             ~dividend_tax:(!dividend_tax /. 100.)
             engine_assets strategy costs
-            ~profile ~margin:margin_config ~capital ~fill:!fill
+            ~profile ~margin:margin_config ~capital
+            ~fill:(if input.overnight then Engine.Overnight else !fill)
             ~rebalance:input.rebalance
         in
         (input.name, String.concat "+" labels, result))
@@ -502,8 +540,12 @@ let run argv =
     List.map (fun (name, stock, _) -> name, stock) runs
   in
   let output_stem = Report.stem ~names ~out_name:!out_name in
+  let run_fill =
+    if List.exists (fun input -> input.overnight) inputs then Engine.Overnight
+    else !fill
+  in
   Report.print_many
-    ~columns ~baseline:baseline_result ~fill:!fill ~stocks
+    ~columns ~baseline:baseline_result ~fill:run_fill ~stocks
     ~financing_rate;
   Report.write_outputs
     ~out_dir:!out_dir ~stem:output_stem
@@ -576,6 +618,8 @@ let daytrade argv =
   let parsed = List.map2 (fun path name ->
     let ast = Dsl.parse_file path in
     let () = ignore (Dsl.rebalance_of ~filename:path ast) in
+    let () = ignore (Dsl.short_of ~filename:path ast) in
+    let () = ignore (Dsl.overnight_of ~filename:path ast) in
     let minutes = match Dsl.timeframe ast with
       | None -> failwith "bt daytrade requires a bars declaration"
       | Some minutes -> minutes in
@@ -743,9 +787,16 @@ let live_command_args command extra_options argv =
   in
   let ast = Dsl.parse_file strat_path in
   let rebalance = Dsl.rebalance_of ~filename:strat_path ast in
+  let short = Dsl.short_of ~filename:strat_path ast in
+  let overnight = Dsl.overnight_of ~filename:strat_path ast in
   let () =
     if List.exists (function Ast.Bars _ -> true | _ -> false) ast then
       failwith "day trading strategies run under bt daytrade"
+  in
+  let () =
+    (* Stage 1 ships the backtest only; the live short and overnight paths land in stage 2. *)
+    if short || overnight then
+      failwith "short and overnight are not supported by bt target and bt live yet"
   in
   let market =
     match Live.strategy_market (Dsl.stocks_of ~filename:strat_path ast) with

@@ -6462,6 +6462,53 @@ let test_bars_rebalance_target_routing () =
         assert (read_file stderr_path =
           path ^ ": rebalance applies to daily strategies only\n")))
 
+let test_short_cli_errors () =
+  let binary = locate ["_build/default/bin/bt.exe"; "../bin/bt.exe"] in
+  let invoke source command extra expected =
+    let stderr_path = Filename.temp_file "bt-test-short-cli-" ".txt" in
+    Fun.protect ~finally:(fun () -> Sys.remove stderr_path) (fun () ->
+      with_temp_strategy source (fun path ->
+        let invocation = String.concat " "
+          (Filename.quote binary :: command :: Filename.quote path :: extra
+           @ [">/dev/null"; "2>" ^ Filename.quote stderr_path]) in
+        let () = assert (Sys.command invocation = 1) in
+        assert (read_file stderr_path = expected path ^ "\n")))
+  in
+  (* Every daily entry point rejects the TW boundary at parse validation. *)
+  List.iter
+    (fun (command, extra) ->
+      invoke "stock \"tw/0050\"\nshort\ntarget -1\n" command extra
+        (fun path -> path ^ ": short targets are not supported for tw");
+      invoke "stock \"tw/0050\"\novernight\ntarget 1\n" command extra
+        (fun path -> path ^ ": overnight is not supported for tw"))
+    ["run", ["--capital"; "1"]; "target", []; "live", []];
+  (* bt daytrade validates the declarations before any calendar read. *)
+  invoke "stock \"us/SPY\"\nbars 5m\nshort\ntarget 1\n" "daytrade"
+    ["--capital"; "1"]
+    (fun path -> path ^ ": short applies to daily strategies only");
+  invoke "stock \"us/SPY\"\nbars 5m\novernight\ntarget 1\n" "daytrade"
+    ["--capital"; "1"]
+    (fun path -> path ^ ": overnight applies to daily strategies only");
+  invoke "stock \"us/SPY\"\novernight\ntarget 1\n" "run"
+    ["--fill"; "open"; "--capital"; "1"]
+    (fun _ -> "overnight does not take --fill");
+  invoke "stock \"us/SPY\"\nshort\nshort\ntarget -1\n" "run" ["--capital"; "1"]
+    (fun path -> path ^ ": duplicate short declaration");
+  invoke "stock \"us/SPY\"\novernight\novernight\ntarget 1\n" "run"
+    ["--capital"; "1"]
+    (fun path -> path ^ ": duplicate overnight declaration");
+  (* Stage 1 stops US declarations before a target or live broker call. *)
+  List.iter
+    (fun command ->
+      List.iter
+        (fun declaration ->
+          invoke ("stock \"us/SPY\"\n" ^ declaration ^ "\ntarget 1\n")
+            command []
+            (fun _ ->
+              "short and overnight are not supported by bt target and bt live yet"))
+        ["short"; "overnight"])
+    ["target"; "live"]
+
 let test_daytrade_cli () =
   let binary = locate ["_build/default/bin/bt.exe"; "../bin/bt.exe"] in
   with_temp_market "us" (fun root _ ->
@@ -10152,6 +10199,7 @@ let () =
   let () = test_session_series () in
   let () = test_bars_run_routing () in
   let () = test_bars_rebalance_target_routing () in
+  let () = test_short_cli_errors () in
   let () = test_minute_data () in
   test_alpaca_base_urls ();
   test_alpaca_clock_parse ();
