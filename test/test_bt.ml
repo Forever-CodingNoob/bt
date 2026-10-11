@@ -4791,6 +4791,149 @@ let test_short_whole_shares () =
   assert_close (-0.2) (entry "us/SHORT").to_e;
   assert (List.length result.Engine.fills = 4)
 
+let test_carried_short () =
+  let run ?(profile = us_profile) ?(dividends = [||]) bars targets =
+    Engine.run ~dividends:[| dividends |] ~profile [| ("us/TEST", bars) |]
+      { Engine.targets = [| targets |] } [| zero_costs |] ~margin:(no_margin 1)
+      ~capital:1000. ~fill:Engine.Close_same ~rebalance:false
+  in
+  let equity result = Array.of_list (List.map snd result.Engine.equity_curve) in
+  (* Borrow 36%/yr on 0.5 is 0.0005 per calendar day: Friday to Monday
+     accrues three days, Monday to Tuesday one; the end-of-run cover
+     pays the 0.002 from cash. *)
+  let borrow =
+    run ~profile:{ us_profile with Engine.default_borrow_rate = 0.36 }
+      [| bar "2020-01-03" 100. 100.; bar "2020-01-06" 100. 100.;
+         bar "2020-01-07" 100. 100. |]
+      [| -0.5; -0.5; -0.5 |]
+  in
+  assert_float_array [| 1.; 0.9985; 0.998 |] (equity borrow);
+  (* Three shares at 10 are 0.03 of 1000; a USD 1 dividend on the ex-date
+     costs 3 * 1 / 1000 = 0.003. *)
+  let dividend =
+    run ~dividends:[| dividend "2020-01-02" 1. "2020-01-20" |]
+      [| bar "2020-01-01" 10. 10.; bar "2020-01-02" 10. 10. |]
+      [| -0.03; -0.03 |]
+  in
+  assert_float_array [| 1.; 0.997 |] (equity dividend);
+  (* Ten shares shorted at 4: tier 1 requires max(2.5 * 10 / 1000, 1.0 *
+     0.04) = 0.04, ratio 25. At 6 the band switches: max(5 * 10 / 1000,
+     0.3 * 0.06) = 0.05, the per-share floor, against equity 0.98. *)
+  let tiers =
+    run [| bar "2020-01-01" 4. 4.; bar "2020-01-02" 6. 6. |] [| -0.04; -0.04 |]
+  in
+  (match tiers.Engine.margin_stats.Engine.min_maintenance with
+   | Some ratio -> assert_close (0.98 /. 0.05) ratio
+   | None -> assert false);
+  (* A loan-free short of 2.0 under a flat 30% requirement: at 120 the
+     short is 2.4 against equity 0.6, required 0.72, so the close records
+     a call. The next open covers deficit 0.12 / relief 0.3 = 0.4, keeping
+     2.0 floored to 16 shares at 120 = 1.92, a cover of 0.48 from
+     exposure -4 to -3.2. The trip sold at 100 and covered at 120. *)
+  let flat =
+    { us_profile with
+      Engine.short_maintenance =
+        Engine.Tiers [ { price_below = Float.infinity; per_share = 0.;
+                         rate = 0.3 } ] }
+  in
+  let cure =
+    run ~profile:flat
+      [| bar "2020-01-01" 100. 100.; bar "2020-01-02" 100. 120.;
+         bar "2020-01-03" 120. 120. |]
+      [| -2.; -2.; -2. |]
+  in
+  assert (cure.Engine.margin_stats.Engine.margin_call_dates = [ "2020-01-02" ]);
+  assert_float_array [| 1.; 0.6; 0.6 |] (equity cure);
+  (match cure.Engine.fills with
+   | [ _; cover; close ] ->
+       assert (cover.date = "2020-01-03" && cover.price = 120.);
+       assert_close (-4.) cover.from_e;
+       assert_close (-3.2) cover.to_e;
+       assert_close (-3.2) close.from_e;
+       assert_close 0. close.to_e
+   | _ -> assert false);
+  (match cure.Engine.trips with
+   | [ trip ] -> assert_close (-0.2) trip.net_ret
+   | _ -> assert false);
+  (* A gap to 160 marks the 2.0 short at 3.2 against cash 3.0: the
+     solvency guard covers everything, debt carries the 0.2 deficit, and
+     the account stays frozen. *)
+  let gap =
+    run [| bar "2020-01-01" 100. 100.; bar "2020-01-02" 160. 160.;
+           bar "2020-01-03" 100. 100. |]
+      [| -2.; -2.; -2. |]
+  in
+  assert_float_array [| 1.; -0.2; -0.2 |] (equity gap);
+  assert (List.length gap.Engine.fills = 2);
+  assert (gap.Engine.margin_stats.Engine.margin_call_dates = [ "2020-01-02" ])
+
+let test_short_partial_cover_bankruptcy () =
+  let bars =
+    [| bar "2020-01-01" 100. 100.; bar "2020-01-02" 200. 200.;
+       bar "2020-01-03" 1000. 1000. |]
+  in
+  let result =
+    Engine.run ~profile:us_profile [| ("us/TEST", bars) |]
+      { Engine.targets = [| [| -0.5; -0.8; -0.8 |] |] }
+      [| zero_costs |] ~margin:(no_margin 1) ~capital:1000.
+      ~fill:Engine.Close_same ~rebalance:false
+  in
+  (* Five shares sell at 100; three cover at 200 and two at 1000.
+     The share-weighted exit is 520, so (100 - 520) / 100 = -4.2. *)
+  (match result.Engine.trips with
+   | [ trip ] -> assert (abs_float (trip.net_ret +. 4.2) < 1e-12)
+   | _ -> assert false);
+  (* Entry is -500/1000; the partial cover goes from -1000/500 to
+     -400/500; bankruptcy logs the held 2000/1000 short, then zero. *)
+  (match result.Engine.fills with
+   | [ entry; partial; forced ] ->
+       assert_close 0. entry.from_e;
+       assert_close (-0.5) entry.to_e;
+       assert_close (-2.) partial.from_e;
+       assert_close (-0.8) partial.to_e;
+       assert_close (-2.) forced.from_e;
+       assert_close 0. forced.to_e
+   | _ -> assert false);
+  (* Cash 1500 - 600 - 2000 leaves residual debt 1100. *)
+  assert_close (-1.1) (final_equity result)
+
+let test_short_cure_minimum_fee () =
+  let bars =
+    [| bar "2020-01-01" 1. 1.; bar "2020-01-02" 1. 1.838;
+       bar "2020-01-03" 1.838 1.838; bar "2020-01-04" 1.838 1.838 |]
+  in
+  let costs = { zero_costs with Engine.min_fee = 1. } in
+  let margin = { (no_margin 1) with Engine.maintenance_override = None } in
+  let result =
+    Engine.run ~profile:us_profile [| ("us/TEST", bars) |]
+      { Engine.targets = [| [| -0.301; -0.301; -0.301; -0.301 |] |] }
+      [| costs |] ~margin ~capital:1000.
+      ~fill:Engine.Close_same ~rebalance:false
+  in
+  (* 300 shares open at 1 with a USD 1 fee: equity 0.999.
+     At 1.838 equity is 0.999 - 300 * 0.838 / 1000 = 0.7476,
+     below 300 * 2.5 / 1000 = 0.75. One cure must suffice. *)
+  assert
+    (result.Engine.margin_stats.Engine.margin_call_dates = [ "2020-01-02" ]);
+  (* Covering two shares costs USD 1: equity 0.7466, and the remaining
+     298 shares require 298 * 2.5 / 1000 = 0.745. *)
+  let cured_equity = snd (List.nth result.Engine.equity_curve 2) in
+  assert_close 0.7466 cured_equity;
+  assert (cured_equity >= 0.745);
+  (match result.Engine.fills with
+   | [ _; cover; close ] ->
+       (* The cure at the next open keeps 298 * 1.838 / 1000 = 0.547724,
+          normalized by pre-fill equity 0.7476. *)
+       assert (cover.date = "2020-01-03");
+       assert_close (-0.547724 /. 0.7476) cover.to_e;
+       (* No second cure at unchanged prices; only the terminal cover. *)
+       assert (close.date = "2020-01-04");
+       assert_close 0. close.to_e
+   | _ -> assert false);
+  (* Terminal cover costs the final USD 1 and leaves no requirement. *)
+  assert_close 0.7456 (final_equity result);
+  assert (final_equity result >= 0.)
+
 let test_us_cure_tail_aware () =
   (* Entry $10, target 2.0, ratio 0.5 -> mv = 2.0, loan = 1.0.
      financing_rate 36% -> 0.001/day on 360-day basis.
@@ -10106,6 +10249,9 @@ let () =
   test_short_reserved_cash_run ();
   test_engine_short_leg_run ();
   test_short_whole_shares ();
+  test_carried_short ();
+  test_short_partial_cover_bankruptcy ();
+  test_short_cure_minimum_fee ();
   let () = test_engine_fill_planner () in
   let () = test_engine_share_quantum () in
   let () = test_engine_tw_sell_partition () in

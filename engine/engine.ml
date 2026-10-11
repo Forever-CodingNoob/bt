@@ -259,6 +259,15 @@ let absolute_buy_cost costs capital index value =
   in
   commission +. value *. costs.slip_bps /. 10000.
 
+let short_requirement_rate (profile : market_profile) ~price =
+  match profile.short_maintenance with
+  | Unsupported -> 0.
+  | Tiers tiers ->
+      let tier =
+        List.find (fun (tier : short_tier) -> price < tier.price_below) tiers
+      in
+      Float.max (tier.per_share /. price) tier.rate
+
 let clamp_target value =
   if Float.is_nan value || value < 0. then 0. else value
 
@@ -1393,7 +1402,14 @@ let run ?dividends ?(dividend_tax = 0.)
     fold_assets
       (fun acc index ->
         let value = total_value index in
-        if value > 0. then acc +. tier_rate index price_at *. value
+        let acc =
+          if value > 0. then acc +. tier_rate index price_at *. value
+          else acc
+        in
+        if short_values.(index) > 0. then
+          acc
+          +. short_requirement_rate profile ~price:(price_at index)
+             *. short_values.(index)
         else acc)
       0.
   in
@@ -1437,6 +1453,20 @@ let run ?dividends ?(dividend_tax = 0.)
             else 0.
           in
           let total = cash_amount +. margin_amount in
+          let owed =
+            if profile.short_owes_dividends && short_values.(index) > 0.
+               && price > 0.
+            then
+              short_values.(index) /. price *. event.Data.cash_per_share
+            else 0.
+          in
+          let () =
+            if owed > 0. then
+              let () = cash := !cash -. owed in
+              if !cash < 0. then
+                let () = debt := !debt -. !cash in
+                cash := 0.
+          in
           if total > 0. then
             if is_us index then
               let () = cash := !cash +. total in
@@ -1646,7 +1676,7 @@ let run ?dividends ?(dividend_tax = 0.)
   in
   let track_maintenance price_at =
     let total_loan = total_loans () in
-    if total_loan > 0. then
+    if total_loan > 0. || sum short_values > 0. then
       let ratio =
         match profile.maintenance with
         | Collateral_over_loan -> sum margin_values /. total_loan
@@ -1851,13 +1881,12 @@ let run ?dividends ?(dividend_tax = 0.)
     if value > 0. then
       let equity_now = equity () in
       let fraction = if remaining = 0. then 1. else value /. before in
-      let open_exposure = sell_exposure.(index) -. buy_exposure.(index) in
       let covered_e =
         if equity_now > 0. then value /. equity_now
-        else open_exposure *. fraction
+        else value
       in
       let from_e =
-        if equity_now > 0. then -. before /. equity_now else -. open_exposure
+        if equity_now > 0. then -. before /. equity_now else -. before
       in
       let to_e = if remaining = 0. then 0. else from_e +. covered_e in
       let cost_value =
@@ -1867,9 +1896,11 @@ let run ?dividends ?(dividend_tax = 0.)
         else absolute_buy_cost costs capital index value
       in
       let borrow = short_borrow.(index) *. fraction in
-      let () = buy_value.(index) <- buy_value.(index) +. covered_e *. price in
+      (* Short trip weights are shares per unit of capital, not exposure
+         normalized by each fill's changing equity. *)
+      let () = buy_value.(index) <- buy_value.(index) +. value in
       let () =
-        buy_exposure.(index) <- buy_exposure.(index) +. covered_e
+        buy_exposure.(index) <- buy_exposure.(index) +. value /. price
       in
       let () = short_values.(index) <- remaining in
       let () =
@@ -1946,6 +1977,13 @@ let run ?dividends ?(dividend_tax = 0.)
   let accrue_interest ~bar_index ~date ~prev_date =
     let days = day_number date - day_number prev_date in
     iter_assets (fun index ->
+      let () =
+        if short_values.(index) > 0. then
+          short_borrow.(index) <-
+            short_borrow.(index)
+            +. short_values.(index) *. profile.default_borrow_rate
+               *. float_of_int days /. profile.interest_day_count
+      in
       List.iter
         (fun lot ->
           if bar_index > settlement_start_index lot then
@@ -1986,15 +2024,13 @@ let run ?dividends ?(dividend_tax = 0.)
               if item.plan_short_final = 0. then 1.
               else item.plan_short_cover /. before
             in
-            let exposure =
-              abs_float (item.plan_short_to_e -. item.plan_short_from_e)
-            in
+            let quantity = item.plan_short_cover /. price_at index in
             let () =
               buy_value.(index) <-
-                buy_value.(index) +. exposure *. price_at index
+                buy_value.(index) +. item.plan_short_cover
             in
             let () =
-              buy_exposure.(index) <- buy_exposure.(index) +. exposure
+              buy_exposure.(index) <- buy_exposure.(index) +. quantity
             in
             let () = short_values.(index) <- item.plan_short_final in
             let () =
@@ -2202,15 +2238,13 @@ let run ?dividends ?(dividend_tax = 0.)
                 if item.plan_short_from_e = 0. then
                   start_trip ~short:true index ~date
               in
-              let exposure =
-                abs_float (item.plan_short_to_e -. item.plan_short_from_e)
-              in
+              let quantity = item.plan_short_open /. price_at index in
               let () =
                 sell_value.(index) <-
-                  sell_value.(index) +. exposure *. price_at index
+                  sell_value.(index) +. item.plan_short_open
               in
               let () =
-                sell_exposure.(index) <- sell_exposure.(index) +. exposure
+                sell_exposure.(index) <- sell_exposure.(index) +. quantity
               in
               let () = short_values.(index) <- item.plan_short_final in
               let () =
@@ -2266,15 +2300,111 @@ let run ?dividends ?(dividend_tax = 0.)
       let () = bankrupt := true in
       pending_liquidation := false
   in
+  let cure_shorts ~date price_at =
+    let e = equity () in
+    let required = required_margin price_at in
+    let total_short = sum short_values in
+    if total_short > 0. && e > 0. && e < required then
+      let deficit = required -. e in
+      let weighted =
+        fold_assets
+          (fun acc index ->
+            if short_values.(index) > 0. then
+              acc
+              +. short_requirement_rate profile ~price:(price_at index)
+                 *. short_values.(index)
+            else acc)
+          0.
+      in
+      let cost_per_unit =
+        fold_assets
+          (fun acc index ->
+            if short_values.(index) > 0. then
+              acc
+              +. charge index ~equity_before:e ~delta:1.
+                   ~price:(price_at index)
+                 *. short_values.(index)
+            else acc)
+          0.
+        /. total_short
+      in
+      let relief = weighted /. total_short -. cost_per_unit in
+      let cover_total =
+        if relief > 0. then Float.min total_short (deficit /. relief)
+        else total_short
+      in
+      let fraction = cover_total /. total_short in
+      let keeps =
+        Array.init asset_count (fun index ->
+          floor_value ~capital ~quantum:profile.short_share_quantum
+            ~price:(price_at index)
+            ((1. -. fraction) *. short_values.(index)))
+      in
+      let projected_surplus () =
+        let projected_equity =
+          fold_assets
+            (fun acc index ->
+              let value = short_values.(index) -. keeps.(index) in
+              if value > 0. then
+                acc -. absolute_buy_cost costs capital index value
+              else acc)
+            e
+        in
+        let projected_required =
+          fold_assets
+            (fun acc index ->
+              let value = total_value index in
+              let acc =
+                if value > 0. then acc +. tier_rate index price_at *. value
+                else acc
+              in
+              acc +. short_requirement_rate profile ~price:(price_at index)
+                 *. keeps.(index))
+            0.
+        in
+        projected_equity -. projected_required
+      in
+      (* A minimum fee is per fill, not a linear rate. Check the rounded
+         cover's actual charge before filling; never cover beyond the holding. *)
+      let () =
+        iter_assets (fun index ->
+          let price = price_at index in
+          let rate = short_requirement_rate profile ~price in
+          let rec size () : unit =
+            let surplus = projected_surplus () in
+            if keeps.(index) > 0. && surplus < 0. then
+              let next =
+                if short_quantized then
+                  let shares =
+                    floor_shares ~capital ~price
+                      ~quantum:profile.short_share_quantum keeps.(index)
+                  in
+                  share_value ~capital ~price
+                    (Float.max 0. (shares -. profile.short_share_quantum))
+                else Float.max 0. (keeps.(index) +. surplus /. rate)
+              in
+              let () =
+                keeps.(index) <- if next < keeps.(index) then next else 0.
+              in
+              size ()
+          in
+          size ())
+      in
+      iter_assets (fun index ->
+        cover_short index ~date ~price:(price_at index)
+          ~remaining:keeps.(index))
+  in
   let minimum_cure ~bar_index ~date price_at =
     let e = equity () in
     let total_margin = sum margin_values in
-    if total_margin <= 0. || e <= 0. then
+    if e <= 0. || (total_margin <= 0. && sum short_values <= 0.) then
       bankrupt_all ~bar_index ~date price_at
     else
       let required = required_margin price_at in
       if e >= required then ()
       else
+        let () =
+          if total_margin > 0. then
         let deficit = required -. e in
         (* Relief per dollar of margin sold: each dollar sold reduces
            required by its tier weight, and costs reduce equity.
@@ -2394,6 +2524,10 @@ let run ?dividends ?(dividend_tax = 0.)
               if total_value index = 0. then close_trip index ~date)
         in
         if equity () <= 0. then
+          bankrupt_all ~bar_index ~date price_at
+        in
+        let () = if not !bankrupt then cure_shorts ~date price_at in
+        if not !bankrupt && equity () <= 0. then
           bankrupt_all ~bar_index ~date price_at
   in
   let rec walk_bars t =
@@ -2534,7 +2668,8 @@ let run ?dividends ?(dividend_tax = 0.)
               let () = ignore (track_maintenance close_price_at) in
               let e = equity () in
               let required = required_margin close_price_at in
-              if total_loans () > 0. && e < required then
+              if (total_loans () > 0. || sum short_values > 0.) && e < required
+              then
                 let () = record_call date in
                 pending_liquidation := true
       in
