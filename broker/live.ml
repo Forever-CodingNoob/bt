@@ -107,7 +107,8 @@ let us_plan_state ~cash ~held ~prices ~ratio ~previous_targets =
     cash_values = Array.mapi (fun i value -> value -. margin_values.(i)) values;
     margin_values; loans; interests = Array.make count 0.;
     tail_interests = Array.make count 0.; debt = 0.; receivables = 0.;
-    previous_targets }
+    previous_targets; short_values = Array.make count 0.;
+    short_reserved = Array.make count 0.; short_borrow = Array.make count 0. }
 
 let us_plan_action ~rebalance ~symbols ~date ~(account : Alpaca.account_t)
     ~position_symbols ~held ~prices ~targets ~previous_targets =
@@ -857,7 +858,10 @@ let decide ?provisional_close ?previous_session ?equity ?tw_balance
       let state : Engine.plan_state =
         { equity; cash; cash_values; margin_values; loans; interests;
           tail_interests = Array.make (Array.length symbols) 0.;
-          debt = 0.; receivables = 0.; previous_targets } in
+          debt = 0.; receivables = 0.; previous_targets;
+          short_values = Array.make (Array.length symbols) 0.;
+          short_reserved = Array.make (Array.length symbols) 0.;
+          short_borrow = Array.make (Array.length symbols) 0. } in
       let plan = Engine.plan_fills ~costs:(Array.map tw_live_debit_costs symbols)
         ~capital:1. ~profile:(Engine.profile_of_market "tw")
         ~financing_ratios:ratios ~state ~prices ~targets ~force:rebalance in

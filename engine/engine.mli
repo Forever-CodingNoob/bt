@@ -55,7 +55,10 @@ type result = {
   margin_stats : margin_stats;
 }
 
-(** One asset's frozen sell, refinancing, and buy legs, in account-value units. *)
+(** One asset's frozen sell, refinancing, buy, and short legs, in
+    account-value units. The short leg covers before the long leg sells
+    and opens after the long leg buys; a long and a short never coexist
+    in one asset. *)
 type planned_asset = {
   plan_changed : bool;
   plan_final_value : float;
@@ -79,6 +82,18 @@ type planned_asset = {
   plan_refinance_cash_buy_cost : float;
   plan_refinance_margin_sell_cost : float;
   plan_refinance_margin_buy_cost : float;
+  plan_short_open : float;
+  (** Short value sold at the fill price; proceeds raise cash. *)
+  plan_short_cover : float;
+  (** Short value bought back at the fill price. *)
+  plan_short_final : float;
+  (** Short value held after the fill, floored to the short quantum. *)
+  plan_short_cost : float;
+  (** Sell-side charge of the open plus buy-side charge of the cover. *)
+  plan_short_borrow : float;
+  (** Accrued borrow fee settled from cash by the cover. *)
+  plan_short_from_e : float;
+  plan_short_to_e : float;
 }
 
 (** Frozen portfolio fill plan before atomic execution. *)
@@ -89,7 +104,10 @@ type fill_plan = {
   planned_funding_clamp : bool;
 }
 
-(** Explicit account and inventory inputs to the pure fill planner. *)
+(** Explicit account and inventory inputs to the pure fill planner.
+    [short_values] is the marked short exposure, [short_reserved] the
+    cash reserved against it, and [short_borrow] its accrued borrow fee,
+    all nonnegative and per asset. *)
 type plan_state = {
   equity : float;
   cash : float;
@@ -101,6 +119,9 @@ type plan_state = {
   debt : float;
   receivables : float;
   previous_targets : float array;
+  short_values : float array;
+  short_reserved : float array;
+  short_borrow : float array;
 }
 
 (** TW collateral-over-loan or US equity-over-required maintenance. *)

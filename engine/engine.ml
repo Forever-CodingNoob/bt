@@ -75,6 +75,13 @@ type planned_asset = {
   plan_refinance_cash_buy_cost : float;
   plan_refinance_margin_sell_cost : float;
   plan_refinance_margin_buy_cost : float;
+  plan_short_open : float;
+  plan_short_cover : float;
+  plan_short_final : float;
+  plan_short_cost : float;
+  plan_short_borrow : float;
+  plan_short_from_e : float;
+  plan_short_to_e : float;
 }
 
 type fill_plan = {
@@ -95,6 +102,9 @@ type plan_state = {
   debt : float;
   receivables : float;
   previous_targets : float array;
+  short_values : float array;
+  short_reserved : float array;
+  short_borrow : float array;
 }
 
 type receivable = {
@@ -240,6 +250,15 @@ let absolute_sell_cost costs capital index ~price value =
   +. value *. (costs.tax_bps +. costs.slip_bps) /. 10000.
   +. taf
 
+let absolute_buy_cost costs capital index value =
+  let costs = costs.(index) in
+  let commission = value *. costs.fee_bps /. 10000. in
+  let commission =
+    if costs.min_fee > 0. then Float.max commission (costs.min_fee /. capital)
+    else commission
+  in
+  commission +. value *. costs.slip_bps /. 10000.
+
 let clamp_target value =
   if Float.is_nan value || value < 0. then 0. else value
 
@@ -329,10 +348,23 @@ let plan_fills ~costs ~capital ~profile ~financing_ratios
   let current_tails = state.tail_interests in
   let prev_eff = state.previous_targets in
   let eff = targets in
+  let short_values = state.short_values in
+  let short_reserved = state.short_reserved in
+  let short_borrow = state.short_borrow in
+  let short_active =
+    Array.exists (fun value -> value < 0.) eff
+    || Array.exists (fun value -> value > 0.) short_values
+  in
+  let zeros = Array.make asset_count 0. in
+  let long_eff index = if eff.(index) < 0. then 0. else eff.(index) in
   let cash = state.cash in
   let debt = state.debt in
   let e0 = state.equity in
-  let unlevered = sum eff <= 1. in
+  let unlevered =
+    if short_active then
+      sum (Array.map (fun value -> Float.max 0. value) eff) <= 1.
+    else sum eff <= 1.
+  in
   let quantized =
     profile.cash_share_quantum > 0. || profile.margin_share_quantum > 0.
   in
@@ -368,11 +400,74 @@ let plan_fills ~costs ~capital ~profile ~financing_ratios
         let post_loans = Array.copy current_loans in
         let post_interests = Array.copy current_interests in
         let post_tails = Array.copy current_tails in
+        let short_opens =
+          if short_active then Array.make asset_count 0. else zeros
+        in
+        let short_covers =
+          if short_active then Array.make asset_count 0. else zeros
+        in
+        let short_finals =
+          if short_active then Array.copy short_values else short_values
+        in
+        let short_costs =
+          if short_active then Array.make asset_count 0. else zeros
+        in
+        let short_borrows =
+          if short_active then Array.make asset_count 0. else zeros
+        in
+        let short_from_es =
+          if short_active then Array.make asset_count 0. else zeros
+        in
+        let short_to_es =
+          if short_active then Array.make asset_count 0. else zeros
+        in
+        let post_reserved =
+          if short_active then Array.copy short_reserved else short_reserved
+        in
+        let post_borrow =
+          if short_active then Array.copy short_borrow else short_borrow
+        in
+        let short_clamp = ref false in
+        let () =
+          if short_active then
+          iter_assets (fun index ->
+            let before = short_values.(index) in
+            let () =
+              if before > 0. then short_from_es.(index) <- -. before /. e0
+            in
+            if changed.(index) then
+              let desired =
+                if eff.(index) < 0. then
+                  floor_value ~quantum:profile.short_share_quantum
+                    ~price:(price_at index) (-. eff.(index) *. e1)
+                else 0.
+              in
+              if desired < before then
+                let cover = before -. desired in
+                let fraction = if desired = 0. then 1. else cover /. before in
+                let () = short_covers.(index) <- cover in
+                let () = short_finals.(index) <- desired in
+                let () =
+                  short_costs.(index) <-
+                    charge index ~equity_before:equity_basis
+                      ~delta:(cover /. equity_basis) ~price:(price_at index)
+                    *. equity_basis
+                in
+                let () =
+                  short_borrows.(index) <- short_borrow.(index) *. fraction
+                in
+                let () =
+                  post_reserved.(index) <-
+                    short_reserved.(index) *. (1. -. fraction)
+                in
+                post_borrow.(index) <-
+                  short_borrow.(index) -. short_borrows.(index))
+        in
         let () =
           iter_assets (fun index ->
             let current = total_value index in
             let final_value =
-              if changed.(index) then eff.(index) *. e1 else current
+              if changed.(index) then long_eff index *. e1 else current
             in
             let trade = final_value -. current in
             let from_e = current /. e0 in
@@ -381,7 +476,7 @@ let plan_fills ~costs ~capital ~profile ~financing_ratios
             let () = from_es.(index) <- from_e in
             let () =
               to_es.(index) <-
-                if changed.(index) then eff.(index) else from_e
+                if changed.(index) then long_eff index else from_e
             in
             if changed.(index) && trade < 0. then
               let amount = -. trade in
@@ -468,6 +563,64 @@ let plan_fills ~costs ~capital ~profile ~financing_ratios
         let available =
           e1 -. post_assets +. post_liabilities +. debt
           -. total_receivables ()
+        in
+        let available =
+          if short_active then
+            available +. sum short_finals +. sum post_borrow
+            -. sum post_reserved
+          else available
+        in
+        let available =
+          if not short_active then available
+          else
+          fold_assets
+            (fun available index ->
+              let before = short_values.(index) in
+              if changed.(index) && eff.(index) < 0. then
+                let desired =
+                  floor_value ~quantum:profile.short_share_quantum
+                    ~price:(price_at index) (-. eff.(index) *. e1)
+                in
+                if desired > before then
+                  let ratio = profile.short_initial_ratio in
+                  let affordable =
+                    if available <= 0. then 0.
+                    else
+                      floor_value ~quantum:profile.short_share_quantum
+                        ~price:(price_at index) (available /. ratio)
+                  in
+                  let open_, final =
+                    if ratio *. (desired -. before) > available +. tolerance
+                    then
+                      let () = short_clamp := true in
+                      let open_ = Float.min (desired -. before) affordable in
+                      open_, before +. open_
+                    else desired -. before, desired
+                  in
+                  let () = short_opens.(index) <- open_ in
+                  let () = short_finals.(index) <- final in
+                  let () =
+                    if open_ > 0. then
+                      short_costs.(index) <-
+                        charge index ~equity_before:equity_basis
+                          ~delta:(-. open_ /. equity_basis)
+                          ~price:(price_at index)
+                        *. equity_basis
+                  in
+                  let () =
+                    post_reserved.(index) <-
+                      post_reserved.(index) +. (1. +. ratio) *. open_
+                  in
+                  available -. ratio *. open_
+                else available
+              else available)
+            available
+        in
+        let () =
+          if short_active then
+          iter_assets (fun index ->
+            if short_finals.(index) > 0. then
+              short_to_es.(index) <- -. short_finals.(index) /. equity_basis)
         in
         let requested_buy_total =
           fold_assets
@@ -738,7 +891,7 @@ let plan_fills ~costs ~capital ~profile ~financing_ratios
                   if quantized then trades.(index) /. equity_basis
                   else if scaled_buys.(index) then
                     to_es.(index) -. current /. equity_basis
-                  else eff.(index) -. current /. equity_basis
+                  else long_eff index -. current /. equity_basis
                 in
                 let cost =
                   charge index ~equity_before:equity_basis ~delta:delta_e
@@ -748,7 +901,8 @@ let plan_fills ~costs ~capital ~profile ~financing_ratios
                 let () = trade_costs.(index) <- cost in
                 total_cost +. cost
               else total_cost)
-            (sum interest_tails)
+            (if short_active then sum interest_tails +. sum short_costs
+             else sum interest_tails)
         in
         let cash_refinance_values = Array.make asset_count 0. in
         let margin_refinance_values = Array.make asset_count 0. in
@@ -891,18 +1045,31 @@ let plan_fills ~costs ~capital ~profile ~financing_ratios
                   plan_refinance_margin_sell_cost =
                     margin_refinance_sell_costs.(index);
                   plan_refinance_margin_buy_cost =
-                    margin_refinance_buy_costs.(index) });
+                    margin_refinance_buy_costs.(index);
+                  plan_short_open = short_opens.(index);
+                  plan_short_cover = short_covers.(index);
+                  plan_short_final = short_finals.(index);
+                  plan_short_cost = short_costs.(index);
+                  plan_short_borrow = short_borrows.(index);
+                  plan_short_from_e = short_from_es.(index);
+                  plan_short_to_e = short_to_es.(index) });
           planned_total_cost = total_cost;
           planned_refinances =
             Array.exists (fun value -> value > 0.) cash_refinance_values
             || Array.exists
                  (fun value -> value > 0.) margin_refinance_values;
-          planned_funding_clamp = funding_clamp }
+          planned_funding_clamp = funding_clamp || !short_clamp }
       in
       let projected_cash plan =
         let projected =
           Array.fold_left
             (fun projected item ->
+              let projected =
+                if short_active then
+                  projected +. item.plan_short_open -. item.plan_short_cover
+                  -. item.plan_short_cost -. item.plan_short_borrow
+                else projected
+              in
               if item.plan_changed && item.plan_trade < 0. then
                 projected -. item.plan_trade -. item.plan_repayment
                 -. item.plan_interest_settled -. item.plan_trade_cost
@@ -933,8 +1100,11 @@ let plan_fills ~costs ~capital ~profile ~financing_ratios
         let buy_value plan =
           Array.fold_left
             (fun total item ->
-              if item.plan_trade > 0. then total +. item.plan_trade
-              else total)
+              let total =
+                if item.plan_trade > 0. then total +. item.plan_trade
+                else total
+              in
+              if short_active then total +. item.plan_short_open else total)
             0. plan.planned_assets
         in
         let lower_buy left right =
@@ -950,7 +1120,7 @@ let plan_fills ~costs ~capital ~profile ~financing_ratios
               compute_plan buy_scale next
             else
               match earlier with
-              | Some value when quantized && next = value ->
+              | Some value when (quantized || short_active) && next = value ->
                   lower_buy plan (compute_plan buy_scale next)
               | None | Some _ ->
                   iterate (remaining - 1) (Some e1) next
@@ -1087,6 +1257,16 @@ let run ?dividends ?(dividend_tax = 0.)
   let buy_exposure = Array.make asset_count 0. in
   let sell_value = Array.make asset_count 0. in
   let sell_exposure = Array.make asset_count 0. in
+  let short_values = Array.make asset_count 0. in
+  let short_reserved = Array.make asset_count 0. in
+  let short_borrow = Array.make asset_count 0. in
+  let trip_short = Array.make asset_count false in
+  let short_quantized = profile.short_share_quantum > 0. in
+  let short_ratio =
+    match profile.short_maintenance with
+    | Tiers _ -> Some profile.short_initial_ratio
+    | Unsupported -> None
+  in
   let fills = ref [] in
   let trips = ref [] in
   let equity_curve = ref [] in
@@ -1172,17 +1352,18 @@ let run ?dividends ?(dividend_tax = 0.)
     else values.(index) <- values.(index) -. value
   in
   let total_value index =
-    cash_values.(index) +. margin_values.(index)
+    cash_values.(index) +. margin_values.(index) -. short_values.(index)
   in
   let total_assets () =
     fold_assets (fun total index -> total +. total_value index) 0.
   in
   let total_liabilities () =
-    total_loans () +. total_interests () +. !debt
+    total_loans () +. total_interests () +. !debt +. sum short_borrow
   in
   let has_inventory () =
     Array.exists (fun value -> value > 0.) cash_values
     || Array.exists (fun value -> value > 0.) margin_values
+    || Array.exists (fun value -> value > 0.) short_values
   in
   let total_receivables () =
     fold_assets
@@ -1322,19 +1503,28 @@ let run ?dividends ?(dividend_tax = 0.)
       { date; stock = fst assets.(index); price;
         from_e; to_e } :: !fills
   in
-  let start_trip index ~date =
+  let start_trip ?(short = false) index ~date =
     let () = entry_dates.(index) <- date in
+    let () = trip_short.(index) <- short in
     let () = buy_value.(index) <- 0. in
     let () = buy_exposure.(index) <- 0. in
     let () = sell_value.(index) <- 0. in
     sell_exposure.(index) <- 0.
   in
   let close_trip index ~date =
-    let entry_price = buy_value.(index) /. buy_exposure.(index) in
-    let exit_price = sell_value.(index) /. sell_exposure.(index) in
+    let net_ret =
+      if trip_short.(index) then
+        let entry_price = sell_value.(index) /. sell_exposure.(index) in
+        let exit_price = buy_value.(index) /. buy_exposure.(index) in
+        (entry_price -. exit_price) /. entry_price
+      else
+        let entry_price = buy_value.(index) /. buy_exposure.(index) in
+        let exit_price = sell_value.(index) /. sell_exposure.(index) in
+        exit_price /. entry_price -. 1.
+    in
     trips :=
-      { entry_date = entry_dates.(index); exit_date = date;
-        net_ret = exit_price /. entry_price -. 1. } :: !trips
+      { entry_date = entry_dates.(index); exit_date = date; net_ret }
+      :: !trips
   in
   let settle_asset_liabilities index =
     let total = loan_at index +. interest_at index in
@@ -1655,6 +1845,46 @@ let run ?dividends ?(dividend_tax = 0.)
     | latest :: _ when latest = date -> ()
     | _ -> margin_call_dates := date :: !margin_call_dates
   in
+  let cover_short index ~date ~price ~remaining =
+    let before = short_values.(index) in
+    let value = before -. remaining in
+    if value > 0. then
+      let equity_now = equity () in
+      let fraction = if remaining = 0. then 1. else value /. before in
+      let open_exposure = sell_exposure.(index) -. buy_exposure.(index) in
+      let covered_e =
+        if equity_now > 0. then value /. equity_now
+        else open_exposure *. fraction
+      in
+      let from_e =
+        if equity_now > 0. then -. before /. equity_now else -. open_exposure
+      in
+      let to_e = if remaining = 0. then 0. else from_e +. covered_e in
+      let cost_value =
+        if equity_now > 0. then
+          charge index ~equity_before:equity_now ~delta:covered_e ~price
+          *. equity_now
+        else absolute_buy_cost costs capital index value
+      in
+      let borrow = short_borrow.(index) *. fraction in
+      let () = buy_value.(index) <- buy_value.(index) +. covered_e *. price in
+      let () =
+        buy_exposure.(index) <- buy_exposure.(index) +. covered_e
+      in
+      let () = short_values.(index) <- remaining in
+      let () =
+        short_reserved.(index) <- short_reserved.(index) *. (1. -. fraction)
+      in
+      let () = short_borrow.(index) <- short_borrow.(index) -. borrow in
+      let () = cash := !cash -. value -. cost_value -. borrow in
+      let () =
+        if !cash < 0. then
+          let () = debt := !debt -. !cash in
+          cash := 0.
+      in
+      let () = record_fill index ~date ~price ~from_e ~to_e in
+      if remaining = 0. then close_trip index ~date
+  in
   let bankrupt_all ~bar_index ~date price_at =
     let () = ignore (track_maintenance price_at) in
     let () = record_call date in
@@ -1662,6 +1892,10 @@ let run ?dividends ?(dividend_tax = 0.)
       iter_assets (fun index ->
         sell_inventory index ~margin_only:false ~bar_index
           ~date ~price:(price_at index))
+    in
+    let () =
+      iter_assets (fun index ->
+        cover_short index ~date ~price:(price_at index) ~remaining:0.)
     in
     let () = settle_all_liabilities () in
     let () = bankrupt := true in
@@ -1671,7 +1905,7 @@ let run ?dividends ?(dividend_tax = 0.)
     let targets =
       Array.init asset_count (fun index -> strategy.targets.(index).(t))
     in
-    effective_targets ~financing_ratios:margin.ratios targets
+    effective_targets ?short_ratio ~financing_ratios:margin.ratios targets
   in
   let differs eff =
     fold_assets
@@ -1697,8 +1931,17 @@ let run ?dividends ?(dividend_tax = 0.)
         if cash_values.(index) <> 0. then
           cash_values.(index) <- scale cash_values.(index)
       in
-      if margin_values.(index) <> 0. then
-        margin_values.(index) <- scale margin_values.(index))
+      let () =
+        if margin_values.(index) <> 0. then
+          margin_values.(index) <- scale margin_values.(index)
+      in
+      if short_values.(index) <> 0. then
+        short_values.(index) <-
+          (if short_quantized then
+             share_value ~capital ~price:next_price
+               (floor_shares ~capital ~quantum:profile.short_share_quantum
+                  ~price:previous_price short_values.(index))
+           else short_values.(index) *. factor))
   in
   let accrue_interest ~bar_index ~date ~prev_date =
     let days = day_number date - day_number prev_date in
@@ -1724,7 +1967,8 @@ let run ?dividends ?(dividend_tax = 0.)
       { equity = e0; cash = !cash; cash_values; margin_values;
         loans = current_loans; interests = current_interests;
         tail_interests = current_tails; debt = !debt;
-        receivables = total_receivables (); previous_targets = prev_eff }
+        receivables = total_receivables (); previous_targets = prev_eff;
+        short_values; short_reserved; short_borrow }
     in
     let prices = Array.init asset_count price_at in
     let () =
@@ -1732,6 +1976,45 @@ let run ?dividends ?(dividend_tax = 0.)
       let plan = plan_fills ~state ~prices ~targets:eff ~force in
       let () =
         if clamped || plan.planned_funding_clamp then incr clamps
+      in
+      let () =
+        iter_assets (fun index ->
+          let item = plan.planned_assets.(index) in
+          if item.plan_short_cover > 0. then
+            let before = short_values.(index) in
+            let fraction =
+              if item.plan_short_final = 0. then 1.
+              else item.plan_short_cover /. before
+            in
+            let exposure =
+              abs_float (item.plan_short_to_e -. item.plan_short_from_e)
+            in
+            let () =
+              buy_value.(index) <-
+                buy_value.(index) +. exposure *. price_at index
+            in
+            let () =
+              buy_exposure.(index) <- buy_exposure.(index) +. exposure
+            in
+            let () = short_values.(index) <- item.plan_short_final in
+            let () =
+              short_reserved.(index) <-
+                short_reserved.(index) *. (1. -. fraction)
+            in
+            let () =
+              short_borrow.(index) <-
+                short_borrow.(index) -. item.plan_short_borrow
+            in
+            let () =
+              cash :=
+                !cash -. item.plan_short_cover -. item.plan_short_cost
+                -. item.plan_short_borrow
+            in
+            let () =
+              record_fill index ~date ~price:(price_at index)
+                ~from_e:item.plan_short_from_e ~to_e:item.plan_short_to_e
+            in
+            if item.plan_short_final = 0. then close_trip index ~date)
       in
       let () =
         iter_assets (fun index ->
@@ -1910,6 +2193,38 @@ let run ?dividends ?(dividend_tax = 0.)
               in
               record_fill index ~date ~price:(price_at index)
                 ~from_e:item.plan_from_e ~to_e:item.plan_to_e)
+        in
+        let () =
+          iter_assets (fun index ->
+            let item = plan.planned_assets.(index) in
+            if item.plan_short_open > 0. then
+              let () =
+                if item.plan_short_from_e = 0. then
+                  start_trip ~short:true index ~date
+              in
+              let exposure =
+                abs_float (item.plan_short_to_e -. item.plan_short_from_e)
+              in
+              let () =
+                sell_value.(index) <-
+                  sell_value.(index) +. exposure *. price_at index
+              in
+              let () =
+                sell_exposure.(index) <- sell_exposure.(index) +. exposure
+              in
+              let () = short_values.(index) <- item.plan_short_final in
+              let () =
+                short_reserved.(index) <-
+                  short_reserved.(index)
+                  +. (1. +. profile.short_initial_ratio)
+                     *. item.plan_short_open
+              in
+              let () =
+                cash :=
+                  !cash +. item.plan_short_open -. item.plan_short_cost
+              in
+              record_fill index ~date ~price:(price_at index)
+                ~from_e:item.plan_short_from_e ~to_e:item.plan_short_to_e)
         in
         let () =
           if !cash < 0. then
@@ -2234,11 +2549,21 @@ let run ?dividends ?(dividend_tax = 0.)
   let closed_any =
     fold_assets
       (fun closed_any index ->
-        if total_value index > 0. then
+        let closed_any =
+          if total_value index > 0. then
+            let () =
+              sell_inventory index ~margin_only:false ~bar_index:last_index
+                ~date:(snd assets.(index)).(last_index).Data.date
+                ~price:(close_at index last_index)
+            in
+            true
+          else closed_any
+        in
+        if short_values.(index) > 0. then
           let () =
-            sell_inventory index ~margin_only:false ~bar_index:last_index
+            cover_short index
               ~date:(snd assets.(index)).(last_index).Data.date
-              ~price:(close_at index last_index)
+              ~price:(close_at index last_index) ~remaining:0.
           in
           true
         else closed_any)

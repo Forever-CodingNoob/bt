@@ -4591,6 +4591,206 @@ let test_cure_shortfall_preserves_liability () =
   assert_close ~tolerance:1e-12 0.4 (final_equity result)
 
 
+let short_state ?(short_values = [| 0.; 0. |]) ?(short_reserved = [| 0.; 0. |])
+    ~equity ~cash ~cash_values ~previous_targets () : Engine.plan_state =
+  { equity; cash; cash_values; margin_values = [| 0.; 0. |];
+    loans = [| 0.; 0. |]; interests = [| 0.; 0. |];
+    tail_interests = [| 0.; 0. |]; debt = 0.; receivables = 0.;
+    previous_targets; short_values; short_reserved;
+    short_borrow = [| 0.; 0. |] }
+
+let test_short_joint_scaling () =
+  (* Flat account, capital 1000000 at price 10 so 0.5 is 50000 whole shares. *)
+  let plan =
+    Engine.plan_fills ~costs:[| zero_costs; zero_costs |] ~capital:1000000.
+      ~profile:us_profile ~financing_ratios:[| 0.5; 0.5 |]
+      ~state:(short_state ~equity:1. ~cash:1. ~cash_values:[| 0.; 0. |]
+                ~previous_targets:[| 0.; 0. |] ())
+      ~prices:[| 10.; 10. |] ~targets:[| 1.5; -0.5 |] ~force:false
+  in
+  let long = plan.Engine.planned_assets.(0) in
+  let short = plan.Engine.planned_assets.(1) in
+  (* The short opens first: proceeds 0.5, reserved 0.75, collateral 0.25
+     leaves available cash 0.75. The positive sum 1.5 classifies the book
+     as levered, so the long leg is financed as 1.5 of margin inventory
+     with a 0.75 down payment instead of being cut to the 0.75 cash cap. *)
+  assert_close 0.5 short.Engine.plan_short_open;
+  assert_close 0.5 short.Engine.plan_short_final;
+  assert_close (-0.5) short.Engine.plan_short_to_e;
+  assert_close 1.5 long.Engine.plan_trade;
+  assert_close 1.5 long.Engine.plan_buy_margin;
+  assert_close 0. long.Engine.plan_buy_cash;
+  assert_close 0.75 long.Engine.plan_down_payment;
+  assert (not plan.Engine.planned_funding_clamp)
+
+let test_short_leg_plan () =
+  let costs = { zero_costs with Engine.fee_bps = 100. } in
+  let plan ?short_values ?short_reserved ~equity ~cash ~cash_values
+      ~previous_targets targets =
+    Engine.plan_fills ~costs:[| costs; costs |] ~capital:1000.
+      ~profile:us_profile ~financing_ratios:[| 0.5; 0.5 |]
+      ~state:(short_state ?short_values ?short_reserved ~equity ~cash
+                ~cash_values ~previous_targets ())
+      ~prices:[| 10.; 10. |] ~targets ~force:false
+  in
+  (* Open from flat at 1% commission: E1 = 1 - 0.0049 = 0.9951 sizes
+     0.5 * 0.9951 * 1000 / 10 = 49.755 shares, floored to 49 = 0.49,
+     whose sell charge is 0.0049. *)
+  let opened =
+    (plan ~equity:1. ~cash:1. ~cash_values:[| 0.; 0. |]
+       ~previous_targets:[| 0.; 0. |] [| -0.5; 0. |]).Engine.planned_assets.(0)
+  in
+  assert_close 0.49 opened.Engine.plan_short_open;
+  assert_close 0.0049 opened.Engine.plan_short_cost;
+  assert_close 0. opened.Engine.plan_short_from_e;
+  assert_close (-. 0.49 /. 0.9951) opened.Engine.plan_short_to_e;
+  (* After that open: cash 1 + 0.49 - 0.0049 = 1.4851, reserved
+     1.5 * 0.49 = 0.735. A long 1.0 on the second asset is unlevered and
+     cut to the available cash E1 - 0.245, where E1 = 0.9951 - 0.01 *
+     trade, so trade = 0.7501 / 1.01: the proceeds are not spendable. *)
+  let capped =
+    plan ~equity:0.9951 ~cash:1.4851 ~cash_values:[| 0.; 0. |]
+      ~short_values:[| 0.49; 0. |] ~short_reserved:[| 0.735; 0. |]
+      ~previous_targets:[| -0.5; 0. |] [| -0.5; 1. |]
+  in
+  assert_close 0. capped.Engine.planned_assets.(0).Engine.plan_short_open;
+  assert_close 0. capped.Engine.planned_assets.(0).Engine.plan_short_cover;
+  assert_close (0.7501 /. 1.01) capped.Engine.planned_assets.(1).Engine.plan_trade;
+  (* Reduce to -0.2: E1 = 0.9951 - 0.003 = 0.9921 sizes 0.2 * 0.9921 *
+     100 = 19.84 shares, floored to 19 = 0.19, so the cover is 0.30 at a
+     1% buy charge of 0.003. *)
+  let reduced =
+    (plan ~equity:0.9951 ~cash:1.4851 ~cash_values:[| 0.; 0. |]
+       ~short_values:[| 0.49; 0. |] ~short_reserved:[| 0.735; 0. |]
+       ~previous_targets:[| -0.5; 0. |] [| -0.2; 0. |]).Engine.planned_assets.(0)
+  in
+  assert_close 0.30 reduced.Engine.plan_short_cover;
+  assert_close 0.19 reduced.Engine.plan_short_final;
+  assert_close 0.003 reduced.Engine.plan_short_cost;
+  assert_close (-. 0.49 /. 0.9951) reduced.Engine.plan_short_from_e;
+  (* Cover to zero takes the whole 0.49 and ends at exposure 0. *)
+  let covered =
+    (plan ~equity:0.9951 ~cash:1.4851 ~cash_values:[| 0.; 0. |]
+       ~short_values:[| 0.49; 0. |] ~short_reserved:[| 0.735; 0. |]
+       ~previous_targets:[| -0.5; 0. |] [| 0.; 0. |]).Engine.planned_assets.(0)
+  in
+  assert_close 0.49 covered.Engine.plan_short_cover;
+  assert_close 0. covered.Engine.plan_short_final;
+  assert_close 0. covered.Engine.plan_short_to_e;
+  (* Whole-share cycle: at target -0.5025 the E1 solver alternates
+     between 50 shares (cost 0.005, E1 0.995, which funds 49.99875) and
+     49 shares (cost 0.0049, E1 0.9951, which funds 50.003775). The cycle
+     resolves to the lower open, 49 shares = 0.49. *)
+  let cycle =
+    (plan ~equity:1. ~cash:1. ~cash_values:[| 0.; 0. |]
+       ~previous_targets:[| 0.; 0. |] [| -0.5025; 0. |]).Engine.planned_assets.(0)
+  in
+  assert_close 0.49 cycle.Engine.plan_short_open;
+  assert_close 0.0049 cycle.Engine.plan_short_cost;
+  (* No available cash: the open clamps to zero and pays no minimum fee,
+     so the plan's total cost is zero and only the clamp is recorded. *)
+  let minimum = { zero_costs with Engine.min_fee = 1. } in
+  let clamped =
+    Engine.plan_fills ~costs:[| minimum; minimum |] ~capital:1000.
+      ~profile:us_profile ~financing_ratios:[| 0.5; 0.5 |]
+      ~state:(short_state ~equity:1. ~cash:0. ~cash_values:[| 1.; 0. |]
+                ~previous_targets:[| 1.; 0. |] ())
+      ~prices:[| 10.; 10. |] ~targets:[| 1.; -0.5 |] ~force:false
+  in
+  assert_close 0. clamped.Engine.planned_assets.(1).Engine.plan_short_open;
+  assert_close 0. clamped.Engine.planned_assets.(1).Engine.plan_short_cost;
+  assert_close 0. clamped.Engine.planned_total_cost;
+  assert clamped.Engine.planned_funding_clamp
+
+let test_short_reserved_cash_run () =
+  let bars =
+    [| bar "2020-01-01" 100. 100.; bar "2020-01-02" 100. 100. |]
+  in
+  let result =
+    Engine.run ~profile:us_profile
+      [| ("us/SHORT", bars); ("us/LONG", bars) |]
+      { Engine.targets = [| [| -0.5; -0.5 |]; [| 0.; 1. |] |] }
+      [| zero_costs; zero_costs |] ~margin:(no_margin 2) ~capital:1000.
+      ~fill:Engine.Close_same ~rebalance:false
+  in
+  (* The first close shorts 0.5: cash 1.5, reserved 0.75. The second
+     close keeps the short and asks for a 1.0 long: the planner may spend
+     only 1.5 - 0.75 = 0.75, so the long entry is 0.75, not 1.0. *)
+  let long_entry =
+    List.find
+      (fun (fill : Engine.fill_event) ->
+        fill.date = "2020-01-02" && fill.stock = "us/LONG"
+        && fill.to_e > 0.)
+      result.Engine.fills
+  in
+  assert_close 0. long_entry.from_e;
+  assert_close 0.75 long_entry.to_e;
+  assert_float_array [| 1.; 1. |]
+    (Array.of_list (List.map snd result.Engine.equity_curve))
+
+let test_engine_short_leg_run () =
+  let bars =
+    [| bar "2020-01-01" 100. 100.;
+       bar "2020-01-02" 100. 100.;
+       bar "2020-01-03" 100. 100.;
+       bar "2020-01-06" 100. 100.;
+       bar "2020-01-07" 100. 100.;
+       bar "2020-01-08" 100. 100. |]
+  in
+  let result =
+    Engine.run ~profile:us_profile [| ("us/TEST", bars) |]
+      { Engine.targets = [| [| -0.5; -0.8; -0.3; 0.; 0.5; -0.4 |] |] }
+      [| zero_costs |] ~margin:(no_margin 1) ~capital:1000.
+      ~fill:Engine.Close_same ~rebalance:false
+  in
+  (* Flat prices and zero costs: opening, adding, reducing, covering, a
+     long, and a long-to-short flip all leave equity at 1 on every bar. *)
+  assert_float_array [| 1.; 1.; 1.; 1.; 1.; 1. |]
+    (Array.of_list (List.map snd result.Engine.equity_curve));
+  (* The flip bar writes the long exit row first, then the short entry;
+     the end-of-run cover ends at 0. *)
+  let expected =
+    [ "2020-01-01", 0., -0.5; "2020-01-02", -0.5, -0.8;
+      "2020-01-03", -0.8, -0.3; "2020-01-06", -0.3, 0.;
+      "2020-01-07", 0., 0.5; "2020-01-08", 0.5, 0.;
+      "2020-01-08", 0., -0.4; "2020-01-08", -0.4, 0. ]
+  in
+  assert (List.length result.Engine.fills = List.length expected);
+  List.iter2
+    (fun (fill : Engine.fill_event) (date, from_e, to_e) ->
+      assert (fill.date = date);
+      assert_close from_e fill.from_e;
+      assert_close to_e fill.to_e)
+    result.Engine.fills expected;
+  (* Three trips: the first short (entry 100, exit 100), the long, and
+     the final short, all at return 0. *)
+  assert (List.length result.Engine.trips = 3);
+  List.iter (fun (trip : Engine.trip) -> assert_close 0. trip.net_ret)
+    result.Engine.trips
+
+let test_short_whole_shares () =
+  let bars =
+    [| bar "2020-01-01" 100. 100.; bar "2020-01-02" 100. 100. |]
+  in
+  let result =
+    Engine.run ~profile:us_profile
+      [| ("us/SHORT", bars); ("us/LONG", bars) |]
+      { Engine.targets = [| [| -0.26; -0.26 |]; [| 0.26; 0.26 |] |] }
+      [| zero_costs; zero_costs |] ~margin:(no_margin 2) ~capital:1000.
+      ~fill:Engine.Close_same ~rebalance:false
+  in
+  let entry stock =
+    List.find
+      (fun (fill : Engine.fill_event) ->
+        fill.date = "2020-01-01" && fill.stock = stock)
+      result.Engine.fills
+  in
+  (* 0.26 of 1000 at 100 is 2.6 shares: the short plans 2 shares (0.2)
+     while the fractional long keeps 0.26. *)
+  assert_close 0.26 (entry "us/LONG").to_e;
+  assert_close (-0.2) (entry "us/SHORT").to_e;
+  assert (List.length result.Engine.fills = 4)
+
 let test_us_cure_tail_aware () =
   (* Entry $10, target 2.0, ratio 0.5 -> mv = 2.0, loan = 1.0.
      financing_rate 36% -> 0.001/day on 360-day basis.
@@ -4922,7 +5122,9 @@ let test_us_plan_state_split () =
       { equity = free +. value -. debit; cash = free;
         cash_values = [|value -. margin|]; margin_values = [|margin|];
         loans = [|debit|]; interests = [|0.|]; tail_interests = [|0.|];
-        debt = 0.; receivables = 0.; previous_targets = [|1.5|] } in
+        debt = 0.; receivables = 0.; previous_targets = [|1.5|];
+        short_values = [|0.|]; short_reserved = [|0.|];
+        short_borrow = [|0.|] } in
     let actual = Live.us_plan_state ~cash ~held:[|held|] ~prices:[|100.|]
       ~ratio:0.5 ~previous_targets:[|1.5|] in
     (* This is the previous scalar operation order, not a tolerance check. *)
@@ -6294,7 +6496,8 @@ let test_engine_fill_planner () =
           margin_values = [| margin_value |];
           loans = [| loan |]; interests = [| 0. |];
           tail_interests = [| 0. |]; debt = 0.; receivables = 0.;
-          previous_targets = [| previous |] }
+          previous_targets = [| previous |]; short_values = [| 0. |];
+          short_reserved = [| 0. |]; short_borrow = [| 0. |] }
       ~prices:[| 10. |] ~targets:[| target |] ~force:false
   in
   let entry =
@@ -6352,7 +6555,9 @@ let test_engine_share_quantum () =
         { Engine.equity = 1.; cash; cash_values = [| cash_value |];
           margin_values = [| margin_value |]; loans = [| loan |];
           interests = [| 0. |]; tail_interests = [| 0. |]; debt = 0.;
-          receivables = 0.; previous_targets = [| previous |] }
+          receivables = 0.; previous_targets = [| previous |];
+          short_values = [| 0. |]; short_reserved = [| 0. |];
+          short_borrow = [| 0. |] }
       ~prices:[| price |] ~targets:[| target |] ~force:false
     |> fun result -> result.Engine.planned_assets.(0)
   in
@@ -6386,7 +6591,9 @@ let test_engine_tw_sell_partition () =
         { Engine.equity = 6000.; cash = 0.; cash_values = [| 0. |];
           margin_values = [| 10000. |]; loans = [| 4000. |];
           interests = [| 0. |]; tail_interests = [| 0. |]; debt = 0.;
-          receivables = 0.; previous_targets = [| 5. /. 3. |] }
+          receivables = 0.; previous_targets = [| 5. /. 3. |];
+          short_values = [| 0. |]; short_reserved = [| 0. |];
+          short_borrow = [| 0. |] }
       ~prices:[| 10. |] ~targets:[| 5. /. 6. |] ~force:false
   in
   let item = plan.Engine.planned_assets.(0) in
@@ -6546,7 +6753,9 @@ let test_engine_tw_plan_live_quantity () =
         { Engine.equity = value; cash = 0.; cash_values = [| 0. |];
           margin_values = [| value |]; loans = [| 0. |];
           interests = [| 0. |]; tail_interests = [| 0. |]; debt = 0.;
-          receivables = 0.; previous_targets = [| 1. |] }
+          receivables = 0.; previous_targets = [| 1. |];
+          short_values = [| 0. |]; short_reserved = [| 0. |];
+          short_borrow = [| 0. |] }
       ~prices:[| price |] ~targets:[| 0. |] ~force:false
   in
   let item = plan.Engine.planned_assets.(0) in
@@ -6573,7 +6782,9 @@ let test_engine_tw_executed_cost () =
         { Engine.equity; cash = equity; cash_values = [| 0. |];
           margin_values = [| 0. |]; loans = [| 0. |];
           interests = [| 0. |]; tail_interests = [| 0. |]; debt = 0.;
-          receivables = 0.; previous_targets = [| 0. |] }
+          receivables = 0.; previous_targets = [| 0. |];
+          short_values = [| 0. |]; short_reserved = [| 0. |];
+          short_borrow = [| 0. |] }
       ~prices:[| 11. |] ~targets:[| 1. |] ~force:false
     |> fun result -> result.Engine.planned_assets.(0)
   in
@@ -6604,7 +6815,9 @@ let test_engine_tw_fee_cycle () =
         { Engine.equity = 1.; cash = 1.; cash_values = [| 0. |];
           margin_values = [| 0. |]; loans = [| 0. |];
           interests = [| 0. |]; tail_interests = [| 0. |]; debt = 0.;
-          receivables = 0.; previous_targets = [| 0. |] }
+          receivables = 0.; previous_targets = [| 0. |];
+          short_values = [| 0. |]; short_reserved = [| 0. |];
+          short_borrow = [| 0. |] }
       ~prices:[| 17.89 |] ~targets:[| 0.5 |] ~force:false
   in
   let item = plan.Engine.planned_assets.(0) in
@@ -6619,7 +6832,8 @@ let test_engine_capital_guard () =
     { Engine.equity = 1.; cash = 1.; cash_values = [| 0. |];
       margin_values = [| 0. |]; loans = [| 0. |]; interests = [| 0. |];
       tail_interests = [| 0. |]; debt = 0.; receivables = 0.;
-      previous_targets = [| 0. |] }
+      previous_targets = [| 0. |]; short_values = [| 0. |];
+      short_reserved = [| 0. |]; short_borrow = [| 0. |] }
   in
   let rejects capital =
     match
@@ -6646,7 +6860,8 @@ let test_engine_mandatory_capital_cost () =
           cash_values = [| 0. |]; margin_values = [| 0. |];
           loans = [| 0. |]; interests = [| 0. |];
           tail_interests = [| 0. |]; debt = 0.; receivables = 0.;
-          previous_targets = [| 0. |] }
+          previous_targets = [| 0. |]; short_values = [| 0. |];
+          short_reserved = [| 0. |]; short_borrow = [| 0. |] }
       ~prices:[| 10. |] ~targets:[| 1. |] ~force:false
   in
   let entry = plan.Engine.planned_assets.(0) in
@@ -7170,7 +7385,9 @@ let test_tw_live_plan_legs () =
         { Engine.equity; cash; cash_values = [| cash_value |];
           margin_values = [| margin_value |]; loans = [| loan |];
           interests = [| 0. |]; tail_interests = [| 0. |]; debt = 0.;
-          receivables = 0.; previous_targets = [| previous |] }
+          receivables = 0.; previous_targets = [| previous |];
+          short_values = [| 0. |]; short_reserved = [| 0. |];
+          short_borrow = [| 0. |] }
       ~prices:[| 10. |] ~targets:[| target |] ~force:false
   in
   let entry =
@@ -7253,7 +7470,8 @@ let test_tw_odd_sell_never_precedes_buy () =
                         loans = [| loan |]; interests = [| 0. |];
                         tail_interests = [| 0. |]; debt = 0.;
                         receivables = 0.;
-                        previous_targets = [| previous |] }
+                        previous_targets = [| previous |]; short_values = [| 0. |];
+                        short_reserved = [| 0. |]; short_borrow = [| 0. |] }
                     ~prices:[| 10. |] ~targets:[| target |] ~force:false
                 in
                 List.map
@@ -7311,7 +7529,8 @@ let test_tw_live_pair_legs () =
     ~state:{ Engine.equity = 100000.; cash = 100000.;
       cash_values = [|0.|]; margin_values = [|0.|]; loans = [|0.|];
       interests = [|0.|]; tail_interests = [|0.|]; debt = 0.;
-      receivables = 0.; previous_targets = [|0.|] }
+      receivables = 0.; previous_targets = [|0.|]; short_values = [|0.|];
+      short_reserved = [|0.|]; short_borrow = [|0.|] }
     ~prices:[|10.|] ~targets:[|0.|] ~force:true in
   let item = base.planned_assets.(0) in
   let a = { item with Engine.plan_sell_margin = 10000.;
@@ -7371,7 +7590,8 @@ let test_tw_live_legs_split () =
           cash_values = [| 0. |]; margin_values = [| margin |];
           loans = [| 0. |]; interests = [| 0. |];
           tail_interests = [| 0. |]; debt = 0.; receivables = 0.;
-          previous_targets = [| 0. |] }
+          previous_targets = [| 0. |]; short_values = [| 0. |];
+          short_reserved = [| 0. |]; short_borrow = [| 0. |] }
       ~prices:[| 10. |] ~targets:[| target |] ~force:false
   in
   let split = plan ~cash:865800. ~margin:0. 1. in
@@ -7530,7 +7750,8 @@ let test_tw_live_input_guards () =
     ~state:{ Engine.equity = 100000.; cash = 100000.;
       cash_values = [|0.|]; margin_values = [|0.|]; loans = [|0.|];
       interests = [|0.|]; tail_interests = [|0.|]; debt = 0.;
-      receivables = 0.; previous_targets = [|0.|] }
+      receivables = 0.; previous_targets = [|0.|]; short_values = [|0.|];
+      short_reserved = [|0.|]; short_borrow = [|0.|] }
     ~prices:[|10.|] ~targets:[|0.|] ~force:true in
   (* The plan has one asset, so both missing and extra metadata or prices
      must fail rather than silently dropping entries or indexing a short array. *)
@@ -9880,6 +10101,11 @@ let () =
   let () = test_engine_tw_rollover_quantum () in
   let () = test_engine_tw_laddered_rollover () in
   test_us_cure_tail_aware ();
+  test_short_joint_scaling ();
+  test_short_leg_plan ();
+  test_short_reserved_cash_run ();
+  test_engine_short_leg_run ();
+  test_short_whole_shares ();
   let () = test_engine_fill_planner () in
   let () = test_engine_share_quantum () in
   let () = test_engine_tw_sell_partition () in
