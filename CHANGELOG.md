@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Engine market profiles define short collateral, maintenance tiers, borrow fees, dividend obligations, and share quanta, with US defaults and TW shorts unsupported. `Engine.effective_targets` accepts an optional short collateral ratio to retain signed targets and scale long down payments and short collateral jointly.
+
 ## [0.12.1] - 2026-10-13
 
 Both the US paper acceptance and the TW production acceptance passed on 2026-10-13.

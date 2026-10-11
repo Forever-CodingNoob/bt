@@ -108,6 +108,16 @@ type maintenance_model =
   | Collateral_over_loan
   | Equity_over_required
 
+(** One US short maintenance band. The first tier whose [price_below] is strictly above the mark price applies; the last tier has [price_below = infinity]. *)
+type short_tier = {
+  price_below : float;
+  per_share : float;
+  rate : float;
+}
+
+(** Short maintenance terms: the requirement is [max (per_share * shares / capital) (rate * short_value)] per asset, or shorts are rejected at parse time. *)
+type short_maintenance = Tiers of short_tier list | Unsupported
+
 (** Per-market simulation constants and tradable share quanta. *)
 type market_profile = {
   interest_day_count : float;
@@ -119,6 +129,15 @@ type market_profile = {
   (** Minimum cash share increment; zero preserves fractional shares. *)
   margin_share_quantum : float;
   (** Minimum margin share increment; zero preserves fractional shares. *)
+  short_initial_ratio : float;
+  (** Collateral reserved per unit of short proceeds. *)
+  short_maintenance : short_maintenance;
+  default_borrow_rate : float;
+  (** Annual borrow fee on the short value, per [interest_day_count]. *)
+  short_owes_dividends : bool;
+  (** The short pays the cash dividend on the ex-date. *)
+  short_share_quantum : float;
+  (** Minimum short share increment; zero preserves fractional shares. *)
 }
 
 (** Return the market profile. Fails on unknown markets. *)
@@ -148,8 +167,9 @@ val absolute_sell_cost :
 (** Recover the funded whole-share count represented by a value. *)
 val shares_of_value : capital:float -> price:float -> float -> float
 
-(** Clamp invalid targets and rescale a bar's portfolio to its funding cap. *)
+(** Clamp invalid targets and rescale a bar's portfolio to its funding cap. Without [short_ratio] a negative target clamps to 0; with it a negative target is kept and needs [-target * short_ratio] of equity. *)
 val effective_targets :
+  ?short_ratio:float ->
   financing_ratios:float array -> float array -> float array * bool
 
 (** Return the exact pure per-bar fill plan used by [run]; capital must be

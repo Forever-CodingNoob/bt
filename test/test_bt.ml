@@ -3980,11 +3980,25 @@ let test_profile_of_market () =
   assert (tw.Engine.settlement_lag = 2);
   assert (tw.Engine.maintenance = Engine.Collateral_over_loan);
   assert (tw.Engine.default_financing_rate = 6.35);
+  (* TW declares shorts unsupported; the other short fields are unused. *)
+  assert (tw.Engine.short_maintenance = Engine.Unsupported);
   let us = Engine.profile_of_market "us" in
   assert (us.Engine.interest_day_count = 360.);
   assert (us.Engine.settlement_lag = 1);
   assert (us.Engine.maintenance = Engine.Equity_over_required);
   assert (us.Engine.default_financing_rate = 6.25);
+  (* Reg T 150%: 0.5 of collateral per unit of proceeds; ETB borrow is
+     free; the short pays dividends; whole shares only. *)
+  assert (us.Engine.short_initial_ratio = 0.5);
+  assert (us.Engine.default_borrow_rate = 0.);
+  assert us.Engine.short_owes_dividends;
+  assert (us.Engine.short_share_quantum = 1.);
+  (* The Alpaca table: $2.50/share or 100% below $5, else $5/share or 30%. *)
+  assert
+    (us.Engine.short_maintenance
+     = Engine.Tiers
+         [ { price_below = 5.0; per_share = 2.5; rate = 1.0 };
+           { price_below = Float.infinity; per_share = 5.0; rate = 0.30 } ]);
   (try ignore (Engine.profile_of_market "xx"); assert false
    with Invalid_argument _ -> ())
 
@@ -4699,6 +4713,27 @@ let test_engine_effective_targets () =
   assert_close 0. (effective Float.nan);
   assert_close 2. (effective 2.5);
   assert_close 1.994 (effective 1.994)
+
+let test_short_effective_targets () =
+  let effective ?short_ratio targets =
+    Engine.effective_targets ?short_ratio ~financing_ratios:[| 0.5; 0.5 |]
+      targets
+  in
+  (* Without short_ratio the existing clamp pins -1 to 0. *)
+  assert (effective [| -1.; 0. |] = ([| 0.; 0. |], false));
+  (* -1 needs 0.5 of collateral, which fits. *)
+  assert (effective ~short_ratio:0.5 [| -1.; 0. |] = ([| -1.; 0. |], false));
+  (* Long 1.5 needs 0.75 down and short -0.5 needs 0.25: exactly 1, no
+     scaling. *)
+  assert
+    (effective ~short_ratio:0.5 [| 1.5; -0.5 |] = ([| 1.5; -0.5 |], false));
+  (* Long 2 needs 1 and short -1 needs 0.5: need 1.5 scales both by 2/3. *)
+  let scaled, clamped = effective ~short_ratio:0.5 [| 2.; -1. |] in
+  assert clamped;
+  assert_close (4. /. 3.) scaled.(0);
+  assert_close (-. 2. /. 3.) scaled.(1);
+  (* NaN still clamps to 0 with short_ratio. *)
+  assert (effective ~short_ratio:0.5 [| Float.nan; 0. |] = ([| 0.; 0. |], false))
 
 let test_live_pure_decisions () =
   (* The identifier is the fixed prefix, symbol, and session date. *)
@@ -9579,6 +9614,7 @@ let () =
   test_alpaca_order_parse ();
   test_alpaca_snapshot_parse ();
   test_engine_effective_targets ();
+  test_short_effective_targets ();
   test_live_pure_decisions ();
   test_us_plan_state ();
   test_us_plan_state_split ();

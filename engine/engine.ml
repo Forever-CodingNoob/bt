@@ -107,6 +107,14 @@ type maintenance_model =
   | Collateral_over_loan
   | Equity_over_required
 
+type short_tier = {
+  price_below : float;
+  per_share : float;
+  rate : float;
+}
+
+type short_maintenance = Tiers of short_tier list | Unsupported
+
 type market_profile = {
   interest_day_count : float;
   settlement_lag : int;
@@ -115,6 +123,11 @@ type market_profile = {
   default_financing_ratio : float;
   cash_share_quantum : float;
   margin_share_quantum : float;
+  short_initial_ratio : float;
+  short_maintenance : short_maintenance;
+  default_borrow_rate : float;
+  short_owes_dividends : bool;
+  short_share_quantum : float;
 }
 
 let profile_of_market = function
@@ -125,7 +138,12 @@ let profile_of_market = function
         default_financing_rate = 6.35;
         default_financing_ratio = 0.6;
         cash_share_quantum = 1.;
-        margin_share_quantum = 1000. }
+        margin_share_quantum = 1000.;
+        short_initial_ratio = 0.;
+        short_maintenance = Unsupported;
+        default_borrow_rate = 0.;
+        short_owes_dividends = false;
+        short_share_quantum = 0. }
   | "us" ->
       { interest_day_count = 360.;
         settlement_lag = 1;
@@ -133,7 +151,15 @@ let profile_of_market = function
         default_financing_rate = 6.25;
         default_financing_ratio = 0.5;
         cash_share_quantum = 0.;
-        margin_share_quantum = 0. }
+        margin_share_quantum = 0.;
+        short_initial_ratio = 0.5;
+        short_maintenance =
+          Tiers [ { price_below = 5.0; per_share = 2.5; rate = 1.0 };
+                  { price_below = Float.infinity; per_share = 5.0;
+                    rate = 0.30 } ];
+        default_borrow_rate = 0.;
+        short_owes_dividends = true;
+        short_share_quantum = 1. }
   | market ->
       invalid_arg
         (Printf.sprintf "Engine.profile_of_market: unknown market %S" market)
@@ -234,17 +260,22 @@ let fold_indices stop function_ initial =
   fold_indices_from stop 0 function_ initial
 
 
-let effective_targets ~financing_ratios targets =
+let effective_targets ?short_ratio ~financing_ratios targets =
   if Array.length financing_ratios <> Array.length targets then
     invalid_arg "Engine.effective_targets: length mismatch";
   let need = ref 0. in
   let effective =
     Array.mapi
       (fun index target ->
-        let target = clamp_target target in
-        need :=
-          !need +. (target *. (1. -. financing_ratios.(index)));
-        target)
+        match short_ratio with
+        | Some ratio when target < 0. ->
+            need := !need +. (-. target *. ratio);
+            target
+        | None | Some _ ->
+            let target = clamp_target target in
+            need :=
+              !need +. (target *. (1. -. financing_ratios.(index)));
+            target)
       targets
   in
   let scale = if !need > 1. then 1. /. !need else 1. in
