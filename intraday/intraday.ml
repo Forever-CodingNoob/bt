@@ -37,6 +37,17 @@ let run (config : config) ~sessions ~(bars : Data.bar array) ~targets ~initial_e
     if not (Float.is_finite config.capital && config.capital > 0.) then
       invalid_arg "Intraday.run: capital must be positive and finite"
   in
+  let fill_price (bar : Data.bar) =
+    match config.fill with
+    | Engine.Close_same -> bar.c
+    | Engine.Open_next -> bar.o
+    | Engine.Overnight -> invalid_arg "Intraday.run: overnight is a daily fill"
+  in
+  let () =
+    match config.fill with
+    | Engine.Overnight -> invalid_arg "Intraday.run: overnight is a daily fill"
+    | Engine.Close_same | Engine.Open_next -> ()
+  in
   let normalize target =
     if Float.is_nan target then 0.
     else if target < 0. then failwith "short targets are reserved"
@@ -121,11 +132,8 @@ let run (config : config) ~sessions ~(bars : Data.bar array) ~targets ~initial_e
                 let target = normalize targets.(decision) in
                 if target = account.target then account
                 else
-                  let price = match config.fill with
-                    | Engine.Close_same -> bar.c
-                    | Engine.Open_next -> bar.o
-                  in
-                  execute ~cap ~time:bar.date ~price target account
+                  execute ~cap ~time:bar.date ~price:(fill_price bar) target
+                    account
           in
           let account =
             if index = last && account.shares <> 0. then

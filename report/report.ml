@@ -151,7 +151,8 @@ let print_many ~columns ~baseline ~fill ~stocks ~financing_rate =
   Printf.printf "Date range: %s; fill: %s\n" range
     (match fill with
      | Engine.Close_same -> "close"
-     | Engine.Open_next -> "open")
+     | Engine.Open_next -> "open"
+     | Engine.Overnight -> "overnight")
 
 let write_equity ~out_dir ~stem ~columns ~baseline =
   let () =
@@ -321,7 +322,10 @@ let print_intraday ~columns ~baseline ~fill =
         | None -> "n/a"
         | Some (first, last) -> first ^ " to " ^ last in
   Printf.printf "Date range: %s; fill: %s\n" range
-    (match fill with Engine.Close_same -> "close" | Engine.Open_next -> "open")
+    (match fill with
+     | Engine.Close_same -> "close"
+     | Engine.Open_next -> "open"
+     | Engine.Overnight -> "overnight")
 
 let write_intraday_outputs ~out_dir ~stem ~columns ~baseline =
   let () = Data.mkdir_p out_dir in

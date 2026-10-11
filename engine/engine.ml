@@ -9,7 +9,7 @@ type costs = {
   per_share_sell_cap : float;
 }
 
-type fill = Open_next | Close_same
+type fill = Open_next | Close_same | Overnight
 
 type fill_event = {
   date : string;
@@ -1993,7 +1993,8 @@ let run ?dividends ?(dividend_tax = 0.)
                  *. float_of_int days /. profile.interest_day_count)
         margin_lots.(index))
   in
-  let apply_fills ~bar_index ~date ~eff ~clamped ~force price_at =
+  let apply_fills ?(remember = true) ~bar_index ~date ~eff ~clamped ~force
+      price_at =
     let e0 = equity () in
     let current_loans = Array.init asset_count loan_at in
     let current_interests = Array.init asset_count interest_at in
@@ -2273,7 +2274,7 @@ let run ?dividends ?(dividend_tax = 0.)
             let () = bankrupt := true in
             pending_liquidation := false
     in
-    Array.blit eff 0 prev_eff 0 asset_count
+    if remember then Array.blit eff 0 prev_eff 0 asset_count
   in
   let guard_solvency ~bar_index ~date price_at =
     if not !bankrupt && equity () <= 0. then
@@ -2644,6 +2645,39 @@ let run ?dividends ?(dividend_tax = 0.)
                 in
                 scale_values
                   (fun i -> close_at i t) (fun i -> open_at i t)
+          | Overnight ->
+              let eff, clamped = effective t in
+              let () =
+                if t > 0 then
+                  let () =
+                    scale_values (fun i -> open_at i t)
+                      (fun i -> close_at i (t - 1))
+                  in
+                  let () =
+                    ignore
+                      (process_dividends ~previous_date ~date
+                         (fun i -> open_at i t))
+                  in
+                  let () = pending_liquidation := false in
+                  let () =
+                    guard_solvency ~bar_index:t ~date
+                      (fun i -> open_at i t)
+                  in
+                  let () =
+                    if not !bankrupt then
+                      apply_fills ~remember:false ~bar_index:t ~date
+                        ~eff:(Array.make asset_count 0.) ~clamped:false
+                        ~force:true (fun i -> open_at i t)
+                  in
+                  scale_values
+                    (fun i -> close_at i t) (fun i -> open_at i t)
+              in
+              let () =
+                guard_solvency ~bar_index:t ~date (fun i -> close_at i t)
+              in
+              if not !bankrupt && (rebalance || differs eff) then
+                apply_fills ~bar_index:t ~date ~eff ~clamped
+                  ~force:rebalance (fun i -> close_at i t)
       in
       let () =
         if not !bankrupt then

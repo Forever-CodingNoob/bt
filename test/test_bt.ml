@@ -4934,6 +4934,80 @@ let test_short_cure_minimum_fee () =
   assert_close 0.7456 (final_equity result);
   assert (final_equity result >= 0.)
 
+let test_overnight_cadence () =
+  let run ?(profile = us_profile) ?(dividends = [||]) ?(rebalance = true)
+      bars targets =
+    Engine.run ~dividends:[| dividends |] ~profile [| ("us/TEST", bars) |]
+      { Engine.targets = [| targets |] } [| zero_costs |] ~margin:(no_margin 1)
+      ~capital:1000. ~fill:Engine.Overnight ~rebalance
+  in
+  let equity result = Array.of_list (List.map snd result.Engine.equity_curve) in
+  let rows result =
+    List.map
+      (fun (fill : Engine.fill_event) ->
+        fill.date, fill.price, fill.from_e, fill.to_e)
+      result.Engine.fills
+  in
+  let bars =
+    [| bar "2020-01-01" 100. 100.; bar "2020-01-02" 110. 105.;
+       bar "2020-01-03" 100. 100. |]
+  in
+  (* Short 5 shares at the first close. The 110 open marks them at 0.55,
+     equity 0.95, and the exit covers there. The 105 close re-enters
+     0.5 * 0.95 = 0.475, floored to 4 shares = 0.42. The 100 open marks
+     0.40 for equity 0.97; the close re-enters 4 shares = 0.40; the
+     end-of-run cover leaves 0.97. One equity point per bar. *)
+  let cycle = run bars [| -0.5; -0.5; -0.5 |] in
+  assert_float_array [| 1.; 0.95; 0.97 |] (equity cycle);
+  assert (List.length (rows cycle) = 6);
+  (match rows cycle with
+   | [ ("2020-01-01", 100., 0., e0);
+       ("2020-01-02", 110., e1, 0.); ("2020-01-02", 105., 0., e2);
+       ("2020-01-03", 100., e3, 0.); ("2020-01-03", 100., 0., e4);
+       ("2020-01-03", 100., e5, 0.) ] ->
+       assert_close (-0.5) e0;
+       assert_close (-. 0.55 /. 0.95) e1;
+       assert_close (-. 0.42 /. 0.95) e2;
+       assert_close (-. 0.40 /. 0.97) e3;
+       assert_close (-. 0.40 /. 0.97) e4;
+       assert_close (-. 0.40 /. 0.97) e5
+   | _ -> assert false);
+  (* A USD 1 dividend on the second date is paid by the 5 overnight
+     shares at the open, before the exit: 0.005 off equity 0.95. *)
+  let ex_date =
+    run ~dividends:[| dividend "2020-01-02" 1. "2020-01-20" |] bars
+      [| -0.5; -0.5; -0.5 |]
+  in
+  assert_close 0.945 (equity ex_date).(1);
+  (* 20 shares short at 100 marked at a 150 open are 3.0 against cash
+     3.0: equity 0 liquidates at the open, the close places no entry, and
+     the run ends with two rows and a flat account. *)
+  let gap =
+    run [| bar "2020-01-01" 100. 100.; bar "2020-01-02" 150. 140.;
+           bar "2020-01-03" 100. 100. |]
+      [| -2.; -2.; -2. |]
+  in
+  assert_float_array [| 1.; 0.; 0. |] (equity gap);
+  assert (List.length gap.Engine.fills = 2);
+  assert (gap.Engine.margin_stats.Engine.margin_call_dates = [ "2020-01-02" ]);
+  (* Under on_change an unchanged target exits at the open and does not
+     re-enter: the forced exit left prev_eff at -0.5. *)
+  let on_change = run ~rebalance:false bars [| -0.5; -0.5; -0.5 |] in
+  assert_float_array [| 1.; 0.95; 0.95 |] (equity on_change);
+  assert (List.length on_change.Engine.fills = 2);
+  (* Borrow 36%/yr is 0.1% per calendar day of the value held. Friday's
+     0.5 accrues three nights, 0.0015. Monday re-enters 0.5 * 0.9985 *
+     10 = 4.99 shares, floored to 4 = 0.4, which accrues one night,
+     0.0004. Tuesday's entry is covered at the close and accrues nothing,
+     so the run ends at 0.9981. *)
+  let nights =
+    run ~profile:{ us_profile with Engine.default_borrow_rate = 0.36 }
+      [| bar "2020-01-03" 100. 100.; bar "2020-01-06" 100. 100.;
+         bar "2020-01-07" 100. 100. |]
+      [| -0.5; -0.5; -0.5 |]
+  in
+  assert_float_array [| 1.; 0.9985; 0.9981 |] (equity nights)
+
 let test_us_cure_tail_aware () =
   (* Entry $10, target 2.0, ratio 0.5 -> mv = 2.0, loan = 1.0.
      financing_rate 36% -> 0.001/day on 360-day basis.
@@ -6554,6 +6628,18 @@ let test_intraday_normalization () =
     with Failure message -> message = "short targets are reserved"
   in
   let () = assert rejected in
+  (* The overnight cadence is daily only: it is rejected at the input
+     boundary even for flat targets, before any session is simulated. *)
+  let overnight_rejected =
+    try
+      let () =
+        ignore (run_intraday ~fill:Engine.Overnight (Array.make 8 0.))
+      in
+      false
+    with Invalid_argument message ->
+      message = "Intraday.run: overnight is a daily fill"
+  in
+  let () = assert overnight_rejected in
   let result = run_intraday [|1.; Float.nan; 0.; 0.; 0.; 0.; 0.; 0.|] in
   (* NaN becomes a zero target: exit at 120 instead of waiting for close. *)
   let () = assert_float_array [|1.2; 1.2|] result.equity in
@@ -10252,6 +10338,7 @@ let () =
   test_carried_short ();
   test_short_partial_cover_bankruptcy ();
   test_short_cure_minimum_fee ();
+  test_overnight_cadence ();
   let () = test_engine_fill_planner () in
   let () = test_engine_share_quantum () in
   let () = test_engine_tw_sell_partition () in

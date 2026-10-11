@@ -11,8 +11,9 @@ type costs = {
   per_share_sell_cap : float;
 }
 
-(** Price used to execute scheduled exposure changes. *)
-type fill = Open_next | Close_same
+(** Price used to execute scheduled exposure changes. [Overnight] enters at
+    the bar's close and exits at the next bar's open. *)
+type fill = Open_next | Close_same | Overnight
 
 (** One executed exposure change. *)
 type fill_event = {
