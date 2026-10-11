@@ -5,6 +5,7 @@
 ## Contents
 
 - [Command syntax](#command-syntax)
+- [`bt --version`](#bt---version)
 - [`bt fetch`](#bt-fetch)
   - [Fetch options](#fetch-options)
   - [API tokens](#api-tokens)
@@ -56,6 +57,7 @@
 ## Command syntax
 
 ```text
+bt --version | -v
 bt fetch MARKET/SYMBOL [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--data-dir DIR]
 bt fetch --market tw|us --symbol SYM [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--data-dir DIR]
 bt fetch us/SYM --bars 1m [--data-dir DIR]
@@ -70,6 +72,10 @@ bt daytrade STRAT... [--baseline us/SYM] [--fill open|close] [--leverage N] [--f
 bt target STRAT [--live] [--equity TWD] [--data-dir DIR] [--provisional-close PRICE]
 bt live STRAT [--live] [--equity TWD] [--data-dir DIR]
 ```
+
+## `bt --version`
+
+`bt --version` (or `bt -v`) prints `bt VERSION` and exits with code 0. The release version comes from `dune-project`. Builds from a Git checkout append `+SHORT_SHA` unless HEAD is tagged with the release version; builds without Git use the plain release version.
 
 ## `bt fetch`
 

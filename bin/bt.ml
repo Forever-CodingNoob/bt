@@ -1,5 +1,6 @@
 let usage =
   "usage:\n\
+   \  bt --version | -v\n\
    \  bt fetch [MARKET/SYMBOL] [--market tw|us] [--symbol SYM] [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--data-dir DIR]\n\
    \           positional MARKET/SYMBOL is equivalent to --market and --symbol\n\
    \  bt fetch us/SYM --bars 1m [--data-dir DIR]\n\
@@ -898,6 +899,10 @@ let dispatch () =
   if Array.length Sys.argv < 2 then begin
     prerr_endline help;
     exit 2
+  end;
+  if Sys.argv.(1) = "--version" || Sys.argv.(1) = "-v" then begin
+    let () = Printf.printf "bt %s\n" Version.version in
+    exit 0
   end;
   match Sys.argv.(1) with
   | "--help" | "-h" | "help" -> print_endline help

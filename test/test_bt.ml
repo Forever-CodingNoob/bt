@@ -2024,6 +2024,24 @@ let alpaca_fixture name =
        [Filename.concat "test/fixtures/alpaca" name;
         Filename.concat "fixtures/alpaca" name])
 
+let test_version_cli () =
+  let binary = locate ["_build/default/bin/bt.exe"; "../bin/bt.exe"] in
+  List.iter
+    (fun flag ->
+      let stdout_path = Filename.temp_file "bt-test-version-" ".txt" in
+      Fun.protect
+        ~finally:(fun () -> Sys.remove stdout_path)
+        (fun () ->
+          let invocation =
+            String.concat " "
+              [ Filename.quote binary; flag;
+                ">" ^ Filename.quote stdout_path ]
+          in
+          (* Both version flags report the current release and exit successfully. *)
+          let () = assert (Sys.command invocation = 0) in
+          assert (String.starts_with ~prefix:"bt 0.12.0" (read_file stdout_path))))
+    ["--version"; "-v"]
+
 let test_dividend_tax_cli () =
   let root = Filename.temp_file "bt-test-dividend-tax-" "" in
   let () = Sys.remove root in
@@ -9521,6 +9539,7 @@ let test_live_pair_cli_guards () =
   check "stock \"us/SPY\" as a\nstock \"us/QQQ\" as b\na.target 0.5\nb.target 0.5\n"
     "--provisional-close 100" "--provisional-close needs a one-stock strategy"
 let () =
+  let () = test_version_cli () in
   let () = test_daytrade_cli () in
   let () = test_intraday_latency () in
   let () = test_intraday_last_decision () in

@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- `bt --version` and `bt -v` print the build-time version and exit successfully. The release version is recorded in `dune-project` and bumped when cutting the changelog; Git builds append the short commit hash unless HEAD is tagged with that release version.
+
 ### Fixed
 
 - Shioaji trade history uses the requested `order.quantity` when `status.order_quantity` is zero, so filled Common FOK orders parse instead of stopping TW execution and after-close fill logging with `invalid Shioaji trade quantities`. Both per-code and account-wide reads retain quantity bounds and confirmed-deal checks.
