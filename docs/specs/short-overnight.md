@@ -20,6 +20,7 @@ Status: approved, not implemented
   - [Live account mapping](#live-account-mapping)
   - [Live entry](#live-entry)
   - [Live exit and cover](#live-exit-and-cover)
+  - [Live order invariants](#live-order-invariants)
   - [Live daily mode](#live-daily-mode)
 - [Errors](#errors)
 - [Tests](#tests)
@@ -141,6 +142,20 @@ Under `overnight`:
 
 Restart discovery: `us_step` today builds ids from the current date only (`1129-1146`) and the finish dispatch resolves unsuffixed entry ids only (`1186-1188`). Both change: at startup and at the 09:35 step the daemon lists recent orders through a new `Alpaca.list_orders` (`GET /v2/orders?status=all&limit=500&direction=desc&after=<7 days ago>&symbols=...`, paged with `until=<submitted_at of the last row>` until a page is short), keeps ids with the `bt-SYM-` prefix, and takes the latest such order per symbol, entry or exit. The date in that id anchors the symbol's series: the daemon resumes that series (verify the latest exit, settle, resubmit under the next number) until it is final and the symbol is flat, and allocates a new series only then. So a Monday restart finds Friday's entry and its exit, a restart between the entry fill and the exit submission submits the missing exit at once if the session is closed, and a restart after an entry-less exit resumes that exit under its own date. A strategy symbol held with no `bt-SYM-` order in the window (the daemon was down longer than a week) is treated as an overnight position with an unknown entry: the daemon logs `overnight position without entry` and exits it at the next exit point (evening if the session is closed, else the 09:35 step, else the late exit) under today's ids. The finish dispatch resolves a suffixed id by stripping the suffix. An existing exit in the series means verify, never resubmit blindly.
 
+### Live order invariants
+
+Rules the plan review added; every POST path follows them:
+
+- Pre-POST guard: before every overnight POST (evening exit, morning resubmission, `-late`, and the entry of a `short` or `overnight` file) the daemon lists the symbol's open orders (`GET /v2/orders?status=open&symbols=SYM`, paged like `list_orders`, any client id), settles each one, and sizes only from a positions read taken afterwards. The settle step is bounded: one cancel, then at most 20 polls 15 s apart; on expiry it returns `Outstanding`, the daemon logs `overnight exit outstanding`, places no successor for that symbol in that pass, continues with the other symbols, and rediscovers later. A 422 on cancel and a timeout never authorize a successor. Exceptions are isolated per symbol.
+- Entry follow: an entry still outstanding when the evening gate runs is followed until the session close plus 5 minutes (close from the calendar, early closes included) before it is settled.
+- Remainders: a filled exit is followed by a positions read; a nonzero remainder continues the same series under the next number, sized as `min |held| (qty - filled_qty)` of the latest exit so a lagging positions read cannot double it. A `-late` order is sized as `min |held| unfilled` when the guard settled a closing order in the same call (`unfilled` is that order's `qty - filled_qty`), else `|held|`; a zero quantity with a nonzero position posts nothing and keeps the symbol frozen until a read confirms flat.
+- Grace after 09:50: a resubmission placed at or after 09:50 is followed for 2 minutes before it may be settled; the three-resubmission bound stands.
+- Orphans: a strategy symbol held with no `bt-SYM-` order in the discovery window exits under `bt-SYM-DATE-orphan`, `-orphan2`, ..., a family `series_of_order` recognizes, so it never collides with that date's entry series.
+- Frozen symbols: a symbol whose late close failed is frozen before the joint plan: `Engine.plan_fills ~frozen` makes its trade exactly zero (`changed = (not frozen) && (force || eff <> prev_eff)`), so no other symbol is funded by a cover or sale that never happens. All existing callers pass `[||]`.
+- Funding order: `execute_decision` submits closes (long sells and covers, classified by the order's side against the sign of the holding it was placed on) before opens (long buys and short sells), with the fill barrier between them; a rejected close stops the opens. For a long-only file this is today's order.
+- Late-exit window: the clock is checked immediately before every `-late` POST and again after filled plus flat before an entry is released; each symbol's wait is capped at `min 180 (left / remaining)` seconds with `left` recomputed from the broker clock per symbol, so every held symbol gets its late close submitted before the cutoff.
+- Existing orders at a restart keep their pre-fill classification (an existing long sell with `held = 0` after its fill is still a close and keeps the barrier lookup).
+
 ### Live daily mode
 
 A file with `short` and without `overnight` carries shorts across sessions: the entry path is the same; no exit step; the decision at close minus 15 minutes resizes the short like a long, and a sign flip takes two sessions (see Live account mapping). Alpaca's overnight maintenance applies on the broker side; bt's profile rule sizes the backtest.
@@ -155,7 +170,7 @@ A file with `short` and without `overnight` carries shorts across sessions: the 
 | `short targets are not supported for tw`, `overnight is not supported for tw` | bt run, bt target, bt live, at parse validation with the file name |
 | `<symbol> is not shortable`, `<symbol> is not easy to borrow` | run_us startup |
 | `US account holds a short outside the strategy` | decide, check 2 |
-| `overnight exit unfilled`, `overnight position closed late`, `overnight entry skipped`, `overnight position without entry` | daemon log lines, not failures |
+| `overnight exit unfilled`, `overnight exit outstanding`, `overnight position closed late`, `overnight entry skipped`, `overnight position without entry` | daemon log lines, not failures |
 
 ## Tests
 
