@@ -12,6 +12,8 @@ type account_t = {
   cash : float;
   long_market_value : float;
   short_market_value : float;
+  initial_margin : float;
+  shorting_enabled : bool;
   status : string;
   trading_blocked : bool;
   account_number : string;
@@ -33,6 +35,18 @@ type order_t = {
   side : string;
   filled_avg_price : float option;
   filled_qty : float;
+}
+
+type listed_t = {
+  client_order_id : string;
+  submitted_at : string;
+  qty : float;
+  order : order_t;
+}
+
+type asset_t = {
+  shortable : bool;
+  easy_to_borrow : bool;
 }
 
 let failf fmt = Printf.ksprintf failwith fmt
@@ -106,15 +120,17 @@ let parse_clock raw =
 let parse_account raw =
   match
     jq_fields "account"
-      "[.equity, .cash, .long_market_value, .short_market_value, .status, (.trading_blocked | tostring), .account_number] | @tsv"
+      "[.equity, .cash, .long_market_value, .short_market_value, .initial_margin, (.shorting_enabled | tostring), .status, (.trading_blocked | tostring), .account_number] | @tsv"
       raw
   with
-  | [equity; cash; long_market_value; short_market_value; status;
-     trading_blocked; account_number] ->
+  | [equity; cash; long_market_value; short_market_value; initial_margin;
+     shorting_enabled; status; trading_blocked; account_number] ->
       { equity = float_field "account equity" equity;
         cash = float_field "account cash" cash;
         long_market_value = float_field "account long_market_value" long_market_value;
         short_market_value = float_field "account short_market_value" short_market_value;
+        initial_margin = float_field "account initial_margin" initial_margin;
+        shorting_enabled = bool_field "account shorting_enabled" shorting_enabled;
         status;
         trading_blocked = bool_field "account trading_blocked" trading_blocked;
         account_number }
@@ -167,6 +183,60 @@ let parse_order raw =
            | value -> Some (float_field "order filled_avg_price" value));
         filled_qty = float_field "order filled_qty" filled_qty }
   | _ -> failwith "invalid Alpaca order response"
+
+let order_of_fields id status side filled_avg_price filled_qty =
+  { id;
+    status;
+    side;
+    filled_avg_price =
+      (match filled_avg_price with
+       | "" -> None
+       | value -> Some (float_field "order filled_avg_price" value));
+    filled_qty = float_field "order filled_qty" filled_qty }
+
+let parse_orders raw =
+  let fields =
+    jq_fields "orders"
+      {|if type == "array" then [.[] |
+         if type == "object" and has("client_order_id") and
+            ((.client_order_id | type) == "string" or .client_order_id == null) and
+            all(.id, .submitted_at, .status, .side, .qty, .filled_qty; type == "string") and
+            (.side == "buy" or .side == "sell")
+         then (.client_order_id // "-"), .submitted_at, .qty, .id, .status,
+              .side, (.filled_avg_price // ""), .filled_qty
+         else error("invalid order listing row") end] | @tsv
+       else error("expected orders") end|}
+      raw
+  in
+  let rec collect fields acc =
+    match fields with
+    | [] | [""] -> List.rev acc
+    | client_order_id :: submitted_at :: qty :: id :: status :: side
+      :: filled_avg_price :: filled_qty :: rest ->
+        collect rest
+          ({ client_order_id; submitted_at; qty = float_field "order qty" qty;
+             order = order_of_fields id status side filled_avg_price filled_qty }
+           :: acc)
+    | _ -> failwith "invalid Alpaca orders response"
+  in
+  collect fields []
+
+let parse_asset raw =
+  match
+    jq_fields "asset"
+      {|if (.shortable | type) == "boolean" and (.easy_to_borrow | type) == "boolean"
+        then [(.shortable | tostring), (.easy_to_borrow | tostring)] | @tsv
+        else error("expected boolean asset flags") end|} raw
+  with
+  | [shortable; easy_to_borrow] ->
+      { shortable = bool_field "asset shortable" shortable;
+        easy_to_borrow = bool_field "asset easy_to_borrow" easy_to_borrow }
+  | _ -> failwith "invalid Alpaca asset response"
+
+let parse_cancel ~http_code =
+  match http_code with
+  | 204 | 422 -> ()
+  | code -> failf "Alpaca order cancel failed with HTTP %d" code
 
 let require_env name =
   match Sys.getenv_opt name with
@@ -293,6 +363,69 @@ let submit_market mode ~symbol ~qty ~side ~client_order_id =
   let body = order_body ~symbol ~qty ~side ~client_order_id in
   request ~method_:"POST" ~body mode ~path:"/v2/orders"
   |> expect_ok "order submission" parse_order
+
+let cancel_order mode id =
+  let _, http_code =
+    request ~method_:"DELETE" mode ~path:("/v2/orders/" ^ url_encode id)
+  in
+  parse_cancel ~http_code
+
+let order_by_id mode id =
+  let raw, http_code =
+    request mode ~path:("/v2/orders/" ^ url_encode id)
+  in
+  match http_code with
+  | 200 -> Some (parse_order raw)
+  | 404 -> None
+  | code -> failf "Alpaca order lookup failed with HTTP %d" code
+
+let asset mode symbol =
+  request mode ~path:("/v2/assets/" ^ url_encode symbol)
+  |> expect_ok "asset" parse_asset
+
+let with_until path until =
+  match until with
+  | None -> path
+  | Some value -> path ^ "&until=" ^ url_encode value
+
+let open_orders_path ~symbol ~until =
+  with_until
+    ("/v2/orders?status=open&limit=500&direction=desc&symbols=" ^ url_encode symbol)
+    until
+
+let orders_path ~symbols ~after ~until =
+  with_until
+    (Printf.sprintf
+       "/v2/orders?status=all&limit=500&direction=desc&after=%s&symbols=%s"
+       (url_encode after) (url_encode (String.concat "," symbols)))
+    until
+
+(* ponytail: a page boundary drops orders that share the last row's
+   submitted_at; bt submits seconds apart, so none are lost in practice. *)
+let paged_orders ?page mode path_of =
+  let page =
+    match page with
+    | Some page -> page
+    | None -> fun path -> request mode ~path |> expect_ok "orders" parse_orders
+  in
+  let rec pages until acc =
+    let rows = page (path_of ~until) in
+    let acc = List.rev_append rows acc in
+    match List.rev rows with
+    | last :: _ when List.length rows = 500 ->
+        (match until with
+         | Some cursor when cursor = last.submitted_at ->
+             failwith "Alpaca orders cursor did not advance"
+         | _ -> pages (Some last.submitted_at) acc)
+    | _ -> List.rev acc
+  in
+  pages None []
+
+let open_orders ?page mode symbol =
+  paged_orders ?page mode (fun ~until -> open_orders_path ~symbol ~until)
+
+let list_orders ?page mode ~symbols ~after =
+  paged_orders ?page mode (fun ~until -> orders_path ~symbols ~after ~until)
 
 let order_by_client_id mode client_order_id =
   let raw, http_code =

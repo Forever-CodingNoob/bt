@@ -5120,12 +5120,15 @@ let test_alpaca_clock_parse () =
 
 let test_alpaca_account_parse () =
   let actual = Alpaca.parse_account (alpaca_fixture "account.json") in
-  (* Fixture equity = -23140.2 + 126960.76 + 0. = 103820.56. *)
+  (* Fixture equity = -23140.2 + 126960.76 + 0. = 103820.56; initial_margin
+     and shorting_enabled are copied from the documented account response. *)
   let expected : Alpaca.account_t =
     { equity = 103820.56;
       cash = -23140.2;
       long_market_value = 126960.76;
       short_market_value = 0.;
+      initial_margin = 63480.38;
+      shorting_enabled = true;
       status = "ACTIVE";
       trading_blocked = false;
       account_number = "010203ABCD" }
@@ -5179,6 +5182,139 @@ let test_alpaca_order_parse () =
       filled_qty = 2. }
   in
   assert (filled = filled_expected)
+
+let test_alpaca_orders_parse () =
+  let listed = Alpaca.parse_orders (alpaca_fixture "orders.json") in
+  (* The fixture lists three rows newest first: the filled cover, the
+     filled entry, and a canceled order with a null client id. *)
+  let ids = List.map (fun (item : Alpaca.listed_t) -> item.client_order_id) listed in
+  assert (ids = ["bt-QQQ-2026-10-09-cover"; "bt-QQQ-2026-10-09"; "-"]);
+  let cover = List.hd listed in
+  assert (cover.submitted_at = "2026-10-09T20:05:12.080Z");
+  assert (cover.qty = 3.);
+  let expected : Alpaca.order_t =
+    { id = "61e69015-8549-4bfd-b9c3-01e75843f47d"; status = "filled";
+      side = "buy"; filled_avg_price = Some 601.25; filled_qty = 3. }
+  in
+  assert (cover.order = expected);
+  let canceled = List.nth listed 2 in
+  assert (canceled.order.filled_avg_price = None && canceled.order.status = "canceled");
+  assert (Alpaca.parse_orders "[]" = []);
+  assert_failure (fun () -> ignore (Alpaca.parse_orders "{}"));
+  assert_failure (fun () ->
+    ignore (Alpaca.parse_orders {|[{"client_order_id":"x","submitted_at":"t","qty":"1","id":"i","status":"new","side":"hold","filled_qty":"0"}]|}));
+  let fields : (string * string) list =
+    ["submitted_at", {|"2026-10-09T20:05:12.080Z"|}; "id", {|"i"|};
+     "status", {|"new"|}; "client_order_id", {|"x"|}; "side", {|"buy"|};
+     "qty", {|"1"|}; "filled_qty", {|"0"|}]
+  in
+  (* Every listing field is required; only an explicit null client id has
+     the documented "-" fallback. Missing fields cannot become blank TSV. *)
+  List.iter (fun (field, _) ->
+    List.iter (fun replacement ->
+      let row = List.filter_map (fun (name, value) ->
+        let value = if name = field then replacement else Some value in
+        Option.map (fun value -> Printf.sprintf "%S:%s" name value) value) fields in
+      let raw = "[{" ^ String.concat "," row ^ "}]" in
+      let rejected =
+        try ignore (Alpaca.parse_orders raw); false with Failure _ -> true
+      in
+      (* Omission, false, and a JSON number are not the required strings. *)
+      assert rejected) [None; Some "false"; Some "0"]) fields
+
+let test_alpaca_asset_parse () =
+  (* Both flags are copied from the documented asset response. *)
+  assert (Alpaca.parse_asset (alpaca_fixture "asset.json")
+    = { Alpaca.shortable = true; easy_to_borrow = true });
+  assert (Alpaca.parse_asset {|{"shortable":false,"easy_to_borrow":true}|}
+    = { Alpaca.shortable = false; easy_to_borrow = true });
+  assert_failure (fun () -> ignore (Alpaca.parse_asset {|{"shortable":"yes"}|}));
+  (* JSON strings "true" must not authorize shorts: both flags must be
+     actual booleans before tostring can erase their JSON types. *)
+  List.iter (fun raw ->
+    let rejected =
+      try ignore (Alpaca.parse_asset raw); false with Failure _ -> true
+    in
+    assert rejected)
+    [{|{"shortable":"true","easy_to_borrow":true}|};
+     {|{"shortable":true,"easy_to_borrow":"true"}|};
+     {|{"shortable":"true","easy_to_borrow":"true"}|}]
+
+let test_alpaca_cancel_and_listing () =
+  (* 204 is canceled and 422 is not cancelable; neither is a final state. *)
+  let () = Alpaca.parse_cancel ~http_code:204 in
+  let () = Alpaca.parse_cancel ~http_code:422 in
+  assert_failure (fun () -> Alpaca.parse_cancel ~http_code:500);
+  let after = "2026-10-05T20:05:00-04:00" in
+  let base =
+    "/v2/orders?status=all&limit=500&direction=desc&after=2026-10-05T20%3A05%3A00-04%3A00&symbols=QQQ%2CSPY"
+  in
+  assert (Alpaca.orders_path ~symbols:["QQQ"; "SPY"] ~after ~until:None = base);
+  assert (Alpaca.orders_path ~symbols:["QQQ"; "SPY"] ~after
+    ~until:(Some "2026-10-09T20:05:12.080Z")
+    = base ^ "&until=2026-10-09T20%3A05%3A12.080Z");
+  (* Rows come newest first: row 0 is 09:59 and row 599 is 00:00. *)
+  let row index : Alpaca.listed_t =
+    { client_order_id = "bt-QQQ-" ^ string_of_int index;
+      submitted_at = Printf.sprintf "2026-10-09T%02d:%02d:00Z"
+        ((599 - index) / 60) ((599 - index) mod 60);
+      qty = 1.;
+      order = { id = string_of_int index; status = "filled"; side = "buy";
+                filled_avg_price = None; filled_qty = 0. } }
+  in
+  (* The open listing pages the same way: 500 rows, then the exclusive
+     cursor; the fake refuses a path without the 500 limit. *)
+  let open_path = "/v2/orders?status=open&limit=500&direction=desc&symbols=QQQ" in
+  assert (Alpaca.open_orders_path ~symbol:"QQQ" ~until:None = open_path);
+  let open_paths = ref [] in
+  let open_page path =
+    let () = assert (contains path "limit=500") in
+    let () = open_paths := path :: !open_paths in
+    if List.length !open_paths = 1 then List.init 500 row else [row 500]
+  in
+  assert (List.length (Alpaca.open_orders ~page:open_page Alpaca.Paper "QQQ") = 501);
+  assert (List.rev !open_paths = [open_path; open_path ^ "&until=2026-10-09T01%3A40%3A00Z"]);
+  let paths = ref [] in
+  let page path =
+    let () = paths := path :: !paths in
+    match List.length !paths with
+    | 1 -> List.init 500 row
+    | 2 -> List.init 2 (fun index -> row (500 + index))
+    | _ -> assert false
+  in
+  let listed = Alpaca.list_orders ~page Alpaca.Paper ~symbols:["QQQ"] ~after in
+  (* A full first page continues with until set to its last row's
+     submitted_at, row 499 at 01:40:00 (exclusive, so the second page holds
+     rows 500 and 501 at 01:39 and 01:38); 502 rows in page order. *)
+  assert (List.length listed = 502);
+  assert ((List.nth listed 500).Alpaca.client_order_id = "bt-QQQ-500");
+  assert ((List.nth listed 500).Alpaca.submitted_at = "2026-10-09T01:39:00Z");
+  assert (List.rev !paths
+    = [ "/v2/orders?status=all&limit=500&direction=desc&after=2026-10-05T20%3A05%3A00-04%3A00&symbols=QQQ";
+        "/v2/orders?status=all&limit=500&direction=desc&after=2026-10-05T20%3A05%3A00-04%3A00&symbols=QQQ&until=2026-10-09T01%3A40%3A00Z" ]);
+  (* A short first page is the whole listing. *)
+  let single = Alpaca.list_orders ~page:(fun _ -> [row 1]) Alpaca.Paper
+    ~symbols:["QQQ"] ~after in
+  assert (List.length single = 1);
+  let repeated = List.init 500 row in
+  (* A repeated full page still ends at 01:40:00, the current until cursor.
+     Both listings must fail on page two rather than fetch page three. *)
+  List.iter (fun list_orders ->
+    let calls = ref 0 in
+    let page (_ : string) : Alpaca.listed_t list =
+      let () = incr calls in
+      match !calls with
+      | 1 | 2 -> repeated
+      | _ -> failwith "unexpected third orders page"
+    in
+    let stopped =
+      try ignore (list_orders page); false
+      with Failure message -> message = "Alpaca orders cursor did not advance"
+    in
+    let () = assert stopped in
+    assert (!calls = 2))
+    [(fun page -> Alpaca.open_orders ~page Alpaca.Paper "QQQ");
+     (fun page -> Alpaca.list_orders ~page Alpaca.Paper ~symbols:["QQQ"] ~after)]
 
 let test_alpaca_snapshot_parse () =
   let fixture = alpaca_fixture "snapshot.json" in
@@ -5351,7 +5487,8 @@ let test_us_plan_state_split () =
 let test_us_plan_action_foreign_symbol () =
   let account : Alpaca.account_t =
     { equity = 1.; cash = -600.; long_market_value = 999.;
-      short_market_value = 0.; status = "ACTIVE";
+      short_market_value = 0.; initial_margin = 0.; shorting_enabled = true;
+      status = "ACTIVE";
       trading_blocked = false; account_number = "fixture" } in
   (* A short holding array must not silently drop QQQ under on_change. *)
   assert (match Live.us_plan_action ~rebalance:false ~symbols:[|"SPY"; "QQQ"|]
@@ -5401,7 +5538,8 @@ let test_us_plan_action_pair_matches_run () =
     let value = Array.fold_left (fun sum shares -> sum +. shares *. price) 0. held in
     let account : Alpaca.account_t =
       { equity = 1.; cash = e1 -. value; long_market_value = value;
-        short_market_value = 0.; status = "ACTIVE";
+        short_market_value = 0.; initial_margin = 0.; shorting_enabled = true;
+        status = "ACTIVE";
         trading_blocked = false; account_number = "fixture" } in
     let state, actions = Live.us_plan_action ~rebalance:false ~symbols
       ~date:"2025-06-24" ~account ~position_symbols:["SPY"; "QQQ"]
@@ -5472,7 +5610,8 @@ let test_us_plan_state () =
 let test_us_plan_action_checks () =
   let base : Alpaca.account_t =
     { equity = 999999.; cash = 500.; long_market_value = 500.;
-      short_market_value = 0.; status = "ACTIVE";
+      short_market_value = 0.; initial_margin = 0.; shorting_enabled = true;
+      status = "ACTIVE";
       trading_blocked = false; account_number = "paper-account" }
   in
   let choose account held =
@@ -5527,7 +5666,8 @@ let test_us_plan_action_checks () =
 let test_us_plan_action_orders () =
   let account ~cash ~held ~price : Alpaca.account_t =
     { equity = 1.; cash; long_market_value = held *. price;
-      short_market_value = 0.; status = "ACTIVE";
+      short_market_value = 0.; initial_margin = 0.; shorting_enabled = true;
+      status = "ACTIVE";
       trading_blocked = false; account_number = "paper-account" }
   in
   let choose ~rebalance ~cash ~held ~price ~target ~previous_target =
@@ -5625,7 +5765,8 @@ let test_us_plan_action_matches_run () =
     let cash = e1 -. held *. price in
     let account : Alpaca.account_t =
       { equity = 1.; cash; long_market_value = held *. price;
-        short_market_value = 0.; status = "ACTIVE";
+        short_market_value = 0.; initial_margin = 0.; shorting_enabled = true;
+        status = "ACTIVE";
         trading_blocked = false; account_number = "paper-account" }
     in
     let state, actions =
@@ -5672,6 +5813,7 @@ let test_us_live_fractional () =
     let account : Alpaca.account_t =
       { equity; cash = equity -. held *. 300.;
         long_market_value = held *. 300.; short_market_value = 0.;
+        initial_margin = 0.; shorting_enabled = true;
         status = "ACTIVE"; trading_blocked = false;
         account_number = "paper-account" }
     in
@@ -5727,7 +5869,8 @@ let test_us_live_plan_policy () =
   let choose rebalance ~target ~previous_target =
     let account : Alpaca.account_t =
       { equity = 1000.; cash = 600.; long_market_value = 400.;
-        short_market_value = 0.; status = "ACTIVE";
+        short_market_value = 0.; initial_margin = 0.; shorting_enabled = true;
+        status = "ACTIVE";
         trading_blocked = false; account_number = "paper-account" }
     in
     let _, actions = Live.us_plan_action ~rebalance ~symbols:[|"SPY"|]
@@ -5765,7 +5908,8 @@ let test_us_live_quantity_limit () =
     let value = held *. 300. in
     let account : Alpaca.account_t =
       { equity = 1.; cash = 1. -. value; long_market_value = value;
-        short_market_value = 0.; status = "ACTIVE";
+        short_market_value = 0.; initial_margin = 0.; shorting_enabled = true;
+        status = "ACTIVE";
         trading_blocked = false; account_number = "paper-account" }
     in
     let _, actions = Live.us_plan_action ~rebalance:true ~symbols:[|"SPY"|]
@@ -6154,6 +6298,8 @@ let test_live_startup_guard () =
       cash = 10000.;
       long_market_value = 0.;
       short_market_value = 0.;
+      initial_margin = 0.;
+      shorting_enabled = true;
       status = "ACTIVE";
       trading_blocked = false;
       account_number = "paper-account" }
@@ -10207,6 +10353,9 @@ let () =
   test_alpaca_position_parse ();
   test_alpaca_positions_parse ();
   test_alpaca_order_parse ();
+  test_alpaca_orders_parse ();
+  test_alpaca_asset_parse ();
+  test_alpaca_cancel_and_listing ();
   test_alpaca_snapshot_parse ();
   test_engine_effective_targets ();
   test_short_effective_targets ();

@@ -15,6 +15,8 @@ type account_t = {
   cash : float;
   long_market_value : float;
   short_market_value : float;
+  initial_margin : float;
+  shorting_enabled : bool;
   status : string;
   trading_blocked : bool;
   account_number : string;
@@ -40,6 +42,21 @@ type order_t = {
   filled_qty : float;
 }
 
+(** One row of an order listing: the client identifier and submission time
+    that anchor an overnight series, with the order fields. *)
+type listed_t = {
+  client_order_id : string;
+  submitted_at : string;
+  qty : float;
+  order : order_t;
+}
+
+(** Alpaca asset flags that gate a short sale. *)
+type asset_t = {
+  shortable : bool;
+  easy_to_borrow : bool;
+}
+
 (** Trading API root for the selected account mode. *)
 val base_url : mode -> string
 
@@ -60,6 +77,17 @@ val parse_snapshot : string -> snapshot_t
 
 (** Parse an order response. *)
 val parse_order : string -> order_t
+
+(** Parse an order listing in response order; a null client id reads as
+    ["-"]. *)
+val parse_orders : string -> listed_t list
+
+(** Parse an asset response. *)
+val parse_asset : string -> asset_t
+
+(** Map a cancel response: 204 canceled and 422 not cancelable both succeed,
+    since neither proves a final state; any other code fails. *)
+val parse_cancel : http_code:int -> unit
 
 (** Fetch the current Alpaca market clock. *)
 val clock : mode -> clock_t
@@ -103,6 +131,40 @@ val submit_market :
 
 (** Find an order by its client-supplied identifier. *)
 val order_by_client_id : mode -> string -> order_t option
+
+(** Request cancellation of an order by its Alpaca id ([DELETE /v2/orders/ID]);
+    see [parse_cancel] for the accepted responses. *)
+val cancel_order : mode -> string -> unit
+
+(** Find an order by its Alpaca id; 404 is [None]. *)
+val order_by_id : mode -> string -> order_t option
+
+(** Build the listing path of one symbol's open orders, whatever their
+    client ids: 500 rows, newest first, before the exclusive [until] when
+    given. *)
+val open_orders_path : symbol:string -> until:string option -> string
+
+(** List every open order of one symbol, newest first, paging with [until]
+    set to the last row's [submitted_at] until a page is shorter than 500
+    rows. [page] fetches one path and defaults to the trading API. *)
+val open_orders : ?page:(string -> listed_t list) -> mode -> string -> listed_t list
+
+(** Fetch the shortability flags of one symbol. *)
+val asset : mode -> string -> asset_t
+
+(** Build the listing path: all statuses, 500 rows, newest first, submitted
+    after [after] (and before the exclusive [until] when given), on the
+    comma-joined [symbols]. *)
+val orders_path :
+  symbols:string list -> after:string -> until:string option -> string
+
+(** List every order on [symbols] submitted after [after], newest first,
+    paging with [until] set to the last row's [submitted_at] until a page is
+    shorter than 500 rows. [page] fetches one path and defaults to the
+    trading API. *)
+val list_orders :
+  ?page:(string -> listed_t list) ->
+  mode -> symbols:string list -> after:string -> listed_t list
 
 (** Parse regular-session calendar rows from an Alpaca response. *)
 val parse_calendar : string -> Data.session list
