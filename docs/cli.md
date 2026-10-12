@@ -250,10 +250,10 @@ Both markets print the account fields once, then one symbol block per stock in d
 > [!IMPORTANT]
 > `bt target` prints the proposed action but never submits an order, even with `--live`.
 
-A strategy without `rebalance daily` or `rebalance on_change` rebalances only when its effective target changes. TW maturity rollover pairs run either way. `bt target` prints `warning: <file> does not declare rebalance; trading only when the target changes` to standard error before the decision; standard output is unchanged.
+A strategy without `rebalance daily` or `rebalance on_change` uses on_change rebalancing. TW maturity rollover pairs run either way; daily US `short` strategies also compare the holding's sign with the target's sign as described below. `bt target` prints `warning: <file> does not declare rebalance; trading only when the target changes` to standard error before the decision; standard output is unchanged.
 
 > [!IMPORTANT]
-> Under `rebalance on_change`, declared or by default, each decision compares today's effective target with the previous session's, which bt recomputes from that session's cached final close. When the two are equal, the decision places no rebalancing order, and the position keeps its gap from target until the target next changes. The gap can come from ordinary price drift, from a previous-session decision at a provisional price whose target the final close does not reproduce, from a missed session or rejected orders, or from a partial fill. `rebalance daily` re-plans toward the target from the held position every session. It can still leave a residual: US skips a buy under USD 1, and TW floors cash quantities to whole shares and margin quantities to 1000-share lots.
+> Under `rebalance on_change`, declared or by default, each decision compares today's effective target with the previous session's, which bt recomputes from that session's cached final close. When the two are equal, the decision places no rebalancing order, and the position keeps its gap from target until the target next changes, except for the held-sign rule in a daily US `short` strategy without `overnight` described below. The gap can come from ordinary price drift, from a previous-session decision at a provisional price whose target the final close does not reproduce, from a missed session or rejected orders, or from a partial fill. `rebalance daily` re-plans toward the target from the held position every session. It can still leave a residual: US skips a buy under USD 1, and TW floors cash quantities to whole shares and margin quantities to 1000-share lots.
 
 ### Strategy validation
 
@@ -265,10 +265,9 @@ These checks apply to `bt target` and `bt live` in both markets.
 | `live trading needs distinct symbols: SYMBOL` | A broker symbol declared twice fails the command, even under distinct aliases. |
 | `--provisional-close needs a one-stock strategy` | `bt target` fails before any broker call. |
 | `<file>: short targets are not supported for tw`, `<file>: overnight is not supported for tw` | A TW strategy that declares `short` or `overnight` fails at parse validation, exit 1, before any broker call. The same messages apply to `bt run`. |
-| `short and overnight are not supported by bt target and bt live yet` | A US strategy that declares `short` or `overnight` fails before any broker call; live support is a later stage. |
 | `history gap in SYMBOL within the last 5 sessions` | The decision fails on the first symbol, in declaration order, that misses one of the last five dates in the union of cached dates. `bt target` exits 1, the US daemon retries until the cutoff, and the TW daemon skips the day. |
 
-History is loaded and freshness-checked per symbol. A gap in any of the last five union dates fails the decision; older gaps pass. Every symbol is then filtered to the common dates, as `bt run` does, before its provisional bar is appended. The DSL compiler runs once with all assets, and `Engine.effective_targets` scales the final and previous target rows jointly. Under on_change, a symbol whose effective target is unchanged keeps its drift. When every symbol is unchanged, US skips before planning.
+History is loaded and freshness-checked per symbol. A gap in any of the last five union dates fails the decision; older gaps pass. Every symbol is then filtered to the common dates, as `bt run` does, before its provisional bar is appended. The DSL compiler runs once with all assets, and `Engine.effective_targets` scales the final and previous target rows jointly. Under on_change, a symbol whose effective target is unchanged keeps its drift, subject to the daily US `short` held-sign rule below. When every symbol is unchanged after that rule, US skips before planning.
 
 ### US market
 
@@ -298,11 +297,13 @@ The Alpaca key variables must contain credentials for the selected account.
 
 For each symbol, the command fetches Tiingo history through Alpaca's previous daily bar and reads Alpaca's current snapshot. It keeps the dates every symbol shares, appends each snapshot as a provisional bar, and evaluates the strategy with the same DSL compiler as `bt run`. With `--provisional-close PRICE`, the command skips the Alpaca snapshot and treats the last cached date as the previous daily bar.
 
-Under `rebalance on_change`, or without a declaration, the command compares each symbol's effective target with its previous bar's effective target, or 0 on the first bar. A symbol whose target is unchanged skips with the reason `target unchanged`. Under `rebalance daily`, or for symbols whose targets changed, it plans orders from the account and the held positions.
+Under `rebalance on_change`, or without a declaration, the command compares each symbol's effective target with its previous bar's effective target, or 0 on the first bar, subject to the daily `short` held-sign rule below. A symbol whose target is unchanged after that rule skips with the reason `target unchanged`. Under `rebalance daily`, or for symbols whose targets changed, it plans orders from the account and the held positions.
 
-The command maps the account into one engine state. A negative Alpaca cash balance becomes the account debit. bt splits it across symbols in proportion to their holdings at the provisional close, or equally when every holding is zero. Each symbol's holding becomes margin inventory up to `loan / 0.5`, the value its share of the loan finances at the US financing ratio; the rest is cash inventory. One `Engine.plan_fills` call then plans every symbol with the US default costs, as `bt run` does. Alpaca's `equity` field does not size the orders.
+The command maps the account into one engine state. A negative Alpaca cash balance becomes the account debit. bt splits it across symbols in proportion to their long holdings at the provisional close, or equally when every long holding is zero. Each symbol's long holding becomes margin inventory up to `loan / 0.5`, the value its share of the loan finances at the US financing ratio; the rest is cash inventory. One `Engine.plan_fills` call then plans every symbol with the US default costs, as `bt run` does. Alpaca's `equity` field does not size the orders.
 
-The command nets each symbol's planned ordinary buys and sells into one order for that symbol. Refinancing pairs need no Alpaca order, so the net ignores them. A net of 0 skips with the reason `no trade planned`. The command truncates the quantity to at most 9 decimal places, caps a sell at the held position, and sells every held share when the plan closes the position. A buy below USD 1 notional, or a quantity that truncates to 0, skips with the reason `below $1 minimum order value`. A sell of any positive quantity becomes an order, so you can always close a position worth less than USD 1.
+The command nets each symbol's planned ordinary buys and sells into one order for that symbol. Refinancing pairs need no Alpaca order, so the net ignores them. A net of 0 skips with the reason `no trade planned`. The command truncates the quantity to at most 9 decimal places, caps a long sell at the held position, and sells every held share when the plan closes a long position. A buy below USD 1 notional, or a quantity that truncates to 0, skips with the reason `below $1 minimum order value`. A sell of any positive quantity becomes an order, so you can always close a long position worth less than USD 1.
+
+In a strategy that declares `short`, a negative Alpaca quantity is the short leg: its value at the provisional close is the short exposure, and `(1 + 0.5)` times that value of the account cash is reserved, as the backtest does. The planner's short open and cover join the net: a short entry or add is a whole-share `sell`, a cover is a `buy` of the whole shares planned, and a cover to zero buys the whole held quantity, subject to the USD 1 buy minimum. A sign flip closes the held leg only (every held share, fractional for a long); the next decision can open the new leg from flat, also under `rebalance on_change`. In a `short` strategy without `overnight`, the symbol's held exposure replaces its previous target whenever the held exposure and the new target differ in sign, including a flat holding and a nonzero target. A strategy without `short` keeps every target at or above 0 and rejects an account that holds a short. With `short` but no `overnight`, the daemon carries and resizes shorts across sessions without an exit step.
 
 #### Output
 
@@ -323,9 +324,10 @@ The [strategy validation](#strategy-validation) checks apply first. An unavailab
 | Message | Condition |
 |---|---|
 | `US account cash is not finite` | Alpaca's `cash` is NaN or infinite. |
-| `US account holds a short position` | `short_market_value` is not 0, or the held quantity is negative. |
+| `US account holds a short position` | The strategy does not declare `short`, and `short_market_value` is not 0 or a held quantity is negative. |
+| `US account holds a short outside the strategy` | The strategy declares `short`, `short_market_value` is not 0, and no strategy symbol is held short. |
 | `US account holds unsupported symbol SYMBOL` | An open position in Alpaca's positions list has a symbol outside the strategy. The check applies to one-stock strategies too. |
-| `US account holds other symbols` | `long_market_value` is not finite, or differs from the sum of every symbol's held quantity at its provisional close by more than 1% of `long_market_value`. |
+| `US account holds other symbols` | `long_market_value` is not finite, or differs from the sum of every long holding at its provisional close by more than 1% of `long_market_value`; or `short_market_value` is not finite, or its negation differs from the sum of every short holding at its provisional close by more than 1% of that negation. |
 | `US account equity is not positive` | The mapped equity is NaN, infinite, or at most 0. |
 
 A `--provisional-close` price more than about 1% away from Alpaca's mark trips the other-symbols check on an account that holds the stock.
@@ -465,16 +467,16 @@ Both daemons print ASCII log lines to standard output: one account line per deci
 
 Only one daemon can hold `$HOME/.bt/live-<market>-<mode>.lock` at a time (`paper` or `live` for US; `simulation` or `production` for TW), regardless of the data directory; another fails with `another bt live daemon holds <path>`. The lock excludes only daemons that share a `HOME`, market, and mode, so daemons with different `HOME` values can trade the same account at once.
 
-A strategy without `rebalance daily` or `rebalance on_change` rebalances only when its effective target changes. TW maturity rollover pairs run either way. The daemon logs `warning: <file> does not declare rebalance; trading only when the target changes` once, right after the `startup` line.
+A strategy without `rebalance daily` or `rebalance on_change` uses on_change rebalancing. TW maturity rollover pairs run either way; daily US `short` strategies also apply the held-sign rule of `bt target`. The daemon logs `warning: <file> does not declare rebalance; trading only when the target changes` once, right after the `startup` line.
 
 > [!IMPORTANT]
-> Under `rebalance on_change`, declared or by default, each session compares today's effective target with the previous session's, which the daemon recomputes from that session's cached final close. When the two are equal, the session places no rebalancing order, and the position keeps its gap from target until the target next changes. The gap can come from ordinary price drift, from a previous-session decision at a provisional price whose target the final close does not reproduce, from a missed session or rejected orders, or from a partial fill. `rebalance daily` re-plans toward the target from the held position every session. It can still leave a residual: US skips a buy under USD 1, and TW floors cash quantities to whole shares and margin quantities to 1000-share lots.
+> Under `rebalance on_change`, declared or by default, each session compares today's effective target with the previous session's, which the daemon recomputes from that session's cached final close. When the two are equal, the session places no rebalancing order, and the position keeps its gap from target until the target next changes, except for the held-sign rule in a daily US `short` strategy without `overnight`. The gap can come from ordinary price drift, from a previous-session decision at a provisional price whose target the final close does not reproduce, from a missed session or rejected orders, or from a partial fill. `rebalance daily` re-plans toward the target from the held position every session. It can still leave a residual: US skips a buy under USD 1, and TW floors cash quantities to whole shares and margin quantities to 1000-share lots.
 
 ### US market
 
 #### Prerequisites
 
-The strategy must declare one or more distinct US stocks, and the account may hold only those symbols. The selected Alpaca account must be active and not trading-blocked.
+The strategy must declare one or more distinct US stocks, and the account may hold only those symbols. The selected Alpaca account must be active and not trading-blocked. A strategy that declares `short` needs every symbol flagged `shortable` and `easy_to_borrow` at Alpaca; otherwise the daemon fails at startup with `SYMBOL is not shortable` or `SYMBOL is not easy to borrow`.
 
 #### Options
 
@@ -492,59 +494,76 @@ The strategy must declare one or more distinct US stocks, and the account may ho
 | `APCA_API_KEY_ID` | - | Identify the selected paper or live Alpaca account. |
 | `APCA_API_SECRET_KEY` | - | Authenticate the selected paper or live Alpaca account. |
 
-At startup, the daemon logs the mode, account number, and equity.
+At startup, the daemon logs the mode, account number, equity, initial margin, and shorting-enabled flag.
 
 #### Decision cycle
 
-The daemon derives every phase from Alpaca's `next_close`.
+The daemon derives the decision, submit cutoff, and reconciliation deadline from Alpaca's `next_close`. Under `overnight`, it wakes at the next open plus 5 minutes (normally 09:35 ET) and uses 09:50 ET as the open step's deadline.
 
 | Phase | Timing | Action |
 |---|---|---|
+| Open step (`overnight` only) | 09:35 ET, re-checked every 60 seconds until 09:50 ET; immediately on a pre-decision open-market restart | List the week's `bt-SYMBOL-` orders and follow each symbol's latest exit. A final exit leaves any remainder still held, capped at that exit's unfilled quantity, to the next id of its series. A final unfilled exit, or one still open at 09:50 after the settle step, is resubmitted at most three times, then `note=overnight exit unfilled`. The two-minute grace applies to an outstanding exit submitted at or after 09:50 ET, first exits included; it runs from submitted_at, polls every 15 seconds, and keeps its remaining duration across a restart; an exit submitted before 09:50 is settled at 09:50. |
+| Late exit (`overnight` only) | 15 minutes before the close, before Evaluate | Close any position still held with a `market` order under `bt-SYMBOL-DATE-late`, sized as the position capped at what the guard's closing orders left unfilled, after the open-orders guard and a clock check. Poll it every 15 seconds for at most 3 minutes (or the window left on that clock divided by the symbols still to process). A position the guard's fills already cover stays blocked until a read confirms it flat. The entry follows only once the close is `filled`, the symbol reads flat, the guard finds no other order outstanding, and the clock still shows the submit window open. Otherwise the symbol logs `note=overnight entry skipped` and is frozen: the planner keeps its holding whatever the target and `rebalance`, and sizes the other symbols around it. |
 | Evaluate | 15 minutes before the close | Refresh Tiingo history and evaluate the provisional daily bar. |
-| Submit | Until 2 minutes before the close | Query today's deterministic client order ID for every symbol, then submit fractional `market` orders with `time_in_force: day` where needed. A session with sells and buys submits every buy only after every sell fills. |
-| Reconcile | After the close | Poll each open order every 15 seconds until it reaches a terminal status or 5 minutes pass after the close, then log its fill. |
-| Sleep | After reconciliation | Sleep until the next open. |
+| Submit | Until 2 minutes before the close | Query today's deterministic client order ID for every symbol, then submit fractional `market` orders with `time_in_force: day` where needed; a short entry is a whole-share sell. Closes (long sells, buys to cover) go first; opens (long buys, short sells) go out only after every close fills. Existing orders do not retain a stored pre-fill classification; on a restart an existing sell is a close when the current holding is nonnegative and an existing buy is a close only when it is negative, so a long sell after a full fill stays in the close phase. Without shorts this is the sell-then-buy order. |
+| Reconcile | After the close | Poll each open entry order every 15 seconds until it reaches a terminal status or 5 minutes pass after the close, then log its fill. |
+| Exit gate (`overnight` only) | After the close plus 5 minutes, and whenever the daemon starts while the market is closed | An entry still open is followed to its session's close plus 5 minutes (from the exchange calendar, early closes included), then settled by the open-orders guard. Queue a `market` `day` exit for the quantity held: a `buy` under `bt-SYMBOL-DATE-cover` for a short, a fractional `sell` under `bt-SYMBOL-DATE-exit` for a long. Alpaca queues it for the next session's opening print. |
+| Sleep | After reconciliation | Sleep until the next open; under `overnight`, until the close plus 5 minutes to run the exit gate, then until the open plus 5 minutes. |
 
-The Submit phase ends 2 minutes before the close because Alpaca queues a day order sent after the close for the next session, and the order request can take up to its 60-second curl timeout. At or after that cutoff, the daemon logs `error=submit cutoff passed order=skip` and submits nothing. The account checks, the planner sizing, the `target unchanged` and `no trade planned` skips, the 9-decimal fractional quantity, and the USD 1 buy minimum match `bt target`.
+Before every order the daemon places for a `short` or `overnight` strategy (the evening exit, a morning resubmission, a late close, and the entry itself), it lists every open order of the symbol whatever its client id (`GET /v2/orders?status=open&limit=500&direction=desc&symbols=SYMBOL`, paged with `until`), runs the settle step on each, and sizes from the position read afterwards. The settle step cancels once and polls by Alpaca order id at most 20 times, 15 seconds apart (5 minutes), until the order is `filled`, `canceled`, `expired`, or `rejected`. `pending_cancel` and `stopped` are outstanding; a fill during the cancel is a fill, and a 422 cancel response (not cancelable) still requires the same poll. An order still outstanding at the bound logs `note=overnight exit outstanding`; the symbol gets no successor in that pass, the other symbols continue, and the next pass rediscovers it. A per-symbol exception logs `date=DATE symbol=SYMBOL error=REASON order=skip` and blocks that symbol without stopping the others.
 
-A session with both sells and buys runs a sell phase. The daemon POSTs its sells, polls all of them every 15 seconds, and starts buys only after every sell reaches `filled`. It checks the clock before each POST. A session with no sell or no buy posts its orders before the finish pass, as a one-order session always did. On restart, existing sells join the sell barrier and existing buys enter only the finish pass. No request is retried after a POST.
+Restart discovery anchors a symbol's series on the date in its latest `bt-SYMBOL-` order of the past week, entry or exit: an existing exit is verified, never resubmitted blindly. A held strategy symbol with no such order logs `note=overnight position without entry` and exits under today's `bt-SYMBOL-DATE-orphan`, `-orphan2`, ... ids at the next exit point, leaving the day's entry series free.
+
+The Submit phase ends 2 minutes before the close because Alpaca queues a day order sent after the close for the next session, and the order request can take up to its 60-second curl timeout. At or after that cutoff, the daemon logs `error=submit cutoff passed order=skip` and submits no new entry or late close; the overnight exit gate runs separately after the close. The account checks, the planner sizing, the `target unchanged` and `no trade planned` skips, the 9-decimal fractional quantity, and the USD 1 buy minimum match `bt target`.
+
+A session with both closes and opens runs a close phase. The daemon POSTs its closes, polls all of them every 15 seconds, and starts opens only after every close reaches `filled`. It checks the clock before each POST. A session with only closes or only opens posts its orders before the finish pass, with no barrier to wait at. On restart, existing closes join the close barrier when opens remain; existing opens enter only the finish pass. Entry submissions are not retried after a POST; the overnight exit series has the bounded resubmissions described above.
 
 #### Output and logs
 
-Each daemon line starts with a UTC timestamp in `YYYY-MM-DDTHH:MM:SSZ` format. The `startup` line records the selected `mode`, `account` number, and `equity`. Each decision logs one account line, followed by one line per symbol:
+Each daemon line starts with a UTC timestamp in `YYYY-MM-DDTHH:MM:SSZ` format. The `startup` line records the selected `mode`, `account` number, `equity`, Alpaca's `initial-margin`, and `shorting-enabled`; sizing uses bt's profile, not those two fields. Each decision logs one account line, followed by one line per symbol:
 
 ```text
 date=DATE fetched-through=DATE equity=VALUE cash=VALUE debit=VALUE
 date=DATE symbol=SYMBOL provisional-close=VALUE target=VALUE held=VALUE order=ORDER fill=pending
 ```
 
-ORDER holds the deterministic order as `SIDE:QUANTITY:CLIENT-ORDER-ID` or the skip reason as `skip:REASON`. An all-unchanged on_change session logs only the account line, ending in `order=skip:target unchanged`. Existing-order, fill, and per-order error lines include `symbol=SYMBOL`. Client order IDs remain `bt-SYMBOL-DATE`. Fill lines record `client-order-id`, `fill-status`, `fill-price`, and `filled-qty`.
+ORDER holds the deterministic order as `SIDE:QUANTITY:CLIENT-ORDER-ID` or the skip reason as `skip:REASON`. An all-unchanged on_change session logs only the account line, ending in `order=skip:target unchanged`. Existing-order, fill, and per-order error lines include `symbol=SYMBOL`. Entry client order IDs remain `bt-SYMBOL-DATE`. Fill lines record `client-order-id`, `fill-status`, `fill-price`, and `filled-qty`.
 
-When new orders are pending, the daemon writes the decision lines only after today's order lookups and the pre-submit clock check succeed, so an attempt that fails before then and retries writes none. When the lookups find every order already placed, the daemon reconciles those orders without deciding or logging account and symbol decision lines. A restart whose only new orders are buys behind an existing sell skips that early check; each buy POST still checks the clock.
+Under `overnight`, the exit gate, the open step, and the late exit log each order they place as `date=DATE symbol=SYMBOL held=VALUE order=SIDE:QUANTITY:CLIENT-ORDER-ID fill=pending`. The first exit of the entry dated DATE uses `bt-SYMBOL-DATE-cover` or `bt-SYMBOL-DATE-exit`; resubmissions use `-cover2`, `-cover3`, `-cover4` (or `-exit2` and so on). An entry-less position found on DATE uses `bt-SYMBOL-DATE-orphan`, `-orphan2`, ...; a late close uses `bt-SYMBOL-DATE-late`. Their fills, and every order the open-orders guard settles, log as fill lines. An exit left queued after the close logs `date=DATE symbol=SYMBOL order=existing:CLIENT-ORDER-ID fill=pending`. The cycle's events log with a `note` field:
+
+| Line | Meaning |
+|---|---|
+| `date=DATE symbol=SYMBOL note=overnight exit unfilled` | The fourth exit of the series ended with an unfilled remainder still held; the position waits for the late exit. |
+| `date=DATE symbol=SYMBOL note=overnight exit outstanding` | An order on the symbol was still not final after 20 polls of 15 seconds following its cancel; no successor is placed for the symbol in this pass. |
+| `date=DATE symbol=SYMBOL note=overnight position closed late` | The decision found the position still open and is closing it under `-late`. |
+| `date=DATE symbol=SYMBOL note=overnight entry skipped` | The late close did not fill flat inside the submit window, an order on the symbol is outstanding, or the symbol's pass raised; the symbol is planned at its held exposure and its decision line reads `order=skip:overnight entry skipped`. |
+| `date=DATE symbol=SYMBOL note=overnight position without entry` | A held strategy symbol has no `bt-SYMBOL-` order in the past week; it exits under today's `-orphan` ids. |
+
+When new orders are pending, the daemon writes the decision lines only after today's order lookups and the pre-submit clock check succeed, so an attempt that fails before then and retries writes none. When the lookups find every order already placed, the daemon reconciles those orders without deciding or logging account and symbol decision lines. A restart whose only new orders are opens behind an existing close skips that early check; each opening POST still checks the clock.
 
 #### Failure handling
 
-The daemon refuses to start with an inactive or trading-blocked account. If the Alpaca clock request at the start of a daemon cycle fails, the daemon logs `order=retry`, retries every 60 seconds, and continues the same session once a request succeeds. Before the cutoff, a stale cache, a history gap, a fetch, snapshot, or evaluation error, a failed order lookup, or a failed clock check just before the first submission also logs `order=retry`, and the daemon retries every 60 seconds. Each retry looks up today's client order IDs first, so a symbol that already has an order gets no second one. At or after the cutoff, a failed order lookup logs `order=skip` and ends the US action for the day. Once the daemon sends any order request, nothing is retried that day, because the request may have reached Alpaca and a retry could submit the order twice. A failed buy request logs `symbol=SYMBOL error=order submission uncertain: REASON order=skip`, a `rejected` buy logs `symbol=SYMBOL error=Alpaca rejected the order order=skip`, and the other buys still go out. A failure while following a submitted order logs `symbol=SYMBOL error=REASON order=skip`.
+The daemon refuses to start with an inactive or trading-blocked account. If the Alpaca clock request at the start of a daemon cycle fails, the daemon logs `order=retry`, retries every 60 seconds, and continues the same session once a request succeeds. Before the cutoff, a stale cache, a history gap, a fetch, snapshot, or evaluation error, a failed order lookup, or a failed clock check just before the first entry submission also logs `order=retry`, and the daemon retries every 60 seconds. Each retry looks up today's client order IDs first, so a symbol that already has an entry gets no second one. At or after the cutoff, a failed order lookup logs `order=skip` and ends the US entry action for the day. Once the daemon sends an entry order request, it does not retry that decision, because the request may have reached Alpaca and a retry could submit the order twice. A failed opening request logs `symbol=SYMBOL error=order submission uncertain: REASON order=skip`, a `rejected` opening order logs `symbol=SYMBOL error=Alpaca rejected the order order=skip`, and the other opens still go out if their clock checks pass. A failure while following a submitted order logs `symbol=SYMBOL error=REASON order=skip`. Overnight exits use the separate bounded resubmission cycle above.
 
-A sell-phase stop sends no buy and logs a session-level `error=REASON order=skip` line. Known orders still enter the finish pass.
+A close-phase stop sends no opening order and logs a session-level `error=REASON order=skip` line. Known orders still enter the finish pass. SIDE below is `sell` for a long close and `buy` for a cover.
 
-| US sell-phase stop | Result |
+| US close-phase stop | Result |
 |---|---|
-| `sell SYMBOL rejected` or `sell SYMBOL uncertain` at submission | The failed sell logs `symbol=SYMBOL error=REASON order=skip`, and each other sell still goes out if its pre-submit clock check passes. The first failed sell names the stop, and no buy is POSTed. |
-| `submit cutoff passed` between submissions | Each sell whose pre-submit clock check finds the cutoff logs `symbol=SYMBOL error=submit cutoff passed order=skip` and is not POSTed. No buy POST. |
-| `sell SYMBOL STATE` while polling | No buy POST when STATE is `rejected`, `canceled`, `expired`, or `stopped`. A failed status lookup reports `sell SYMBOL uncertain`. |
-| `sell SYMBOL open at cutoff` | No buy POST. |
+| `SIDE SYMBOL rejected` or `SIDE SYMBOL uncertain` at submission | The failed close logs `symbol=SYMBOL error=REASON order=skip`, and each other close still goes out if its pre-submit clock check passes. The first failed close names the stop, and no opening order is POSTed. |
+| `submit cutoff passed` between submissions | Each close whose pre-submit clock check finds the cutoff logs `symbol=SYMBOL error=submit cutoff passed order=skip` and is not POSTed. No opening POST. |
+| `SIDE SYMBOL STATE` while polling | No opening POST when STATE is `rejected`, `canceled`, `expired`, or `stopped`. A failed status lookup reports `SIDE SYMBOL uncertain`. |
+| `SIDE SYMBOL open at cutoff` | No opening POST. |
 
 A failed [account check](#failure-handling) before the cutoff logs `error=Failure("MESSAGE") order=retry`, and the daemon retries every 60 seconds. If the account stays invalid until the cutoff, the daemon logs `error=submit cutoff passed order=skip` and places no order.
 
 > [!CAUTION]
-> `bt live --live` submits real-money fractional market orders. Confirm the credentials, account, and strategy before starting it.
+> `bt live --live` submits real-money market orders, including whole-share short sells and fractional long orders. Confirm the credentials, account, and strategy before starting it.
 
 > [!WARNING]
-> The free Alpaca IEX feed can produce a provisional price that differs from the consolidated tape. The market order fills near the decision time, about 15 minutes before the official close; model that gap in `bt run` with `--slip-bps`. Alpaca paper accounts also do not simulate dividends, so paper cash and equity can diverge from a live account.
+> The free Alpaca IEX feed can produce a provisional price that differs from the consolidated tape. The entry market order fills near the decision time, about 15 minutes before the official close; model that gap in `bt run` with `--slip-bps`. Under `overnight`, the queued exit targets the next opening print. Alpaca paper accounts also do not simulate dividends, so paper cash and equity can diverge from a live account.
 
 > [!IMPORTANT]
-> The US path re-plans every order from the account on every attempt. It retries a failed prerequisite until the cutoff but never retries after it sends an order request.
+> The US entry path re-plans from the account on every attempt. It retries a failed prerequisite until the cutoff but does not retry the decision after an entry order request. Overnight exits have their own bounded resubmission series; no successor is placed while an earlier order remains outstanding.
 
 > [!NOTE]
 > The US path queries each symbol's deterministic client order ID before submission. This reduces duplicate risk but is not an exactly-once guarantee for concurrent processes.
