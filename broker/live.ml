@@ -428,6 +428,12 @@ let startup_ok (account : Alpaca.account_t) =
   | "ACTIVE", true -> Error "account trading is blocked"
   | status, _ -> Error (Printf.sprintf "account status is %s" status)
 
+let shortable_ok (symbol : string) (asset : Alpaca.asset_t) : (unit, string) result =
+  match asset.shortable, asset.easy_to_borrow with
+  | true, true -> Ok ()
+  | false, _ -> Error (symbol ^ " is not shortable")
+  | true, false -> Error (symbol ^ " is not easy to borrow")
+
 let tw_server_mode_ok mode (info : Shioaji.info) =
   match mode, info.simulation with
   | Paper, true | Live, false -> Ok ()
@@ -1077,6 +1083,22 @@ let execute_decision ?(existing = []) ?(sleep = Unix.sleepf) ?finish
       | Order { side; qty; id } -> Some (a.symbol, side, qty, id)
       | Skip _ -> None
       | Orders _ -> failwith "TW order legs require Shioaji") in
+  (* An order that reduces the symbol's exposure (a long sell, a buy to
+     cover) frees buying power and goes first; one that increases it (a long
+     buy, a short sell) waits for every close to fill. *)
+  let held symbol =
+    match Array.find_opt (fun (a : asset_decision) -> a.symbol = symbol) decision.assets with
+    | Some asset -> asset.held
+    | None -> 0. in
+  let closing symbol side =
+    match side with `Sell -> held symbol > 0. | `Buy -> held symbol < 0. in
+  (* An existing order is classified by its side against the sign of the
+     holding it was placed on, never the post-fill holding: a sell with a
+     holding at or above zero is a long sell (a flat holding is its fill), a
+     buy with a holding below zero is a cover. *)
+  let order_closing symbol (order : Alpaca.order_t) =
+    if order.side = "sell" then held symbol >= 0. else held symbol < 0. in
+  let side_name = function `Sell -> "sell" | `Buy -> "buy" in
   let execute () =
     (* Complete every dedupe lookup before logging or submitting. *)
     let pending = List.filter (fun (symbol, _, _, id) ->
@@ -1090,10 +1112,10 @@ let execute_decision ?(existing = []) ?(sleep = Unix.sleepf) ?finish
       let c = clock mode in
       if not c.is_open || next_actions ~now:c.timestamp ~next_close <> `Decide
       then failwith "submit cutoff passed" in
-    let restarting_sell = List.exists
-      (fun (_, (o : Alpaca.order_t)) -> o.side = "sell") !placed in
-    let pending_sell = List.exists (fun (_, side, _, _) -> side = `Sell) pending in
-    let () = if pending <> [] && (not restarting_sell || pending_sell) then preflight () in
+    let restarting_close = List.exists
+      (fun (symbol, order) -> order_closing symbol order) !placed in
+    let pending_close = List.exists (fun (symbol, side, _, _) -> closing symbol side) pending in
+    let () = if pending <> [] && (not restarting_close || pending_close) then preflight () in
     let () = log_decision date decision in
     let submit (symbol, side, qty, id) =
       let () = preflight () in
@@ -1102,12 +1124,12 @@ let execute_decision ?(existing = []) ?(sleep = Unix.sleepf) ?finish
       | order ->
           let () = placed := (symbol, order) :: !placed in
           if order.status = "rejected" then
-            failwith (if side = `Sell then "sell " ^ symbol ^ " rejected"
+            failwith (if closing symbol side then side_name side ^ " " ^ symbol ^ " rejected"
               else "Alpaca rejected the order")
       | exception error ->
-          failwith (if side = `Sell then "sell " ^ symbol ^ " uncertain"
+          failwith (if closing symbol side then side_name side ^ " " ^ symbol ^ " uncertain"
             else "order submission uncertain: " ^ Printexc.to_string error) in
-    let sell_failure = ref None in
+    let close_failure = ref None in
     let submit_checked ((symbol, side, _, _) as request) =
       match submit request with
       | () -> ()
@@ -1116,44 +1138,45 @@ let execute_decision ?(existing = []) ?(sleep = Unix.sleepf) ?finish
           else
             let () = (try log "date=%s symbol=%s error=%s order=skip"
               date symbol (error_text error) with _ -> ()) in
-            if side = `Sell && !sell_failure = None then
-              sell_failure := Some error in
-    let sells, buys = List.partition (fun (_, side, _, _) -> side = `Sell) pending in
-    let has_sell = sells <> [] || List.exists
-      (fun (_, (o : Alpaca.order_t)) -> o.side = "sell") !placed in
-    let () = List.iter submit_checked sells in
-    let () = match !sell_failure with
+            if closing symbol side && !close_failure = None then
+              close_failure := Some error in
+    let closes, opens = List.partition (fun (symbol, side, _, _) -> closing symbol side) pending in
+    let has_close = closes <> [] || List.exists
+      (fun (symbol, order) -> order_closing symbol order) !placed in
+    let () = List.iter submit_checked closes in
+    let () = match !close_failure with
       | None -> ()
       | Some error -> raise error in
-    if not has_sell || buys = [] then List.iter submit_checked buys
+    if not has_close || opens = [] then List.iter submit_checked opens
     else
-      let rec wait_sells () =
+      let rec wait_closes () =
         let stop = ref None in
-        let open_sell = ref None in
+        let open_close = ref None in
         let () = placed := List.map (fun (symbol, (order : Alpaca.order_t)) ->
-          if order.side <> "sell" then symbol, order
+          if not (order_closing symbol order) then symbol, order
           else
             let current =
               match order_by_client_id mode (client_order_id ~symbol ~date) with
               | None -> order
               | Some current -> current
-              | exception _ -> failwith ("sell " ^ symbol ^ " uncertain") in
+              | exception _ -> failwith (order.side ^ " " ^ symbol ^ " uncertain") in
             let () = if current.status <> "filled" then
               if terminal_order_status current.status then
-                (if !stop = None then stop := Some ("sell " ^ symbol ^ " " ^ current.status))
-              else if !open_sell = None then open_sell := Some symbol in
+                (if !stop = None then
+                  stop := Some (order.side ^ " " ^ symbol ^ " " ^ current.status))
+              else if !open_close = None then open_close := Some (order.side, symbol) in
             symbol, current) !placed in
-        match !stop, !open_sell with
+        match !stop, !open_close with
         | Some reason, _ -> let () = stopped := true in failwith reason
         | None, None -> ()
-        | None, Some symbol ->
+        | None, Some (side, symbol) ->
             let c = clock mode in
             if not c.is_open || next_actions ~now:c.timestamp ~next_close <> `Decide then
               let () = stopped := true in
-              failwith ("sell " ^ symbol ^ " open at cutoff")
-            else let () = sleep 15. in wait_sells () in
-      let () = wait_sells () in
-      List.iter submit_checked buys in
+              failwith (side ^ " " ^ symbol ^ " open at cutoff")
+            else let () = sleep 15. in wait_closes () in
+      let () = wait_closes () in
+      List.iter submit_checked opens in
   match execute () with
   | () -> (try finish_all () with _ -> ())
   | exception error when !posted || !stopped ->
@@ -1220,16 +1243,21 @@ let us_step ~symbols ~lookup ~decide ~execute ~finish ~sleep_until ~retry
             let () = log "date=%s error=%s order=retry" date (Printexc.to_string error) in
             retry ()
 
-let run_us mode ~symbols ~strat_path ~data_dir ~rebalance_choice =
+let run_us mode ~symbols ~strat_path ~data_dir ~rebalance_choice ~short =
   let account = Alpaca.account mode in
   let () =
     match startup_ok account with
     | Ok () -> ()
     | Error reason -> failwith reason
   in
-  log "startup mode=%s account=%s equity=%.10g" (mode_name mode)
-    account.account_number account.equity;
+  log "startup mode=%s account=%s equity=%.10g initial-margin=%.10g shorting-enabled=%b"
+    (mode_name mode) account.account_number account.equity
+    account.initial_margin account.shorting_enabled;
   let () = log_rebalance_warning strat_path rebalance_choice in
+  let () = if short then Array.iter (fun symbol ->
+    match shortable_ok symbol (Alpaca.asset mode symbol) with
+    | Ok () -> ()
+    | Error reason -> failwith reason) symbols in
   let rec cycle () =
     match Alpaca.clock mode with
     | exception error ->
@@ -1842,6 +1870,7 @@ let lock_daemon ~directory ~market mode =
 let run ?equity mode ~strat_path ~data_dir =
   let ast = Dsl.parse_file strat_path in
   let rebalance_choice = Dsl.rebalance_of ~filename:strat_path ast in
+  let short = Dsl.short_of ~filename:strat_path ast in
   let directory =
     match Sys.getenv_opt "HOME" with
     | Some home when home <> "" -> Filename.concat home ".bt"
@@ -1854,7 +1883,7 @@ let run ?equity mode ~strat_path ~data_dir =
   | "us" ->
       let fd = lock_daemon ~directory ~market:"us" mode in
       Fun.protect ~finally:(fun () -> Unix.close fd)
-        (fun () -> run_us mode ~symbols ~strat_path ~data_dir ~rebalance_choice)
+        (fun () -> run_us mode ~symbols ~strat_path ~data_dir ~rebalance_choice ~short)
   | "tw" ->
       let fd = lock_daemon ~directory ~market:"tw" mode in
       Fun.protect ~finally:(fun () -> Unix.close fd)

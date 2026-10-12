@@ -6526,7 +6526,16 @@ let test_live_startup_guard () =
      = Error "account status is ACCOUNT_CLOSED");
   assert
     (Live.startup_ok { account with trading_blocked = true }
-     = Error "account trading is blocked")
+     = Error "account trading is blocked");
+  (* A short file fails closed unless both asset flags are true. *)
+  let asset : Alpaca.asset_t = { shortable = true; easy_to_borrow = true } in
+  assert (Live.shortable_ok "QQQ" asset = Ok ());
+  assert
+    (Live.shortable_ok "QQQ" { asset with shortable = false }
+     = Error "QQQ is not shortable");
+  assert
+    (Live.shortable_ok "QQQ" { asset with easy_to_borrow = false }
+     = Error "QQQ is not easy to borrow")
 
 let test_live_commands_reject_tw () =
   let binary = locate ["_build/default/bin/bt.exe"; "../bin/bt.exe"] in
@@ -6859,16 +6868,12 @@ let test_short_cli_errors () =
   invoke "stock \"us/SPY\"\novernight\novernight\ntarget 1\n" "run"
     ["--capital"; "1"]
     (fun path -> path ^ ": duplicate overnight declaration");
-  (* Stage 1 stops US declarations before a target or live broker call. *)
+  (* The overnight daemon is not wired yet: a US overnight file stops before
+     a target or live broker call. *)
   List.iter
     (fun command ->
-      List.iter
-        (fun declaration ->
-          invoke ("stock \"us/SPY\"\n" ^ declaration ^ "\ntarget 1\n")
-            command []
-            (fun _ ->
-              "short and overnight are not supported by bt target and bt live yet"))
-        ["short"; "overnight"])
+      invoke "stock \"us/SPY\"\novernight\ntarget 1\n" command []
+        (fun _ -> "overnight is not supported by bt target and bt live yet"))
     ["target"; "live"]
 
 let test_daytrade_cli () =
@@ -10492,6 +10497,96 @@ let test_us_open_sell_restart_end_to_end () =
       && not (contains output "order=retry")) in
     assert (!clocks = [])) [false; true]
 
+let test_us_closes_before_opens () =
+  (* Cash 3000 with QQQ short 20 at 100: equity 1000. The decision covers
+     QQQ and opens SPY short; the cover frees the buying power the opening
+     sell consumes, so it posts first and the sell waits for its fill. *)
+  let date = "2025-06-24" and close = "2025-06-24T16:00:00-04:00" in
+  let decision : Live.decision =
+    { fetched_through = "2025-06-23"; equity = 1000.; cash = 3000.; debit = 0.;
+      legs = []; assets =
+        [|{ Live.symbol = "SPY"; provisional = bar date 100. 100.; target = -0.2; held = 0.;
+            action = Live.Order { side = `Sell; qty = 1.; id = "bt-SPY-2025-06-24" } };
+          { Live.symbol = "QQQ"; provisional = bar date 100. 100.; target = 0.; held = -20.;
+            action = Live.Order { side = `Buy; qty = 20.; id = "bt-QQQ-2025-06-24" } }|] }
+  in
+  let run cover_status =
+    let events = ref [] in
+    let record x = events := x :: !events in
+    let output = capture_stdout (fun () ->
+      Live.execute_decision ~sleep:(fun _ -> record "sleep")
+        ~finish:(fun _ _ symbol _ -> record ("finish:" ^ symbol))
+        ~clock:(fun _ -> { Alpaca.timestamp = date ^ "T15:45:00-04:00"; is_open = true;
+          next_open = "2025-06-25T09:30:00-04:00"; next_close = close })
+        ~order_by_client_id:(fun _ id ->
+          if id = "bt-QQQ-2025-06-24" && List.mem "post:QQQ" !events then
+            let () = record ("poll:" ^ cover_status) in
+            Some (us_fixture_order "QQQ" "buy" cover_status)
+          else None)
+        ~submit_market:(fun _ ~symbol ~qty:_ ~side ~client_order_id:_ ->
+          let () = record ("post:" ^ symbol) in
+          us_fixture_order symbol (if side = `Sell then "sell" else "buy")
+            (if symbol = "QQQ" then cover_status else "filled"))
+        Live.Paper date close decision) in
+    List.rev !events, output
+  in
+  let events, _ = run "filled" in
+  assert (events = ["post:QQQ"; "poll:filled"; "post:SPY"; "finish:QQQ"; "finish:SPY"]);
+  (* A rejected cover stops the session before the opening sell. *)
+  let events, output = run "rejected" in
+  assert (not (List.mem "post:SPY" events));
+  assert (contains output "buy QQQ rejected");
+  (* A sell of a long and a buy of a long keep today's order: sell first. *)
+  let longs = { decision with assets =
+    [|{ decision.assets.(0) with held = 5.;
+        action = Live.Order { side = `Sell; qty = 1.; id = "bt-SPY-2025-06-24" } };
+      { decision.assets.(1) with held = 2.;
+        action = Live.Order { side = `Buy; qty = 1.; id = "bt-QQQ-2025-06-24" } }|] } in
+  let events = ref [] in
+  let () = capture_stdout (fun () ->
+    Live.execute_decision ~finish:(fun _ _ _ _ -> ())
+      ~clock:(fun _ -> { Alpaca.timestamp = date ^ "T15:45:00-04:00"; is_open = true;
+        next_open = "2025-06-25T09:30:00-04:00"; next_close = close })
+      ~order_by_client_id:(fun _ id ->
+        if id = "bt-SPY-2025-06-24" && !events <> [] then
+          Some (us_fixture_order "SPY" "sell" "filled") else None)
+      ~submit_market:(fun _ ~symbol ~qty:_ ~side ~client_order_id:_ ->
+        let () = events := symbol :: !events in
+        us_fixture_order symbol (if side = `Sell then "sell" else "buy") "filled")
+      Live.Paper date close longs) |> ignore in
+  assert (List.rev !events = ["SPY"; "QQQ"]);
+  (* Restart after the SPY sell fully filled: held reads 0, so the existing
+     sell is still a close and keeps its barrier lookup before the QQQ buy;
+     a failed lookup escapes to the retry with no buy POST. *)
+  let after_sale = { decision with assets =
+    [|{ decision.assets.(0) with held = 0.; action = Live.Skip "existing order" };
+      { decision.assets.(1) with held = 2.;
+        action = Live.Order { side = `Buy; qty = 1.; id = "bt-QQQ-2025-06-24" } }|] } in
+  let run lookup =
+    let events = ref [] in
+    let outcome = capture_stdout (fun () ->
+      match Live.execute_decision ~existing:["SPY", us_fixture_order "SPY" "sell" "accepted"]
+        ~finish:(fun _ _ symbol _ -> events := ("finish:" ^ symbol) :: !events)
+        ~clock:(fun _ -> { Alpaca.timestamp = date ^ "T15:45:00-04:00"; is_open = true;
+          next_open = "2025-06-25T09:30:00-04:00"; next_close = close })
+        ~order_by_client_id:(fun _ id ->
+          let () = events := ("lookup:" ^ id) :: !events in
+          if id = "bt-SPY-2025-06-24" then lookup () else None)
+        ~submit_market:(fun _ ~symbol ~qty:_ ~side:_ ~client_order_id:_ ->
+          let () = events := ("post:" ^ symbol) :: !events in
+          us_fixture_order symbol "buy" "filled")
+        Live.Paper date close after_sale with
+      | () -> events := "returned" :: !events
+      | exception Failure message -> events := ("raised:" ^ message) :: !events) in
+    ignore outcome;
+    List.rev !events
+  in
+  assert (run (fun () -> Some (us_fixture_order "SPY" "sell" "filled"))
+    = ["lookup:bt-QQQ-2025-06-24"; "lookup:bt-SPY-2025-06-24"; "post:QQQ";
+       "finish:SPY"; "finish:QQQ"; "returned"]);
+  assert (run (fun () -> failwith "lookup unavailable")
+    = ["lookup:bt-QQQ-2025-06-24"; "lookup:bt-SPY-2025-06-24"; "raised:sell SPY uncertain"])
+
 let test_tw_session_existing_second_code () =
   let date = "2026-05-26" in
   let leg : Live.leg = { code = "2890"; exchange = "OTC"; action = "Buy";
@@ -10848,6 +10943,7 @@ let () =
   let () = test_us_pair_execution () in
   let () = test_us_pair_restart_routing () in
   let () = test_us_open_sell_restart_end_to_end () in
+  let () = test_us_closes_before_opens () in
   let () = test_live_pair_cli_guards () in
   let () = test_tw_buy_budget () in
   let () = test_tw_decide_production_precheck () in

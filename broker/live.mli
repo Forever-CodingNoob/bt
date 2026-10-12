@@ -189,8 +189,11 @@ val next_actions :
 
 (** Log a US decision after its pre-submit checks succeed. Submit an order
     only while the market is open and before the cutoff 2 minutes before
-    [next_close]. A failed or rejected order request is logged with
-    [order=skip] and is not retried; after the cutoff, log
+    [next_close]. Orders that reduce a symbol's exposure (a long sell, a buy
+    to cover, judged from the decision's held quantity) go first; orders that
+    increase it (a long buy, a short sell) go out only after every close is
+    [filled]. A failed or rejected order request is logged with [order=skip]
+    and is not retried; after the cutoff, log
     [error=submit cutoff passed order=skip]. The broker calls default to
     [Alpaca]. *)
 val execute_decision :
@@ -219,6 +222,10 @@ val timestamp_date : string -> string
 
 (** Reject inactive or trading-blocked Alpaca accounts before startup. *)
 val startup_ok : Alpaca.account_t -> (unit, string) result
+
+(** Reject a symbol a [short] file may sell short unless Alpaca flags it
+    shortable and easy to borrow. *)
+val shortable_ok : string -> Alpaca.asset_t -> (unit, string) result
 
 (** Require the current Shioaji server mode to match the CLI mode. *)
 val tw_server_mode_ok : mode -> Shioaji.info -> (unit, string) result
