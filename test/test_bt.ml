@@ -6403,7 +6403,7 @@ let test_us_step_routing () =
     in
     Live.us_step ~symbols:[|"SPY"|]
       ~lookup:(fun id -> record ("lookup:" ^ id); lookup id)
-      ~decide:(fun date -> record ("decide:" ^ date); decide date)
+      ~decide:(fun ~frozen:_ date -> record ("decide:" ^ date); decide date)
       ~execute:(fun _existing clock decision ->
         record "execute"; execute clock decision)
       ~finish:(fun clock date id order ->
@@ -6867,14 +6867,7 @@ let test_short_cli_errors () =
     (fun path -> path ^ ": duplicate short declaration");
   invoke "stock \"us/SPY\"\novernight\novernight\ntarget 1\n" "run"
     ["--capital"; "1"]
-    (fun path -> path ^ ": duplicate overnight declaration");
-  (* The overnight daemon is not wired yet: a US overnight file stops before
-     a target or live broker call. *)
-  List.iter
-    (fun command ->
-      invoke "stock \"us/SPY\"\novernight\ntarget 1\n" command []
-        (fun _ -> "overnight is not supported by bt target and bt live yet"))
-    ["target"; "live"]
+    (fun path -> path ^ ": duplicate overnight declaration")
 
 let test_daytrade_cli () =
   let binary = locate ["_build/default/bin/bt.exe"; "../bin/bt.exe"] in
@@ -10154,7 +10147,7 @@ let test_us_restart_buy_post_failure_finishes () =
   let lookup id = if id = "bt-SPY-2025-06-24" then Some sell else None in
   let output = capture_stdout (fun () ->
     Live.us_step ~symbols:[|"SPY"; "QQQ"|] ~lookup
-      ~decide:(fun _ -> decision)
+      ~decide:(fun ~frozen:_ _ -> decision)
       ~execute:(fun existing c d ->
         Live.execute_decision ~existing
           ~order_by_client_id:(fun _ id ->
@@ -10311,7 +10304,7 @@ let test_us_pair_restart_routing () =
       ~lookup:(fun id ->
         if id = "bt-SPY-2025-06-24" then Some (order "SPY")
         else if both then Some (order "QQQ") else None)
-      ~decide:(fun _ -> let () = incr decisions in decision)
+      ~decide:(fun ~frozen:_ _ -> let () = incr decisions in decision)
       ~execute:(fun existing _ d -> executed := Some (existing, d))
       ~finish:(fun _ _ id _ -> finished := id :: !finished)
       ~sleep_until:(fun _ -> ()) ~retry:(fun () -> assert false)
@@ -10347,7 +10340,7 @@ let test_us_pair_restart_routing () =
             else if id = "bt-QQQ-2025-06-24" then
               Some (us_fixture_order "QQQ" "buy" "filled")
             else failwith "DIA order lookup unavailable")
-          ~decide:(fun _ -> assert false)
+          ~decide:(fun ~frozen:_ _ -> assert false)
           ~execute:(fun _ _ _ -> assert false)
           ~finish:(fun _ _ id _ ->
             finish (if id = "bt-SPY-2025-06-24" then "SPY" else "QQQ"))
@@ -10378,7 +10371,7 @@ let test_us_open_sell_restart_end_to_end () =
           let () = emit ("lookup:" ^ id) in
           if id = "bt-SPY-2025-06-24" then
             Some (us_fixture_order "SPY" "sell" "accepted") else None)
-        ~decide:(fun actual_date ->
+        ~decide:(fun ~frozen:_ actual_date ->
           let () = assert (actual_date = date) in
           let () = incr decisions in decision)
         ~execute:(fun existing clock actual ->
@@ -10450,7 +10443,7 @@ let test_us_open_sell_restart_end_to_end () =
             let () = assert (id = "bt-QQQ-2025-06-24") in
             if fail_at_cutoff && clock = cutoff then failwith "lookup unavailable"
             else None)
-        ~decide:(fun actual_date ->
+        ~decide:(fun ~frozen:_ actual_date ->
           let () = assert (actual_date = date) in
           let () = emit "decide" in decision)
         ~execute:(fun existing clock actual ->
@@ -10496,6 +10489,740 @@ let test_us_open_sell_restart_end_to_end () =
     let () = assert (contains output "order=skip"
       && not (contains output "order=retry")) in
     assert (!clocks = [])) [false; true]
+
+let us_exit_order ?(id = "broker") status : Alpaca.order_t =
+  { id; status; side = "buy";
+    filled_avg_price = (if status = "filled" then Some 100. else None);
+    filled_qty = (if status = "filled" then 3. else 0.) }
+
+(* A listed order's Alpaca id carries its client id, so the fake can tell an
+   entry fill from an exit fill. *)
+let us_listed ?(submitted_at = "2025-06-24T20:05:00Z") ?(qty = 3.) id status
+    : Alpaca.listed_t =
+  { client_order_id = id; submitted_at; qty; order = us_exit_order ~id:("broker:" ^ id) status }
+
+let us_client_id alpaca_id =
+  if String.length alpaca_id > 7 && String.sub alpaca_id 0 7 = "broker:" then
+    String.sub alpaca_id 7 (String.length alpaca_id - 7)
+  else alpaca_id
+
+let us_is_exit id =
+  List.exists (fun suffix -> contains id suffix) ["-cover"; "-exit"; "-orphan"; "-late"]
+
+(* A fake broker that records every call. [held] is the position: a fill
+   read back through [order] or [lookup], or returned by [submit], moves it
+   as a real fill would: an exit or late close flattens it, an entry sets it
+   to [entry_fill]; a listed status is only history. [lookups] feeds [order]
+   and [lookup] in call order and [clocks] feeds [clock], which returns
+   [now] once the queue is empty. *)
+let us_overnight_broker ~events ?(listed = []) ?(open_orders = fun _ -> [])
+    ?(held = 0.) ?(entry_fill = -3.) ?(lookups = []) ?(clocks = [])
+    ?(now = "2025-06-25T09:35:00-04:00") ?(submitted = "filled")
+    ?(session_close = "2025-06-24T16:00:00-04:00") () =
+  let emit text = events := text :: !events in
+  let held = ref held in
+  let lookups = ref lookups and clocks = ref clocks in
+  let next name queue =
+    match !queue with
+    | [] -> failwith ("no " ^ name ^ " response left")
+    | head :: rest -> let () = queue := rest in head
+  in
+  let fill id = held := (if us_is_exit id then 0. else entry_fill) in
+  let read id status =
+    let () = if status = "filled" then fill id in
+    if status = "none" then None else Some (us_exit_order ~id:("broker:" ^ id) status)
+  in
+  let broker : Live.overnight_broker =
+    { list_orders = (fun ~after -> let () = emit ("list:" ^ after) in listed);
+      open_orders = (fun symbol -> let () = emit ("open:" ^ symbol) in open_orders symbol);
+      position = (fun symbol ->
+        let () = emit (Printf.sprintf "position:%s:%g" symbol !held) in !held);
+      submit = (fun ~symbol:_ ~qty ~side ~id ->
+        let side = if side = `Buy then "buy" else "sell" in
+        let () = emit (Printf.sprintf "post:%s:%s:%s" side (Alpaca.qty_string qty) id) in
+        let () = if submitted = "filled" then fill id in
+        us_exit_order ~id:("broker:" ^ id) submitted);
+      cancel = (fun id -> emit ("cancel:" ^ us_client_id id));
+      order = (fun alpaca_id ->
+        let id = us_client_id alpaca_id in
+        let status = next "order" lookups in
+        let () = emit (Printf.sprintf "order:%s:%s" id status) in
+        read id status);
+      lookup = (fun id ->
+        let status = next "lookup" lookups in
+        let () = emit (Printf.sprintf "lookup:%s:%s" id status) in
+        read id status);
+      clock = (fun () ->
+        let timestamp = match !clocks with
+          | [] -> now
+          | _ -> let timestamp = next "clock" clocks in
+            let () = emit ("clock:" ^ timestamp) in timestamp in
+        { Alpaca.timestamp; is_open = true; next_open = "2025-06-26T09:30:00-04:00";
+          next_close = "2025-06-25T16:00:00-04:00" });
+      session_close = (fun _ -> Live.rfc3339_seconds session_close);
+      sleep = (fun seconds -> emit (Printf.sprintf "sleep:%g" seconds)) }
+  in
+  broker, held
+
+let us_overnight_step ?(symbols = [|"QQQ"|]) ?(overnight = true) ?lookup ?decide
+    ?execute broker clock =
+  let events = ref [] in
+  let output = capture_stdout (fun () ->
+    Live.us_step ~broker ~overnight ~symbols
+      ~lookup:(match lookup with Some lookup -> lookup | None -> fun _ -> None)
+      ~decide:(match decide with
+        | Some decide -> decide
+        | None -> fun ~frozen:_ _ -> failwith "unexpected decision")
+      ~execute:(match execute with
+        | Some execute -> execute
+        | None -> fun _ _ _ -> failwith "unexpected execution")
+      ~finish:(fun _ _ _ _ -> failwith "unexpected reconciliation")
+      ~sleep_until:(fun timestamp -> events := ("sleep-until:" ^ timestamp) :: !events)
+      ~retry:(fun () -> events := "retry" :: !events)
+      ~continue:(fun () -> events := "continue" :: !events) clock) in
+  List.rev !events, output
+
+let us_evening : Alpaca.clock_t =
+  { timestamp = "2025-06-24T16:05:00-04:00"; is_open = false;
+    next_open = "2025-06-25T09:30:00-04:00"; next_close = "2025-06-25T16:00:00-04:00" }
+
+let us_morning : Alpaca.clock_t =
+  { timestamp = "2025-06-25T09:35:00-04:00"; is_open = true;
+    next_open = "2025-06-26T09:30:00-04:00"; next_close = "2025-06-25T16:00:00-04:00" }
+
+let us_decision_clock : Alpaca.clock_t =
+  { timestamp = "2025-06-25T15:45:00-04:00"; is_open = true;
+    next_open = "2025-06-26T09:30:00-04:00"; next_close = "2025-06-25T16:00:00-04:00" }
+
+let accepted_forever = List.init 20 (fun _ -> "accepted")
+
+let test_us_overnight_exit_gate () =
+  let after = "2025-06-17T16:05:00-04:00" in
+  let run ?symbols ?listed ?open_orders ?held ?lookups ?(clock = us_evening) () =
+    let broker_events = ref [] in
+    let broker, _ = us_overnight_broker ~events:broker_events ?listed ?open_orders
+      ?held ?lookups ~now:clock.Alpaca.timestamp () in
+    let events, output = us_overnight_step ?symbols broker clock in
+    List.rev !broker_events, events, output
+  in
+  let entry status = us_listed "bt-QQQ-2025-06-24" status in
+  (* A filled entry and a -3 position: the gate lists the week, finds no
+     open order, reads the position, and queues a 3-share buy under -cover;
+     the daemon then sleeps to the open plus 5 minutes. *)
+  let broker_events, events, output = run ~listed:[entry "filled"] ~held:(-3.) () in
+  assert (broker_events = ["list:" ^ after; "open:QQQ"; "position:QQQ:-3";
+    "post:buy:3:bt-QQQ-2025-06-24-cover"]);
+  assert (events = ["sleep-until:2025-06-25T09:35:00-04:00"; "continue"]);
+  assert (contains output "symbol=QQQ held=-3 order=buy:3:bt-QQQ-2025-06-24-cover fill=pending");
+  (* A long entry partially filled at 16:05, past its session close plus 5
+     minutes: no further wait; the open-orders guard settles it (cancel, one
+     15-second poll to canceled), then the 2.5 shares held exit under a
+     fractional sell. *)
+  let broker_events, _, _ = run ~symbols:[|"SPY"|]
+    ~listed:[us_listed "bt-SPY-2025-06-24" "partially_filled"]
+    ~open_orders:(fun _ -> [us_listed "bt-SPY-2025-06-24" "partially_filled"])
+    ~held:2.5 ~lookups:["canceled"] () in
+  assert (broker_events = ["list:" ^ after; "open:SPY"; "cancel:bt-SPY-2025-06-24";
+    "sleep:15"; "order:bt-SPY-2025-06-24:canceled"; "position:SPY:2.5";
+    "post:sell:2.5:bt-SPY-2025-06-24-exit"]);
+  (* A restart at 16:02 follows the open entry to 16:05 first: at most 12
+     polls of 15 seconds; the second poll finds it filled. *)
+  let broker_events, _, _ = run ~listed:[entry "accepted"] ~held:(-3.)
+    ~lookups:["accepted"; "filled"]
+    ~clock:{ us_evening with timestamp = "2025-06-24T16:02:00-04:00" } () in
+  assert (broker_events = ["list:2025-06-17T16:02:00-04:00"; "sleep:15";
+    "order:bt-QQQ-2025-06-24:accepted"; "sleep:15"; "order:bt-QQQ-2025-06-24:filled";
+    "open:QQQ"; "position:QQQ:-3"; "post:buy:3:bt-QQQ-2025-06-24-cover"]);
+  (* A fill during the cancel counts as filled: pending_cancel, then filled;
+     the entry leaves a -3 position, so a 3-share buy is posted under -cover.
+     A 422 on an already terminal order returns from cancel like a 204 and
+     reaches the same poll. *)
+  let broker_events, _, _ = run ~listed:[entry "accepted"]
+    ~open_orders:(fun _ -> [entry "accepted"]) ~held:(-3.)
+    ~lookups:["pending_cancel"; "filled"] () in
+  assert (broker_events = ["list:" ^ after; "open:QQQ"; "cancel:bt-QQQ-2025-06-24";
+    "sleep:15"; "order:bt-QQQ-2025-06-24:pending_cancel"; "sleep:15";
+    "order:bt-QQQ-2025-06-24:filled"; "position:QQQ:-3"; "post:buy:3:bt-QQQ-2025-06-24-cover"]);
+  (* A zero remainder submits nothing. *)
+  let broker_events, _, _ = run ~listed:[entry "canceled"] () in
+  assert (broker_events = ["list:" ^ after; "open:QQQ"; "position:QQQ:0"]);
+  (* An exit already queued stays queued after the close. *)
+  let broker_events, _, output = run ~held:(-3.)
+    ~listed:[us_listed "bt-QQQ-2025-06-24-cover" "accepted"; entry "filled"] () in
+  assert (broker_events = ["list:" ^ after]);
+  assert (contains output "order=existing:bt-QQQ-2025-06-24-cover fill=pending");
+  (* The settle bound: an entry that stays accepted through 20 polls is
+     outstanding; the gate logs it and posts no exit for the symbol. *)
+  let broker_events, _, output = run ~listed:[entry "accepted"]
+    ~open_orders:(fun _ -> [entry "accepted"]) ~held:(-3.) ~lookups:accepted_forever () in
+  assert (List.length (List.filter (fun e -> contains e "order:") broker_events) = 20);
+  assert (not (List.exists (fun e -> contains e "post:") broker_events));
+  assert (contains output "symbol=QQQ note=overnight exit outstanding");
+  (* One symbol's failure is logged and the other symbol is still driven. *)
+  let broker_events = ref [] in
+  let broker, _ = us_overnight_broker ~events:broker_events
+    ~listed:[entry "filled"; us_listed "bt-SPY-2025-06-24" "filled"] ~held:(-3.) () in
+  let broker = { broker with position = (fun symbol ->
+    if symbol = "SPY" then failwith "SPY position unavailable" else broker.position symbol) } in
+  let events, output = us_overnight_step ~symbols:[|"SPY"; "QQQ"|] broker us_evening in
+  assert (List.rev !broker_events = ["list:" ^ after; "open:SPY"; "open:QQQ";
+    "position:QQQ:-3"; "post:buy:3:bt-QQQ-2025-06-24-cover"]);
+  assert (contains output "symbol=SPY error=Failure(\"SPY position unavailable\") order=skip");
+  assert (events = ["sleep-until:2025-06-25T09:35:00-04:00"; "continue"]);
+  (* The decision never submits an exit: at 15:45 the entry goes out through
+     the executor as before, after the symbol's open-orders guard. *)
+  let broker_events = ref [] in
+  let broker, _ = us_overnight_broker ~events:broker_events ~lookups:["none"] () in
+  let executed = ref false in
+  let events, _ = us_overnight_step broker us_decision_clock
+    ~decide:(fun ~frozen _ -> let () = assert (frozen = []) in
+      us_pair_decision [|Live.Order { side = `Sell; qty = 3.; id = "bt-SPY-2025-06-25" }|])
+    ~execute:(fun _ _ _ -> executed := true) in
+  assert (!executed && List.rev !broker_events = ["lookup:bt-QQQ-2025-06-25-late:none";
+    "open:QQQ"; "position:QQQ:0"]);
+  (* The day ends at the close plus 5 minutes so the closed clock runs the gate. *)
+  assert (events = ["sleep-until:2025-06-25T16:05:00-04:00"; "continue"]);
+  (* A failing listing logs order=retry and retries. *)
+  let broker, _ = us_overnight_broker ~events:(ref []) () in
+  let broker = { broker with list_orders = (fun ~after:_ -> failwith "orders unavailable") } in
+  let events, output = us_overnight_step broker us_evening in
+  assert (events = ["retry"]);
+  assert (contains output "error=Failure(\"orders unavailable\") order=retry")
+
+let test_us_overnight_morning_step () =
+  let after = "2025-06-18T09:35:00-04:00" in
+  let run ?listed ?open_orders ?held ?lookups ?clocks ?now ?submitted ?list_orders () =
+    let broker_events = ref [] in
+    let broker, _ = us_overnight_broker ~events:broker_events ?listed ?open_orders
+      ?held ?lookups ?clocks ?now ?submitted () in
+    let broker = match list_orders with
+      | Some list_orders -> { broker with list_orders }
+      | None -> broker in
+    let events, output = us_overnight_step broker us_morning in
+    List.rev !broker_events, events, output
+  in
+  let entry = us_listed "bt-QQQ-2025-06-24" "filled" in
+  let series status = [us_listed "bt-QQQ-2025-06-24-cover" status; entry] in
+  let at_0950 = "2025-06-25T09:50:00-04:00" in
+  (* Filled and flat: the step logs the fill, checks the position, and the
+     daemon sleeps to the decision. *)
+  let broker_events, events, output = run ~listed:(series "filled") () in
+  assert (broker_events = ["list:" ^ after]);
+  assert (contains output "client-order-id=bt-QQQ-2025-06-24-cover fill-status=filled");
+  assert (events = ["sleep-until:2025-06-25T15:45:00-04:00"; "continue"]);
+  (* A fully filled exit (3 of 3) has no remainder: a positions read that
+     still shows -3 is a lagging mark, and nothing is posted. *)
+  let broker_events, _, _ = run ~listed:(series "filled") ~held:(-3.) () in
+  assert (broker_events = ["list:" ^ after]);
+  (* Filled 3 of 4 with -1 still held: -cover2 buys min 1 (held) 1 (unfilled)
+     and its fill ends the series. *)
+  let broker_events, _, _ = run ~held:(-1.)
+    ~listed:[us_listed ~qty:4. "bt-QQQ-2025-06-24-cover" "filled"; entry] () in
+  assert (broker_events = ["list:" ^ after; "open:QQQ"; "position:QQQ:-1";
+    "post:buy:1:bt-QQQ-2025-06-24-cover2"]);
+  (* The unfilled part caps the remainder: filled 3 of 4 while the positions
+     read lags at -3 posts 1, not 3. *)
+  let broker_events, _, _ = run ~held:(-3.)
+    ~listed:[us_listed ~qty:4. "bt-QQQ-2025-06-24-cover" "filled"; entry] () in
+  assert (List.nth broker_events 3 = "post:buy:1:bt-QQQ-2025-06-24-cover2");
+  (* Open then filled: before 09:50 the step waits 60 seconds and re-reads;
+     a restart with an existing -cover takes this path, never a blind POST. *)
+  let broker_events, _, _ = run ~listed:(series "accepted") ~held:(-3.)
+    ~lookups:["filled"] () in
+  assert (broker_events = ["list:" ^ after; "sleep:60"; "order:bt-QQQ-2025-06-24-cover:filled"]);
+  (* Terminal and unfilled: the remainder goes out under -cover2 after the
+     open-orders guard. *)
+  let broker_events, _, output = run ~listed:(series "canceled") ~held:(-3.) () in
+  assert (broker_events = ["list:" ^ after; "open:QQQ"; "position:QQQ:-3";
+    "post:buy:3:bt-QQQ-2025-06-24-cover2"]);
+  assert (contains output "order=buy:3:bt-QQQ-2025-06-24-cover2 fill=pending");
+  (* Open at 09:50: the exit is settled (cancel, poll to canceled) before the
+     resubmission; a stopped exit is outstanding, so the settle keeps polling
+     it and no resubmission is placed while it is open. *)
+  let broker_events, _, _ = run ~listed:(series "accepted") ~held:(-3.) ~now:at_0950
+    ~lookups:["stopped"; "canceled"] () in
+  assert (broker_events = ["list:" ^ after; "cancel:bt-QQQ-2025-06-24-cover"; "sleep:15";
+    "order:bt-QQQ-2025-06-24-cover:stopped"; "sleep:15"; "order:bt-QQQ-2025-06-24-cover:canceled";
+    "open:QQQ"; "position:QQQ:-3"; "post:buy:3:bt-QQQ-2025-06-24-cover2"]);
+  (* A stopped exit found at 09:40 waits like any outstanding exit. *)
+  let broker_events, _, _ = run ~listed:(series "stopped") ~held:(-3.)
+    ~now:"2025-06-25T09:40:00-04:00" ~lookups:["filled"] () in
+  assert (broker_events = ["list:" ^ after; "sleep:60"; "order:bt-QQQ-2025-06-24-cover:filled"]);
+  (* The grace period: a resubmission at 09:50 is followed every 15 seconds
+     for up to 2 minutes before any settle; here it fills on the second poll. *)
+  let broker_events, _, _ = run ~listed:(series "canceled") ~held:(-3.) ~now:at_0950
+    ~submitted:"accepted" ~lookups:["accepted"; "filled"] () in
+  assert (broker_events = ["list:" ^ after; "open:QQQ"; "position:QQQ:-3";
+    "post:buy:3:bt-QQQ-2025-06-24-cover2"; "sleep:15"; "order:bt-QQQ-2025-06-24-cover2:accepted";
+    "sleep:15"; "order:bt-QQQ-2025-06-24-cover2:filled"]);
+  (* Grace expired: eight polls still accepted, then the settle (cancel and
+     one poll to canceled) and -cover3, which fills on its first poll. *)
+  let broker_events, _, _ = run ~listed:(series "canceled") ~held:(-3.) ~now:at_0950
+    ~submitted:"accepted" ~lookups:(List.init 8 (fun _ -> "accepted") @ ["canceled"; "filled"]) () in
+  assert (List.filter (fun e -> contains e "post:" || contains e "cancel:") broker_events
+    = ["post:buy:3:bt-QQQ-2025-06-24-cover2"; "cancel:bt-QQQ-2025-06-24-cover2";
+       "post:buy:3:bt-QQQ-2025-06-24-cover3"]);
+  assert (List.length (List.filter (fun e -> contains e "order:") broker_events) = 10);
+  (* The settle bound at 09:50: 20 polls still accepted leave the exit
+     outstanding; no resubmission. *)
+  let broker_events, _, output = run ~listed:(series "accepted") ~held:(-3.) ~now:at_0950
+    ~lookups:accepted_forever () in
+  assert (not (List.exists (fun e -> contains e "post:") broker_events));
+  assert (List.length (List.filter (fun e -> contains e "order:") broker_events) = 20);
+  assert (contains output "symbol=QQQ note=overnight exit outstanding");
+  (* The fourth exit is the third resubmission; a canceled -cover4 logs
+     overnight exit unfilled and leaves the position to the late exit. *)
+  let broker_events, _, _ = run ~held:(-3.)
+    ~listed:[us_listed "bt-QQQ-2025-06-24-cover3" "canceled"; entry] () in
+  assert (List.nth broker_events 3 = "post:buy:3:bt-QQQ-2025-06-24-cover4");
+  let broker_events, _, output = run ~held:(-3.)
+    ~listed:[us_listed "bt-QQQ-2025-06-24-cover4" "canceled"; entry] () in
+  assert (broker_events = ["list:" ^ after; "open:QQQ"; "position:QQQ:-3"]);
+  assert (contains output "symbol=QQQ note=overnight exit unfilled");
+  (* A Monday restart pages the week's listing through Alpaca.list_orders:
+     the first page holds 500 newer foreign rows, newest first, down to
+     Sunday 00:00; the second page, requested with until set to that
+     exclusive cursor, holds Friday's entry and exit. The filled exit and
+     the flat position need nothing. *)
+  let monday : Alpaca.clock_t =
+    { timestamp = "2025-06-23T09:35:00-04:00"; is_open = true;
+      next_open = "2025-06-24T09:30:00-04:00"; next_close = "2025-06-23T16:00:00-04:00" } in
+  let monday_after = "2025-06-16T09:35:00-04:00" in
+  let pages = ref [] in
+  let page path =
+    let () = pages := path :: !pages in
+    if List.length !pages = 1 then
+      List.init 500 (fun index ->
+        us_listed ~submitted_at:(Printf.sprintf "2025-06-22T%02d:%02d:00Z"
+          ((499 - index) / 60) ((499 - index) mod 60)) "-" "canceled")
+    else [us_listed ~submitted_at:"2025-06-20T20:05:12Z" "bt-QQQ-2025-06-20-cover" "filled";
+          us_listed ~submitted_at:"2025-06-20T19:45:40Z" "bt-QQQ-2025-06-20" "filled"]
+  in
+  let broker_events = ref [] in
+  let broker, _ = us_overnight_broker ~events:broker_events ~now:monday.timestamp () in
+  let broker = { broker with list_orders = (fun ~after ->
+    Alpaca.list_orders ~page Alpaca.Paper ~symbols:["QQQ"] ~after) } in
+  let events, output = us_overnight_step broker monday in
+  assert (List.rev !pages = [
+    "/v2/orders?status=all&limit=500&direction=desc&after=2025-06-16T09%3A35%3A00-04%3A00&symbols=QQQ";
+    "/v2/orders?status=all&limit=500&direction=desc&after=2025-06-16T09%3A35%3A00-04%3A00&symbols=QQQ&until=2025-06-22T00%3A00%3A00Z" ]);
+  assert (!broker_events = []);
+  assert (contains output "client-order-id=bt-QQQ-2025-06-20-cover fill-status=filled");
+  assert (events = ["sleep-until:2025-06-23T15:45:00-04:00"; "continue"]);
+  ignore monday_after;
+  (* A restart after the entry fill with no exit submits the exit now. *)
+  let broker_events, _, _ = run ~listed:[entry] ~held:(-3.) () in
+  assert (broker_events = ["list:" ^ after; "open:QQQ"; "position:QQQ:-3";
+    "post:buy:3:bt-QQQ-2025-06-24-cover"]);
+  (* A restart after an entry-less exit resumes that series under its date. *)
+  let broker_events, _, _ = run ~held:(-3.)
+    ~listed:[us_listed "bt-QQQ-2025-06-20-cover" "expired"] () in
+  assert (List.nth broker_events 3 = "post:buy:3:bt-QQQ-2025-06-20-cover2");
+  (* A held symbol with no bt-QQQ- order in the window is exited under
+     today's -orphan family after the note, so the day's entry series stays
+     free; a later pass resumes the orphan series. *)
+  let broker_events, _, output = run ~held:(-3.)
+    ~listed:[us_listed "bt-SPY-2025-06-24" "filled"] () in
+  assert (broker_events = ["list:" ^ after; "position:QQQ:-3"; "open:QQQ"; "position:QQQ:-3";
+    "post:buy:3:bt-QQQ-2025-06-25-orphan"]);
+  assert (contains output "symbol=QQQ note=overnight position without entry");
+  let broker_events, _, _ = run ~held:(-3.)
+    ~listed:[us_listed "bt-QQQ-2025-06-25-orphan" "canceled"] () in
+  assert (List.nth broker_events 3 = "post:buy:3:bt-QQQ-2025-06-25-orphan2")
+
+let test_us_overnight_restart_grace () =
+  let id = "bt-QQQ-2025-06-24-cover2" in
+  let run ?(submitted_at = "2025-06-25T13:50:00Z") ?(seconds = 30) lookups =
+    let broker_events = ref [] in
+    let seconds = ref seconds and polls = ref [] and cancels = ref [] in
+    let timestamp () = Printf.sprintf "2025-06-25T09:%02d:%02d-04:00"
+      (50 + !seconds / 60) (!seconds mod 60) in
+    let broker, _ = us_overnight_broker ~events:broker_events ~held:(-3.) ~lookups
+      ~listed:[us_listed ~submitted_at id "accepted"] () in
+    let broker = { broker with
+      clock = (fun () -> { us_morning with timestamp = timestamp () });
+      sleep = (fun delay ->
+        let () = broker.sleep delay in seconds := !seconds + int_of_float delay);
+      order = (fun id ->
+        let () = polls := !seconds :: !polls in broker.order id);
+      cancel = (fun id ->
+        let () = cancels := !seconds :: !cancels in broker.cancel id) } in
+    let _, output = us_overnight_step broker (broker.clock ()) in
+    List.rev !broker_events, List.rev !polls, List.rev !cancels, output
+  in
+  (* Submitted at 09:50:00, restarted at 09:50:30: six 15-second polls
+     consume the remaining 90 seconds. Only at 09:52:00 may cancel start;
+     the seventh poll settles it at 09:52:15 before -cover3 is posted. *)
+  let broker_events, polls, cancels, _ =
+    run (List.init 6 (fun _ -> "accepted") @ ["canceled"]) in
+  assert (cancels = [120]);
+  assert (polls = [45; 60; 75; 90; 105; 120; 135]);
+  assert (List.filter (fun e -> contains e "post:" || contains e "cancel:") broker_events
+    = ["cancel:" ^ id; "post:buy:3:bt-QQQ-2025-06-24-cover3"]);
+  (* A fill on the second grace poll is final at 09:51:00: neither a cancel
+     nor another POST follows, even though the restart began past 09:50. *)
+  let broker_events, polls, cancels, output = run ["accepted"; "filled"] in
+  assert (polls = [45; 60] && cancels = []);
+  assert (broker_events = ["list:2025-06-18T09:50:30-04:00"; "sleep:15";
+    "order:" ^ id ^ ":accepted"; "sleep:15"; "order:" ^ id ^ ":filled"]);
+  assert (contains output ("client-order-id=" ^ id ^ " fill-status=filled"));
+  (* Submitted at 09:49:30, restarted at 09:50:00: the pre-deadline order
+     gets no grace. Cancel begins immediately and its first poll settles
+     it at 09:50:15 before -cover3 is posted. *)
+  let broker_events, polls, cancels, _ =
+    run ~submitted_at:"2025-06-25T13:49:30Z" ~seconds:0 ["canceled"] in
+  assert (cancels = [0]);
+  assert (polls = [15]);
+  assert (List.filter (fun e -> contains e "post:" || contains e "cancel:") broker_events
+    = ["cancel:" ^ id; "post:buy:3:bt-QQQ-2025-06-24-cover3"])
+
+let test_us_overnight_late_exit () =
+  let entry symbol = Live.Order { side = `Sell; qty = 3.; id = "bt-" ^ symbol ^ "-2025-06-25" } in
+  let run ?(symbols = [|"QQQ"|]) ?open_orders ?lookups ?clocks ?submitted ~held () =
+    let broker_events = ref [] in
+    let broker, _ = us_overnight_broker ~events:broker_events ?open_orders ?lookups
+      ?clocks ?submitted ~held ~now:"2025-06-25T15:46:00-04:00" () in
+    let decided = ref None in
+    let events, output = us_overnight_step ~symbols broker us_decision_clock
+      ~decide:(fun ~frozen _ ->
+        let () = decided := Some frozen in
+        { (us_pair_decision [||]) with assets = Array.map (fun symbol ->
+          { Live.symbol; provisional = bar "2025-06-25" 100. 100.; target = -0.3; held = 0.;
+            action = if List.mem symbol frozen then Live.Skip "overnight entry skipped"
+              else entry symbol }) symbols })
+      ~execute:(fun _ _ decision ->
+        Array.iter (fun (a : Live.asset_decision) ->
+          broker_events := ("execute:" ^ Live.(match a.action with
+            | Order { id; _ } -> id | Skip reason -> reason | Orders _ -> "legs"))
+            :: !broker_events) decision.assets) in
+    List.rev !broker_events, !decided, events, output
+  in
+  let late = "bt-QQQ-2025-06-25-late" in
+  (* A -3 position at the decision is closed first under -late, after the
+     open-orders guard and a clock check; the fill flattens the account, the
+     position re-read confirms it inside the window, and only then is the
+     decision taken and the entry executed. *)
+  let broker_events, decided, events, output = run ~held:(-3.) ~lookups:["none"] () in
+  assert (broker_events = ["lookup:" ^ late ^ ":none"; "open:QQQ"; "position:QQQ:-3";
+    "post:buy:3:" ^ late; "position:QQQ:0"; "execute:bt-QQQ-2025-06-25"]);
+  assert (decided = Some []);
+  assert (contains output "symbol=QQQ note=overnight position closed late");
+  assert (contains output ("held=-3 order=buy:3:" ^ late ^ " fill=pending"));
+  assert (events = ["sleep-until:2025-06-25T16:05:00-04:00"; "continue"]);
+  (* An accepted late close is polled every 15 seconds while the window is
+     open; the entry waits for filled plus a flat position. *)
+  let broker_events, _, _, _ = run ~held:(-3.) ~submitted:"accepted"
+    ~lookups:["none"; "filled"] () in
+  assert (broker_events = ["lookup:" ^ late ^ ":none"; "open:QQQ"; "position:QQQ:-3";
+    "post:buy:3:" ^ late; "sleep:15"; "order:" ^ late ^ ":filled"; "position:QQQ:0";
+    "execute:bt-QQQ-2025-06-25"]);
+  (* A canceled late close places no entry: the symbol is frozen and the
+     session logs the skip. *)
+  let broker_events, decided, _, output = run ~held:(-3.) ~submitted:"accepted"
+    ~lookups:["none"; "canceled"] () in
+  assert (List.nth broker_events 6 = "execute:overnight entry skipped");
+  assert (decided = Some ["QQQ"]);
+  assert (contains output "symbol=QQQ note=overnight entry skipped");
+  (* The clock is checked right before the POST: at 15:58 no late close goes
+     out and the entry is skipped. *)
+  let broker_events, _, _, output = run ~held:(-3.) ~lookups:["none"]
+    ~clocks:["2025-06-25T15:58:00-04:00"] () in
+  assert (broker_events = ["lookup:" ^ late ^ ":none"; "open:QQQ"; "position:QQQ:-3";
+    "clock:2025-06-25T15:58:00-04:00"; "execute:overnight entry skipped"]);
+  assert (contains output "note=overnight entry skipped");
+  (* A close still open past the submit window skips the entry too. *)
+  let broker_events, _, _, _ = run ~held:(-3.) ~submitted:"accepted" ~lookups:["none"]
+    ~clocks:["2025-06-25T15:46:00-04:00"; "2025-06-25T15:58:00-04:00"] () in
+  assert (broker_events = ["lookup:" ^ late ^ ":none"; "open:QQQ"; "position:QQQ:-3";
+    "clock:2025-06-25T15:46:00-04:00"; "post:buy:3:" ^ late;
+    "clock:2025-06-25T15:58:00-04:00"; "execute:overnight entry skipped"]);
+  (* Filled after the cutoff: the fill and the flat position are confirmed,
+     but the clock recheck finds 15:58, so the entry is skipped. *)
+  let broker_events, _, _, _ = run ~held:(-3.) ~submitted:"accepted"
+    ~lookups:["none"; "filled"]
+    ~clocks:["2025-06-25T15:46:00-04:00"; "2025-06-25T15:46:00-04:00";
+             "2025-06-25T15:58:00-04:00"] () in
+  assert (broker_events = ["lookup:" ^ late ^ ":none"; "open:QQQ"; "position:QQQ:-3";
+    "clock:2025-06-25T15:46:00-04:00"; "post:buy:3:" ^ late;
+    "clock:2025-06-25T15:46:00-04:00"; "sleep:15"; "order:" ^ late ^ ":filled";
+    "position:QQQ:0"; "clock:2025-06-25T15:58:00-04:00"; "execute:overnight entry skipped"]);
+  (* An exit still open at the decision (the morning step never ran) is
+     settled before the late close: cancel, poll to canceled, re-read the
+     position, then -late. *)
+  let broker_events, _, _, _ = run ~held:(-3.)
+    ~open_orders:(fun _ -> [us_listed "bt-QQQ-2025-06-24-cover" "accepted"])
+    ~lookups:["none"; "canceled"] () in
+  assert (broker_events = ["lookup:" ^ late ^ ":none"; "open:QQQ"; "cancel:bt-QQQ-2025-06-24-cover";
+    "sleep:15"; "order:bt-QQQ-2025-06-24-cover:canceled"; "position:QQQ:-3"; "post:buy:3:" ^ late;
+    "position:QQQ:0"; "execute:bt-QQQ-2025-06-25"]);
+  (* The settle bound before the late close: an exit still accepted after
+     20 polls is outstanding, so no -late goes out and the entry is skipped. *)
+  let broker_events, decided, _, output = run ~held:(-3.)
+    ~open_orders:(fun _ -> [us_listed "bt-QQQ-2025-06-24-cover" "accepted"])
+    ~lookups:("none" :: accepted_forever) () in
+  assert (not (List.exists (fun e -> contains e "post:") broker_events));
+  assert (decided = Some ["QQQ"]);
+  assert (contains output "note=overnight exit outstanding");
+  assert (contains output "note=overnight entry skipped");
+  (* A restart with the day's -late already open follows it instead of
+     posting a second close, then runs the guard before the entry. *)
+  let broker_events, _, _, _ = run ~held:(-3.) ~lookups:["accepted"; "filled"] () in
+  assert (broker_events = ["lookup:" ^ late ^ ":accepted"; "sleep:15";
+    "order:" ^ late ^ ":filled"; "position:QQQ:0"; "open:QQQ"; "position:QQQ:0";
+    "execute:bt-QQQ-2025-06-25"]);
+  (* A filled -late with another order on the symbol still outstanding after
+     the guard's 20 polls: the entry is skipped. *)
+  let broker_events, decided, _, output = run ~held:(-3.)
+    ~open_orders:(fun _ -> [us_listed "-" "accepted"])
+    ~lookups:("filled" :: accepted_forever) () in
+  assert (List.nth broker_events 2 = "open:QQQ" && List.nth broker_events 3 = "cancel:-");
+  assert (decided = Some ["QQQ"]);
+  assert (contains output "note=overnight exit outstanding");
+  (* A symbol whose pass raises is logged and blocked; the other continues. *)
+  let broker_events = ref [] in
+  let broker, _ = us_overnight_broker ~events:broker_events ~held:(-3.)
+    ~lookups:["none"; "none"] ~now:"2025-06-25T15:46:00-04:00" () in
+  let broker = { broker with position = (fun symbol ->
+    if symbol = "SPY" then failwith "SPY position unavailable" else broker.position symbol) } in
+  let decided = ref None in
+  let _, output = us_overnight_step ~symbols:[|"SPY"; "QQQ"|] broker us_decision_clock
+    ~decide:(fun ~frozen _ -> let () = decided := Some frozen in us_pair_decision [||])
+    ~execute:(fun _ _ _ -> ()) in
+  assert (!decided = Some ["SPY"]);
+  assert (contains output "symbol=SPY error=Failure(\"SPY position unavailable\") order=skip");
+  assert (List.mem ("post:buy:3:" ^ late) (List.rev !broker_events));
+  (* The guard's closing fills cap the late close. A morning -exit on a long
+     of 5 that fills all 5 during the settle while the positions read still
+     shows 5 leaves 0 unfilled: no -late goes out, and the symbol stays
+     blocked until a read confirms it flat. A cover of 3 that fills 2 and is
+     canceled with the position read at -1 leaves 1 unfilled: -late buys
+     min 1 1 = 1. *)
+  let guarded ~qty ~filled ~status ~position =
+    let broker_events = ref [] in
+    let side, id = if position < 0. then "buy", "bt-QQQ-2025-06-24-cover"
+      else "sell", "bt-QQQ-2025-06-24-exit" in
+    let broker, _ = us_overnight_broker ~events:broker_events
+      ~open_orders:(fun _ -> [us_listed ~qty id "accepted"])
+      ~lookups:["none"] ~now:"2025-06-25T15:46:00-04:00" () in
+    let broker = { broker with
+      position = (fun _ ->
+        let () = broker_events := Printf.sprintf "position:%g" position :: !broker_events in
+        position);
+      order = (fun alpaca_id ->
+        let () = broker_events :=
+          ("order:" ^ us_client_id alpaca_id ^ ":" ^ status) :: !broker_events in
+        Some { (us_exit_order ~id:alpaca_id status) with side; filled_qty = filled }) } in
+    let decided = ref None in
+    let _, output = us_overnight_step broker us_decision_clock
+      ~decide:(fun ~frozen _ -> let () = decided := Some frozen in us_pair_decision [||])
+      ~execute:(fun _ _ _ -> ()) in
+    List.rev !broker_events, !decided, output
+  in
+  let events, decided, output = guarded ~qty:5. ~filled:5. ~status:"filled" ~position:5. in
+  assert (events = ["lookup:" ^ late ^ ":none"; "open:QQQ"; "cancel:bt-QQQ-2025-06-24-exit";
+    "sleep:15"; "order:bt-QQQ-2025-06-24-exit:filled"; "position:5"]);
+  assert (decided = Some ["QQQ"] && contains output "note=overnight entry skipped");
+  let events, _, _ = guarded ~qty:3. ~filled:2. ~status:"canceled" ~position:(-1.) in
+  assert (List.nth events 5 = "position:-1" && List.nth events 6 = "post:buy:1:" ^ late);
+  (* The wait cap: at 15:46 with two symbols, 12 minutes remain to the
+     cutoff, so each symbol may wait min 3 (6) minutes, 12 polls. SPY's close
+     stays accepted; after 12 polls SPY is blocked and QQQ still gets its
+     late close. *)
+  let broker_events = ref [] in
+  let broker, _ = us_overnight_broker ~events:broker_events ~held:(-3.)
+    ~submitted:"accepted" ~lookups:("none" :: List.init 12 (fun _ -> "accepted") @ ["none"])
+    ~now:"2025-06-25T15:46:00-04:00" () in
+  let decided = ref None in
+  let _ = us_overnight_step ~symbols:[|"SPY"; "QQQ"|] broker us_decision_clock
+    ~decide:(fun ~frozen _ -> let () = decided := Some frozen in us_pair_decision [||])
+    ~execute:(fun _ _ _ -> ()) in
+  let events = List.rev !broker_events in
+  assert (!decided = Some ["SPY"; "QQQ"]);
+  assert (List.length (List.filter (fun e -> contains e "order:bt-SPY-2025-06-25-late") events) = 12);
+  assert (List.mem "post:buy:3:bt-QQQ-2025-06-25-late" events);
+  (* A four-symbol restart at 15:55 with a clock that advances 15 seconds
+     per sleep: 3 minutes remain, so the first symbol may wait 45 seconds
+     (3 polls), and the budget is recomputed from the clock for each
+     following symbol; every late close is posted before the 15:58 cutoff
+     and the entry is skipped for all four. *)
+  let symbols = [|"AAA"; "BBB"; "CCC"; "DDD"|] in
+  let broker_events = ref [] in
+  let seconds = ref 0 in
+  let stamp () = Printf.sprintf "2025-06-25T15:%02d:%02d-04:00" (55 + !seconds / 60) (!seconds mod 60) in
+  let broker, _ = us_overnight_broker ~events:broker_events ~held:(-3.)
+    ~submitted:"accepted" ~lookups:(List.init 40 (fun i -> if i mod 10 = 0 then "none" else "accepted")) () in
+  let posted_at = ref [] in
+  let broker = { broker with
+    sleep = (fun s -> let () = seconds := !seconds + int_of_float s in broker.sleep s);
+    clock = (fun () -> { (broker.clock ()) with Alpaca.timestamp = stamp () });
+    submit = (fun ~symbol ~qty ~side ~id ->
+      let () = posted_at := !seconds :: !posted_at in broker.submit ~symbol ~qty ~side ~id);
+    lookup = (fun id -> if contains id "-late" then None else broker.lookup id) } in
+  let decided = ref None in
+  let _ = us_overnight_step ~symbols broker
+    { us_decision_clock with Alpaca.timestamp = "2025-06-25T15:55:00-04:00" }
+    ~decide:(fun ~frozen _ -> let () = decided := Some frozen in us_pair_decision [||])
+    ~execute:(fun _ _ _ -> ()) in
+  assert (!decided = Some (Array.to_list symbols));
+  (* Each symbol's wait is 45 seconds (3 polls): the POSTs land at 15:55:00,
+     15:55:45, 15:56:30, and 15:57:15, all inside the window. *)
+  assert (List.rev !posted_at = [0; 45; 90; 135]);
+  (* A flat account places no late close and decides at once. *)
+  let broker_events, _, _, _ = run ~held:0. ~lookups:["none"] () in
+  assert (broker_events = ["lookup:" ^ late ^ ":none"; "open:QQQ"; "position:QQQ:0";
+    "execute:bt-QQQ-2025-06-25"]);
+  (* Two symbols crossing the cutoff: SPY's late close fills at 15:46, QQQ's
+     clock check before its own POST finds 15:58, so SPY enters and QQQ
+     skips. QQQ's position is read separately so SPY's fill does not flatten it. *)
+  let broker_events = ref [] in
+  let broker, _ = us_overnight_broker ~events:broker_events ~held:(-3.)
+    ~lookups:["none"; "none"] ~now:"2025-06-25T15:46:00-04:00"
+    ~clocks:["2025-06-25T15:46:00-04:00"; "2025-06-25T15:46:00-04:00";
+             "2025-06-25T15:58:00-04:00"] () in
+  let broker = { broker with position = (fun symbol ->
+    if symbol = "QQQ" then let () = broker_events := "position:QQQ:-3" :: !broker_events in -3.
+    else broker.position symbol) } in
+  let decided = ref None in
+  let _ = us_overnight_step ~symbols:[|"SPY"; "QQQ"|] broker us_decision_clock
+    ~decide:(fun ~frozen _ -> let () = decided := Some frozen in us_pair_decision [||])
+    ~execute:(fun _ _ _ -> ()) in
+  assert (!decided = Some ["QQQ"]);
+  assert (List.rev !broker_events = ["lookup:bt-SPY-2025-06-25-late:none"; "open:SPY";
+    "position:SPY:-3"; "clock:2025-06-25T15:46:00-04:00"; "post:buy:3:bt-SPY-2025-06-25-late";
+    "position:SPY:0"; "clock:2025-06-25T15:46:00-04:00"; "lookup:" ^ late ^ ":none";
+    "open:QQQ"; "position:QQQ:-3"; "clock:2025-06-25T15:58:00-04:00"]);
+  (* Series ids: the entry, the numbered covers, exits and orphans, and a
+     late close; all retain their listed submission time. *)
+  let order = us_exit_order "filled" in
+  let series id = Live.series_of_order ~symbol:"QQQ"
+    { Alpaca.client_order_id = id; submitted_at = "2025-06-25T13:50:00Z"; qty = 3.; order } in
+  let expect ?(orphan = false) date exits id =
+    Some { Live.series_date = date; exits; orphan; series_id = id;
+           submitted_at = "2025-06-25T13:50:00Z"; qty = 3.; latest = order } in
+  assert (series "bt-QQQ-2025-06-24" = expect "2025-06-24" 0 "bt-QQQ-2025-06-24");
+  assert (series "bt-QQQ-2025-06-24-late" = expect "2025-06-24" 0 "bt-QQQ-2025-06-24-late");
+  assert (series "bt-QQQ-2025-06-24-cover" = expect "2025-06-24" 1 "bt-QQQ-2025-06-24-cover");
+  assert (series "bt-QQQ-2025-06-24-exit3" = expect "2025-06-24" 3 "bt-QQQ-2025-06-24-exit3");
+  assert (series "bt-QQQ-2025-06-24-orphan2"
+    = expect ~orphan:true "2025-06-24" 2 "bt-QQQ-2025-06-24-orphan2");
+  assert (series "bt-QQQQ-2025-06-24" = None && series "bt-QQQ-2025-06-24-x" = None
+    && series "-" = None);
+  assert (Live.exit_id ~symbol:"QQQ" ~date:"2025-06-24" ~held:(-3.) ~orphan:false 1
+    = "bt-QQQ-2025-06-24-cover");
+  assert (Live.exit_id ~symbol:"SPY" ~date:"2025-06-24" ~held:2.5 ~orphan:false 2
+    = "bt-SPY-2025-06-24-exit2");
+  assert (Live.exit_id ~symbol:"SPY" ~date:"2025-06-24" ~held:2.5 ~orphan:true 1
+    = "bt-SPY-2025-06-24-orphan");
+  (* stopped and pending_cancel are outstanding for the settle step. *)
+  assert (Live.final_order_status "filled" && Live.final_order_status "rejected");
+  assert (not (Live.final_order_status "stopped" || Live.final_order_status "pending_cancel"))
+
+let test_us_overnight_frozen_entry () =
+  (* Two symbols through the real planner and executor under rebalance daily:
+     QQQ's late close is canceled, so QQQ is frozen at its -3 held shares and
+     SPY's entry is the only POST. Account: cash 500 of which 450 is the
+     reserve of the QQQ short (300 at 100), equity 200, available cash 50. *)
+  let account : Alpaca.account_t =
+    { equity = 1.; cash = 500.; long_market_value = 0.; short_market_value = -300.;
+      initial_margin = 0.; shorting_enabled = true; status = "ACTIVE";
+      trading_blocked = false; account_number = "paper-account" } in
+  let held = [|0.; -3.|] and prices = [|10.; 100.|] and targets = [|-0.9; -1.5|] in
+  let plan_action frozen date =
+    Live.us_plan_action ~frozen ~short:true ~overnight:true ~rebalance:true
+      ~symbols:[|"SPY"; "QQQ"|] ~date ~account ~position_symbols:["QQQ"] ~held
+      ~prices ~targets ~previous_targets:[|0.; 0.|]
+  in
+  (* The planner itself: SPY's sell charge makes E1 < E0, so an unfrozen
+     QQQ at its own -1.5 exposure would cover one share (1.5 * E1 / 100 =
+     2.99 floors to 2) and release 150 of reserve, letting SPY open 17
+     shares (0.9 * 200 / 10 less the charge) instead of the 9 that the 50 of
+     available cash collateralizes (50 / 0.5 = 100 of proceeds, 9 shares
+     after the charge). Frozen, QQQ's trade is exactly zero and SPY is
+     clamped. *)
+  let state, _ = plan_action ["QQQ"] "2025-06-25" in
+  let plan frozen = Engine.plan_fills ~frozen
+    ~costs:[| Engine.default_costs ~market:"us" ~symbol:"SPY";
+              Engine.default_costs ~market:"us" ~symbol:"QQQ" |]
+    ~capital:1. ~profile:(Engine.profile_of_market "us") ~financing_ratios:[|0.5; 0.5|]
+    ~state:{ state with previous_targets = [|0.; 0.|] } ~prices ~targets ~force:true in
+  let frozen = plan [|false; true|] and thawed = plan [||] in
+  assert (not frozen.Engine.planned_assets.(1).Engine.plan_changed);
+  assert (frozen.planned_assets.(1).plan_short_cover = 0.);
+  assert (frozen.planned_assets.(0).plan_short_open = 90.);
+  assert (thawed.planned_assets.(1).plan_short_cover = 100.);
+  assert (thawed.planned_assets.(0).plan_short_open = 170.);
+  let posted = ref [] in
+  let decide ~frozen date =
+    let state, actions = plan_action frozen date in
+    { Live.fetched_through = "2025-06-24"; equity = state.Engine.equity; cash = state.cash;
+      debit = 0.; legs = []; assets = Array.mapi (fun i symbol ->
+        { Live.symbol; provisional = bar date prices.(i) prices.(i); target = targets.(i);
+          held = held.(i); action = actions.(i) }) [|"SPY"; "QQQ"|] }
+  in
+  let execute existing clock decision =
+    Live.execute_decision ~existing ~order_by_client_id:(fun _ _ -> None)
+      ~clock:(fun _ -> clock)
+      ~submit_market:(fun _ ~symbol ~qty ~side ~client_order_id ->
+        let () = posted := (symbol, qty, side, client_order_id) :: !posted in
+        us_fixture_order symbol "sell" "filled")
+      ~finish:(fun _ _ _ _ -> ())
+      Live.Paper "2025-06-25" clock.Alpaca.next_close decision
+  in
+  let broker_events = ref [] in
+  let broker, _ = us_overnight_broker ~events:broker_events ~held:(-3.)
+    ~submitted:"accepted" ~now:"2025-06-25T15:46:00-04:00"
+    ~lookups:["none"; "canceled"] () in
+  (* SPY is flat: its late lookup is skipped by the flat position read. *)
+  let broker = { broker with
+    position = (fun symbol -> if symbol = "SPY" then 0. else broker.position symbol);
+    lookup = (fun id -> if contains id "SPY" then None else broker.lookup id) } in
+  let output = capture_stdout (fun () ->
+    Live.us_step ~broker ~overnight:true ~symbols:[|"SPY"; "QQQ"|]
+      ~lookup:(fun _ -> None) ~decide ~execute ~finish:(fun _ _ _ _ -> ())
+      ~sleep_until:(fun _ -> ()) ~retry:(fun () -> assert false)
+      ~continue:(fun () -> ()) us_decision_clock) in
+  assert (!posted = ["SPY", 9., `Sell, "bt-SPY-2025-06-25"]);
+  assert (contains output "symbol=QQQ note=overnight entry skipped");
+  assert (contains output "symbol=QQQ provisional-close=100 target=-1.5 held=-3 order=skip:overnight entry skipped")
+
+let test_us_short_entry_guard () =
+  (* A daily short file has no exit machinery, but its entry still runs the
+     open-orders guard: an outstanding order freezes the symbol, a settled one
+     lets the entry through. *)
+  let run lookups =
+    let broker_events = ref [] in
+    let broker, _ = us_overnight_broker ~events:broker_events ~held:(-3.) ~lookups
+      ~open_orders:(fun _ -> [us_listed "-" "accepted"])
+      ~now:"2025-06-25T15:46:00-04:00" () in
+    let decided = ref None in
+    let _, output = us_overnight_step ~overnight:false broker us_decision_clock
+      ~decide:(fun ~frozen _ ->
+        let () = decided := Some frozen in
+        us_pair_decision [|Live.Skip "no trade"|])
+      ~execute:(fun _ _ _ -> ()) in
+    List.rev !broker_events, !decided, output
+  in
+  let broker_events, decided, _ = run ["canceled"] in
+  assert (broker_events = ["open:QQQ"; "cancel:-"; "sleep:15";
+    "order:-:canceled"; "position:QQQ:-3"]);
+  assert (decided = Some []);
+  let broker_events, decided, output = run accepted_forever in
+  assert (not (List.exists (fun e -> contains e "position:") broker_events));
+  assert (decided = Some ["QQQ"]);
+  assert (contains output "note=overnight exit outstanding");
+  (* A failing listing blocks that symbol only. *)
+  let broker_events = ref [] in
+  let broker, _ = us_overnight_broker ~events:broker_events
+    ~open_orders:(fun symbol -> if symbol = "SPY" then failwith "SPY orders unavailable" else [])
+    ~now:"2025-06-25T15:46:00-04:00" () in
+  let decided = ref None in
+  let _, output = us_overnight_step ~symbols:[|"SPY"; "QQQ"|] ~overnight:false broker
+    us_decision_clock
+    ~decide:(fun ~frozen _ -> let () = decided := Some frozen in us_pair_decision [||])
+    ~execute:(fun _ _ _ -> ()) in
+  assert (!decided = Some ["SPY"]);
+  assert (List.rev !broker_events = ["open:SPY"; "open:QQQ"; "position:QQQ:0"]);
+  assert (contains output "symbol=SPY error=Failure(\"SPY orders unavailable\") order=skip")
 
 let test_us_closes_before_opens () =
   (* Cash 3000 with QQQ short 20 at 100: equity 1000. The decision covers
@@ -10944,6 +11671,12 @@ let () =
   let () = test_us_pair_restart_routing () in
   let () = test_us_open_sell_restart_end_to_end () in
   let () = test_us_closes_before_opens () in
+  let () = test_us_overnight_exit_gate () in
+  let () = test_us_overnight_morning_step () in
+  let () = test_us_overnight_restart_grace () in
+  let () = test_us_overnight_late_exit () in
+  let () = test_us_overnight_frozen_entry () in
+  let () = test_us_short_entry_guard () in
   let () = test_live_pair_cli_guards () in
   let () = test_tw_buy_budget () in
   let () = test_tw_decide_production_precheck () in

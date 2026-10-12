@@ -207,11 +207,125 @@ val execute_decision :
      client_order_id:string -> Alpaca.order_t) ->
   mode -> string -> string -> decision -> unit
 
-(** Advance one US daemon clock with injected broker and scheduling actions. *)
+(** Broker actions of the short and overnight entry and exit machinery,
+    injected for tests. [order] finds an order by its Alpaca id, [lookup] by
+    its client id; [session_close] gives the epoch second of a date's close. *)
+type overnight_broker = {
+  list_orders : after:string -> Alpaca.listed_t list;
+  open_orders : string -> Alpaca.listed_t list;
+  position : string -> float;
+  submit :
+    symbol:string -> qty:float -> side:[`Buy | `Sell] -> id:string ->
+    Alpaca.order_t;
+  cancel : string -> unit;
+  order : string -> Alpaca.order_t option;
+  lookup : string -> Alpaca.order_t option;
+  clock : unit -> Alpaca.clock_t;
+  session_close : string -> int;
+  sleep : float -> unit;
+}
+
+(** The latest [bt-SYMBOL-] order of a symbol: its date, its place in the
+    exit series ([0] for the entry or a late close, [n] for the n-th exit),
+    whether the series is an entry-less [-orphan] one, its client id, its
+    RFC 3339 submission time, requested quantity, and the order as last read. *)
+type series = {
+  series_date : string;
+  exits : int;
+  orphan : bool;
+  series_id : string;
+  submitted_at : string;
+  qty : float;
+  latest : Alpaca.order_t;
+}
+
+(** Outcome of the settle step: a final order, or one still outstanding
+    after the bounded poll. *)
+type settled = Final of Alpaca.order_t | Outstanding of Alpaca.order_t
+
+(** Statuses Alpaca's lifecycle marks as receiving no further updates;
+    narrower than [terminal_order_status], which also treats [stopped] as
+    done for fill logging. *)
+val final_order_status : string -> bool
+
+(** Classify one listed order of [symbol] by its client id, or [None] for an
+    id outside bt's series. *)
+val series_of_order : symbol:string -> Alpaca.listed_t -> series option
+
+(** The [number]-th exit id of a series: [-cover] for a short holding,
+    [-exit] for a long, [-orphan] for an entry-less position, numbered from
+    the second one. *)
+val exit_id :
+  symbol:string -> date:string -> held:float -> orphan:bool -> int -> string
+
+(** Re-read an order by its Alpaca id every 15 seconds, at most [polls]
+    times, until its status is final. *)
+val follow : overnight_broker -> polls:int -> Alpaca.order_t -> Alpaca.order_t
+
+(** Cancel a nonfinal order and poll it every 15 seconds for at most 5
+    minutes; a fill during the cancel is a fill, and a final order is
+    returned as is without a cancel. Neither a 422 on the cancel nor the
+    timeout proves a final state: the timeout is [Outstanding]. *)
+val settle : overnight_broker -> Alpaca.order_t -> settled
+
+(** The guard before every POST on [symbol]: list its open orders whatever
+    their client ids, settle each, and return the position read afterwards
+    with what the settled orders on the closing side left unfilled ([None]
+    when none was settled), so a caller can size against a lagging
+    positions read; [None] after logging
+    [overnight exit outstanding] when any order is still outstanding, so the
+    caller places nothing for the symbol. *)
+val clear_open :
+  overnight_broker -> today:string -> symbol:string -> (float * float option) option
+
+(** Drive one symbol's series: follow a nonfinal entry or late close to its
+    session close plus 5 minutes and exit what is held; after a final exit,
+    exit whatever is still held, capped at that exit's unfilled quantity,
+    under the next number (at most three resubmissions, then
+    [overnight exit unfilled]); re-check an outstanding
+    exit every 60 seconds until [deadline], then settle and resubmit. An exit
+    submitted at or after [deadline] is first followed every 15 seconds until
+    [submitted_at] plus 2 minutes; this grace survives a restart.
+    Without a deadline leave it queued.
+    Every POST goes through [clear_open]. [None] with a held position logs
+    [overnight position without entry] and exits under [today]'s [-orphan]
+    ids. *)
+val drive_exit :
+  overnight_broker -> today:string -> symbol:string -> deadline:int option ->
+  series option -> unit
+
+(** List the [bt-SYMBOL-] orders since [after] and drive every symbol's
+    latest series; a symbol's failure is logged and the others continue. *)
+val overnight_exits :
+  overnight_broker -> symbols:string array -> today:string -> after:string ->
+  deadline:int option -> unit
+
+(** Close every held symbol under [bt-SYMBOL-DATE-late] before the entry
+    decision, each after [clear_open] and a clock check (an existing close is
+    followed and then guarded the same way), sized as the position capped at
+    what the guard's closing orders left unfilled, and return the symbols
+    still blocked: an outstanding open order, a close not [filled] with a
+    flat position while the submit window is open, a position the guard's
+    fills already cover until a read confirms it flat, a wait past its cap
+    (3 minutes or the window left on the broker clock over the symbols
+    still to process), or a symbol whose pass raised, which is logged. *)
+val late_exit :
+  overnight_broker -> date:string -> next_close:string -> string list ->
+  string list
+
+(** Advance one US daemon clock with injected broker and scheduling actions.
+    With [broker], the decision first runs [clear_open] (and, with
+    [overnight], [late_exit]) for every symbol without an existing entry and
+    passes the blocked symbols to [decide] as [frozen]. With [overnight], a
+    closed clock runs the post-close exit gate and sleeps to the open plus 5
+    minutes, the pre-decision open phase runs the 09:35 step with its 09:50
+    deadline, and the day ends at the close plus 5 minutes. *)
 val us_step :
+  ?broker:overnight_broker ->
+  ?overnight:bool ->
   symbols:string array ->
   lookup:(string -> Alpaca.order_t option) ->
-  decide:(string -> decision) ->
+  decide:(frozen:string list -> string -> decision) ->
   execute:((string * Alpaca.order_t) list -> Alpaca.clock_t -> decision -> unit) ->
   finish:(Alpaca.clock_t -> string -> string -> Alpaca.order_t -> unit) ->
   sleep_until:(string -> unit) -> retry:(unit -> unit) ->
@@ -219,6 +333,9 @@ val us_step :
 
 (** Extract the calendar date prefix from an RFC3339 timestamp. *)
 val timestamp_date : string -> string
+
+(** Epoch seconds of an RFC3339 timestamp with a numeric offset or [Z]. *)
+val rfc3339_seconds : string -> int
 
 (** Reject inactive or trading-blocked Alpaca accounts before startup. *)
 val startup_ok : Alpaca.account_t -> (unit, string) result

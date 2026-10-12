@@ -788,15 +788,10 @@ let live_command_args command extra_options argv =
   let ast = Dsl.parse_file strat_path in
   let rebalance = Dsl.rebalance_of ~filename:strat_path ast in
   let () = ignore (Dsl.short_of ~filename:strat_path ast) in
-  let overnight = Dsl.overnight_of ~filename:strat_path ast in
+  let () = ignore (Dsl.overnight_of ~filename:strat_path ast) in
   let () =
     if List.exists (function Ast.Bars _ -> true | _ -> false) ast then
       failwith "day trading strategies run under bt daytrade"
-  in
-  let () =
-    (* The overnight daemon lands with the exit machinery; until then a daemon would hold the entry across sessions. *)
-    if overnight then
-      failwith "overnight is not supported by bt target and bt live yet"
   in
   let market =
     match Live.strategy_market (Dsl.stocks_of ~filename:strat_path ast) with

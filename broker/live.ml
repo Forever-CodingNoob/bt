@@ -1196,17 +1196,330 @@ let retry_clock ~clock ~sleep ~dispatch =
   in
   loop ()
 
-let us_step ~symbols ~lookup ~decide ~execute ~finish ~sleep_until ~retry
-    ~continue (clock : Alpaca.clock_t) =
+type overnight_broker = {
+  list_orders : after:string -> Alpaca.listed_t list;
+  open_orders : string -> Alpaca.listed_t list;
+  position : string -> float;
+  submit :
+    symbol:string -> qty:float -> side:[`Buy | `Sell] -> id:string ->
+    Alpaca.order_t;
+  cancel : string -> unit;
+  order : string -> Alpaca.order_t option;
+  lookup : string -> Alpaca.order_t option;
+  clock : unit -> Alpaca.clock_t;
+  session_close : string -> int;
+  sleep : float -> unit;
+}
+
+type series = {
+  series_date : string;
+  exits : int;
+  orphan : bool;
+  series_id : string;
+  submitted_at : string;
+  qty : float;
+  latest : Alpaca.order_t;
+}
+
+type settled = Final of Alpaca.order_t | Outstanding of Alpaca.order_t
+
+let final_order_status = function
+  | "filled" | "canceled" | "expired" | "rejected" -> true
+  | _ -> false
+
+let suffix_number suffix kind =
+  let length = String.length kind in
+  if suffix = kind then Some 1
+  else if String.length suffix > length && String.sub suffix 0 length = kind
+  then int_of_string_opt (String.sub suffix length (String.length suffix - length))
+  else None
+
+let series_of_order ~symbol (item : Alpaca.listed_t) =
+  let prefix = "bt-" ^ symbol ^ "-" in
+  let start = String.length prefix in
+  let id = item.client_order_id in
+  if String.length id < start + 10 || String.sub id 0 start <> prefix then None
+  else
+    let series_date = String.sub id start 10 in
+    let suffix = String.sub id (start + 10) (String.length id - start - 10) in
+    let make exits orphan =
+      Some { series_date; exits; orphan; series_id = id;
+             submitted_at = item.submitted_at; qty = item.qty; latest = item.order } in
+    match suffix with
+    | "" | "-late" -> make 0 false
+    | _ ->
+        match suffix_number suffix "-cover", suffix_number suffix "-exit",
+              suffix_number suffix "-orphan" with
+        | Some exits, _, _ | _, Some exits, _ -> make exits false
+        | None, None, Some exits -> make exits true
+        | None, None, None -> None
+
+let exit_id ~symbol ~date ~held ~orphan number =
+  Printf.sprintf "%s-%s%s" (client_order_id ~symbol ~date)
+    (if orphan then "orphan" else if held < 0. then "cover" else "exit")
+    (if number = 1 then "" else string_of_int number)
+
+let follow broker ~polls (order : Alpaca.order_t) =
+  let rec loop polls (order : Alpaca.order_t) =
+    if final_order_status order.status || polls <= 0 then order
+    else
+      let () = broker.sleep 15. in
+      loop (polls - 1)
+        (match broker.order order.id with
+         | Some current -> current
+         | None -> order)
+  in
+  loop polls order
+
+let settle broker (order : Alpaca.order_t) =
+  if final_order_status order.status then Final order
+  else
+    let () = broker.cancel order.id in
+    let settled = follow broker ~polls:20 order in
+    if final_order_status settled.status then Final settled
+    else Outstanding settled
+
+let clear_open broker ~today ~symbol =
+  let items = broker.open_orders symbol in
+  let settled =
+    List.map (fun (item : Alpaca.listed_t) ->
+      let settled = settle broker item.order in
+      let () = log_fill today symbol item.client_order_id
+        (Some (match settled with Final order | Outstanding order -> order)) in
+      settled) items
+  in
+  if List.exists (function Outstanding _ -> true | Final _ -> false) settled then
+    let () = log "date=%s symbol=%s note=overnight exit outstanding" today symbol in
+    None
+  else
+    let position = broker.position symbol in
+    (* What the closing orders settled here left unfilled caps a late close,
+       so a positions read lagging their fills cannot close twice; [None]
+       when no closing order was settled. *)
+    let closing_side = if position < 0. then "buy" else "sell" in
+    let unfilled =
+      List.fold_left2 (fun unfilled (item : Alpaca.listed_t) settled ->
+        match settled with
+        | Final (order : Alpaca.order_t) when order.side = closing_side ->
+            Some (Option.value unfilled ~default:0. +. item.qty -. order.filled_qty)
+        | Final _ | Outstanding _ -> unfilled) None items settled
+    in
+    Some (position, unfilled)
+
+let drive_exit broker ~today ~symbol ~deadline series =
+  let now () = rfc3339_seconds (broker.clock ()).timestamp in
+  (* [bound] caps a remainder at what the previous exit left unfilled, so a
+     positions read that lags its fill cannot double the exit. *)
+  let post ~date ~orphan ~bound number =
+    if bound <= 0. then None
+    else match Option.map fst (clear_open broker ~today ~symbol) with
+    | None -> None
+    | Some held when held = 0. -> None
+    | Some _ when number > 4 ->
+        let () = log "date=%s symbol=%s note=overnight exit unfilled" today symbol in
+        None
+    | Some held ->
+        let qty = Float.min (abs_float held) bound in
+        let side = if held < 0. then `Buy else `Sell in
+        let id = exit_id ~symbol ~date ~held ~orphan number in
+        let submitted_at = (broker.clock ()).timestamp in
+        let latest = broker.submit ~symbol ~qty ~side ~id in
+        let () = log "date=%s symbol=%s held=%.10g order=%s fill=pending" today symbol
+          held (order_description (Order { side; qty; id })) in
+        Some { series_date = date; exits = number; orphan; series_id = id;
+               submitted_at; qty; latest }
+  in
+  let rec step series =
+    if series.exits = 0 then
+      (* An entry or late close is followed to its session's close plus 5
+         minutes; whatever is still open is settled before the exit. *)
+      let () =
+        if not (final_order_status series.latest.status) then
+          let deadline = broker.session_close series.series_date + (5 * 60) in
+          let polls = (deadline - now () + 14) / 15 in
+          log_fill today symbol series.series_id
+            (Some (follow broker ~polls series.latest))
+      in
+      after_post (post ~date:series.series_date ~orphan:false ~bound:Float.infinity 1)
+    else if final_order_status series.latest.status then
+      (* Filled or not, a final exit leaves whatever is still held, up to
+         its own unfilled part, to the next number of the series. *)
+      let () = log_fill today symbol series.series_id (Some series.latest) in
+      after_post (post ~date:series.series_date ~orphan:series.orphan
+        ~bound:(series.qty -. series.latest.filled_qty) (series.exits + 1))
+    else
+      match deadline with
+      | None ->
+          log "date=%s symbol=%s order=existing:%s fill=pending" today symbol
+            series.series_id
+      | Some deadline ->
+          if now () < deadline then
+            let () = broker.sleep 60. in
+            let latest = match broker.order series.latest.id with
+              | Some current -> current
+              | None -> series.latest in
+            step { series with latest }
+          else
+            (* Only a submission at or after the deadline gets the
+               2-minute grace, which survives rediscovery on a restart. *)
+            let submitted_at = rfc3339_seconds series.submitted_at in
+            let latest =
+              if submitted_at < deadline then series.latest
+              else
+                let polls = (submitted_at + 120 - now () + 14) / 15 in
+                follow broker ~polls series.latest in
+            match settle broker latest with
+            | Final latest -> step { series with latest }
+            | Outstanding latest ->
+                let () = log_fill today symbol series.series_id (Some latest) in
+                log "date=%s symbol=%s note=overnight exit outstanding" today symbol
+  and after_post = function
+    | None -> ()
+    | Some series ->
+        match deadline with
+        | None -> ()
+        | Some _ -> step series
+  in
+  match series with
+  | Some series -> step series
+  | None ->
+      if broker.position symbol <> 0. then
+        let () = log "date=%s symbol=%s note=overnight position without entry"
+          today symbol in
+        after_post (post ~date:today ~orphan:true ~bound:Float.infinity 1)
+
+let overnight_exits broker ~symbols ~today ~after ~deadline =
+  let listed = broker.list_orders ~after in
+  Array.iter (fun symbol ->
+    match
+      drive_exit broker ~today ~symbol ~deadline
+        (List.find_map (series_of_order ~symbol) listed)
+    with
+    | () -> ()
+    | exception error ->
+        log "date=%s symbol=%s error=%s order=skip" today symbol
+          (Printexc.to_string error)) symbols
+
+let late_exit broker ~date ~next_close symbols =
+  let cutoff = rfc3339_seconds next_close - (2 * 60) in
+  let open_window (c : Alpaca.clock_t) =
+    c.is_open && next_actions ~now:c.timestamp ~next_close = `Decide in
+  let window () = open_window (broker.clock ()) in
+  (* One clock read per symbol gives both the window check before its POST
+     and its wait budget: 3 minutes, or the window left on that clock divided
+     by the symbols still to process, so every symbol gets its late close
+     submitted before the cutoff. *)
+  let budget remaining (c : Alpaca.clock_t) =
+    let left = cutoff - rfc3339_seconds c.timestamp in
+    Int.min (3 * 60) (left / remaining) / 15
+  in
+  let rec run remaining blocked = function
+    | [] -> List.rev blocked
+    | symbol :: rest ->
+        let id = client_order_id ~symbol ~date ^ "-late" in
+        let rec wait polls (order : Alpaca.order_t) =
+          if order.status = "filled" then
+            let () = log_fill date symbol id (Some order) in
+            not (broker.position symbol = 0. && window ())
+          else if terminal_order_status order.status then
+            let () = log_fill date symbol id (Some order) in true
+          else if polls <= 0 || not (window ()) then true
+          else
+            let () = broker.sleep 15. in
+            wait (polls - 1)
+              (match broker.order order.id with
+               | Some current -> current
+               | None -> order)
+        in
+        let close () =
+          match broker.lookup id with
+          | Some order ->
+              (* The day's close already exists: follow it, then run the
+                 guard over the symbol's other orders before the entry. *)
+              wait (budget remaining (broker.clock ())) order
+              || (match clear_open broker ~today:date ~symbol with
+                  | Some (held, _) -> held <> 0. || not (window ())
+                  | None -> true)
+          | None ->
+              match clear_open broker ~today:date ~symbol with
+              | None -> true
+              | Some (held, unfilled) ->
+                  let qty = match unfilled with
+                    | Some unfilled -> Float.min (abs_float held) unfilled
+                    | None -> abs_float held in
+                  if held = 0. then false
+                  else if qty <= 0. then true
+                  else
+                    let c = broker.clock () in
+                    if not (open_window c) then true
+                    else
+                      let side = if held < 0. then `Buy else `Sell in
+                      let () = log "date=%s symbol=%s note=overnight position closed late"
+                        date symbol in
+                      let order = broker.submit ~symbol ~qty ~side ~id in
+                      let () = log "date=%s symbol=%s held=%.10g order=%s fill=pending" date
+                        symbol held (order_description (Order { side; qty; id })) in
+                      wait (budget remaining c) order
+        in
+        let is_blocked =
+          match close () with
+          | is_blocked -> is_blocked
+          | exception error ->
+              let () = log "date=%s symbol=%s error=%s order=skip" date symbol
+                (Printexc.to_string error) in
+              true
+        in
+        let () = if is_blocked then
+          log "date=%s symbol=%s note=overnight entry skipped" date symbol in
+        run (remaining - 1) (if is_blocked then symbol :: blocked else blocked) rest
+  in
+  run (List.length symbols) [] symbols
+
+let week_before timestamp = shift_rfc3339 timestamp (-7 * 24 * 60 * 60)
+
+let session_seconds (clock : Alpaca.clock_t) time =
+  let start = timezone_start clock.timestamp in
+  rfc3339_seconds
+    (date_prefix clock.timestamp ^ "T" ^ time
+     ^ String.sub clock.timestamp start (String.length clock.timestamp - start))
+
+let session_close_of mode date =
+  match Alpaca.calendar mode ~start:date ~end_:date with
+  | [session] ->
+      let offset = Data.et_offset_minutes date in
+      rfc3339_seconds
+        (Printf.sprintf "%sT%s:00%c%02d:%02d" date session.close
+           (if offset < 0 then '-' else '+') (abs offset / 60) (abs offset mod 60))
+  | _ -> failwith ("Alpaca calendar has no session on " ^ date)
+
+let us_step ?broker ?(overnight = false) ~symbols ~lookup ~decide ~execute ~finish
+    ~sleep_until ~retry ~continue (clock : Alpaca.clock_t) =
+  let date = timestamp_date clock.timestamp in
+  let after_exits ~deadline next =
+    match broker with
+    | Some broker when overnight ->
+        (match overnight_exits broker ~symbols ~today:date
+           ~after:(week_before clock.timestamp) ~deadline with
+         | () -> next ()
+         | exception error ->
+             let () = log "date=%s error=%s order=retry" date (Printexc.to_string error) in
+             retry ())
+    | Some _ | None -> next ()
+  in
+  let wake = if overnight then shift_rfc3339 clock.next_close (5 * 60) else clock.next_open in
   if not clock.is_open then
-    let () = sleep_until clock.next_open in continue ()
+    after_exits ~deadline:None (fun () ->
+      let () = sleep_until (if overnight then shift_rfc3339 clock.next_open (5 * 60)
+        else clock.next_open) in
+      continue ())
   else match next_actions ~now:clock.timestamp ~next_close:clock.next_close with
-  | `Sleep_until timestamp -> let () = sleep_until timestamp in continue ()
-  | `Post_close -> let () = sleep_until clock.next_open in continue ()
+  | `Sleep_until timestamp ->
+      after_exits ~deadline:(Some (session_seconds clock "09:50:00")) (fun () ->
+        let () = sleep_until timestamp in continue ())
+  | `Post_close -> let () = sleep_until wake in continue ()
   | (`Decide | `Cutoff_passed as phase) ->
-      let date = timestamp_date clock.timestamp in
       let existing = ref [] in
-      let end_day () = let () = sleep_until clock.next_open in continue () in
+      let end_day () = let () = sleep_until wake in continue () in
       let reconcile () = List.iter (fun (symbol, order) ->
         try finish clock date (client_order_id ~symbol ~date) order with error ->
           (try log "date=%s symbol=%s error=%s order=skip"
@@ -1225,7 +1538,24 @@ let us_step ~symbols ~lookup ~decide ~execute ~finish ~sleep_until ~retry
         if List.length !existing = Array.length symbols || phase = `Cutoff_passed then
           let () = reconcile () in `End
         else
-          let decision = decide date in
+          (* Before the entry: settle every open order of the symbol, close a
+             held overnight position, and freeze what is not flat. *)
+          let pending = List.filter (fun symbol -> not (List.mem_assoc symbol !existing))
+            (Array.to_list symbols) in
+          let frozen = match broker with
+            | None -> []
+            | Some broker when overnight ->
+                late_exit broker ~date ~next_close:clock.next_close pending
+            | Some broker ->
+                List.filter (fun symbol ->
+                  match clear_open broker ~today:date ~symbol with
+                  | Some _ -> false
+                  | None -> true
+                  | exception error ->
+                      let () = log "date=%s symbol=%s error=%s order=skip" date symbol
+                        (Printexc.to_string error) in
+                      true) pending in
+          let decision = decide ~frozen date in
           let decision = { decision with assets = Array.map (fun (a : asset_decision) ->
             if List.mem_assoc a.symbol !existing then { a with action = Skip "existing order" }
             else a) decision.assets } in
@@ -1243,7 +1573,7 @@ let us_step ~symbols ~lookup ~decide ~execute ~finish ~sleep_until ~retry
             let () = log "date=%s error=%s order=retry" date (Printexc.to_string error) in
             retry ()
 
-let run_us mode ~symbols ~strat_path ~data_dir ~rebalance_choice ~short =
+let run_us mode ~symbols ~strat_path ~data_dir ~rebalance_choice ~short ~overnight =
   let account = Alpaca.account mode in
   let () =
     match startup_ok account with
@@ -1258,6 +1588,19 @@ let run_us mode ~symbols ~strat_path ~data_dir ~rebalance_choice ~short =
     match shortable_ok symbol (Alpaca.asset mode symbol) with
     | Ok () -> ()
     | Error reason -> failwith reason) symbols in
+  let broker = if not (short || overnight) then None else Some
+    { list_orders = (fun ~after ->
+        Alpaca.list_orders mode ~symbols:(Array.to_list symbols) ~after);
+      open_orders = Alpaca.open_orders mode;
+      position = Alpaca.position_qty mode;
+      submit = (fun ~symbol ~qty ~side ~id ->
+        Alpaca.submit_market mode ~symbol ~qty ~side ~client_order_id:id);
+      cancel = Alpaca.cancel_order mode;
+      order = Alpaca.order_by_id mode;
+      lookup = Alpaca.order_by_client_id mode;
+      clock = (fun () -> Alpaca.clock mode);
+      session_close = session_close_of mode;
+      sleep = Unix.sleepf } in
   let rec cycle () =
     match Alpaca.clock mode with
     | exception error ->
@@ -1267,8 +1610,9 @@ let run_us mode ~symbols ~strat_path ~data_dir ~rebalance_choice ~short =
           ~dispatch:step
     | clock -> step clock
   and step clock =
-    us_step ~symbols ~lookup:(Alpaca.order_by_client_id mode)
-      ~decide:(fun date -> decide mode ~session_date:date ~strat_path ~data_dir)
+    us_step ?broker ~overnight ~symbols ~lookup:(Alpaca.order_by_client_id mode)
+      ~decide:(fun ~frozen date ->
+        decide ~frozen mode ~session_date:date ~strat_path ~data_dir)
       ~execute:(fun existing clock decision ->
         execute_decision ~existing mode (timestamp_date clock.timestamp)
           clock.next_close decision)
@@ -1871,6 +2215,7 @@ let run ?equity mode ~strat_path ~data_dir =
   let ast = Dsl.parse_file strat_path in
   let rebalance_choice = Dsl.rebalance_of ~filename:strat_path ast in
   let short = Dsl.short_of ~filename:strat_path ast in
+  let overnight = Dsl.overnight_of ~filename:strat_path ast in
   let directory =
     match Sys.getenv_opt "HOME" with
     | Some home when home <> "" -> Filename.concat home ".bt"
@@ -1883,7 +2228,8 @@ let run ?equity mode ~strat_path ~data_dir =
   | "us" ->
       let fd = lock_daemon ~directory ~market:"us" mode in
       Fun.protect ~finally:(fun () -> Unix.close fd)
-        (fun () -> run_us mode ~symbols ~strat_path ~data_dir ~rebalance_choice ~short)
+        (fun () ->
+          run_us mode ~symbols ~strat_path ~data_dir ~rebalance_choice ~short ~overnight)
   | "tw" ->
       let fd = lock_daemon ~directory ~market:"tw" mode in
       Fun.protect ~finally:(fun () -> Unix.close fd)
