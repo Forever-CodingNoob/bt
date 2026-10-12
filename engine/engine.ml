@@ -338,13 +338,18 @@ let floor_value ~capital ~quantum ~price value =
 let shares_of_value ~capital ~price value =
   floor_shares ~capital ~quantum:1. ~price value
 
-let plan_fills ~costs ~capital ~profile ~financing_ratios
+let plan_fills ~frozen ~costs ~capital ~profile ~financing_ratios
     ~(state : plan_state) ~prices ~targets ~force =
   let () =
     if not (Float.is_finite capital && capital > 0.) then
       invalid_arg "Engine.plan_fills: capital must be positive and finite"
   in
   let asset_count = Array.length state.cash_values in
+  let () =
+    if Array.length frozen <> 0 && Array.length frozen <> asset_count then
+      invalid_arg "Engine.plan_fills: frozen length mismatch"
+  in
+  let is_frozen index = Array.length frozen > 0 && frozen.(index) in
   let iter_assets function_ = iter_indices asset_count function_ in
   let fold_assets function_ initial =
     fold_indices asset_count function_ initial
@@ -391,7 +396,9 @@ let plan_fills ~costs ~capital ~profile ~financing_ratios
         let equity_basis = abs_float e1 in
         let changed =
           Array.init asset_count
-            (fun index -> force || eff.(index) <> prev_eff.(index))
+            (fun index ->
+              (not (is_frozen index))
+              && (force || eff.(index) <> prev_eff.(index)))
         in
         let scaled_buys = Array.make asset_count false in
         let final_values = Array.make asset_count 0. in
@@ -603,7 +610,23 @@ let plan_fills ~costs ~capital ~profile ~financing_ratios
                     then
                       let () = short_clamp := true in
                       let open_ = Float.min (desired -. before) affordable in
-                      open_, before +. open_
+                      let final =
+                        if profile.short_share_quantum > 0. then
+                          let held_shares =
+                            floor_shares ~capital
+                              ~quantum:profile.short_share_quantum
+                              ~price:(price_at index) before
+                          in
+                          let added_shares =
+                            floor_shares ~capital
+                              ~quantum:profile.short_share_quantum
+                              ~price:(price_at index) open_
+                          in
+                          share_value ~capital ~price:(price_at index)
+                            (held_shares +. added_shares)
+                        else before +. open_
+                      in
+                      open_, final
                     else desired -. before, desired
                   in
                   let () = short_opens.(index) <- open_ in
@@ -1525,7 +1548,7 @@ let run ?dividends ?(dividend_tax = 0.)
   in
   let charge = charge costs capital in
   let plan_fills =
-    plan_fills ~costs ~capital ~profile ~financing_ratios:margin.ratios
+    plan_fills ~frozen:[||] ~costs ~capital ~profile ~financing_ratios:margin.ratios
   in
   let absolute_sell_cost = absolute_sell_cost costs capital in
   let record_fill index ~date ~price ~from_e ~to_e =

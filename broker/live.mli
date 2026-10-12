@@ -84,6 +84,8 @@ val client_order_id : symbol:string -> date:string -> string
 
 (** Map Alpaca signed cash and holdings at provisional prices to engine
     margin lots with value-proportional debit; unposted interest stays zero.
+    A negative holding is a short leg valued at its price, reserving
+    [(1 + short_initial_ratio)] times that value of the cash it raised.
     Raise [Failure] if [ratio] is non-finite or not positive.
     Raise [Invalid_argument] if the input arrays differ in length. *)
 val us_plan_state :
@@ -92,8 +94,16 @@ val us_plan_state :
 
 (** Fail closed on unsupported US account states, then jointly plan Alpaca
     orders or skips without broker I/O; return the state used for the decision.
+    [short] allows held and planned shorts (whole-share sells) and checks the
+    long and short marks separately; with [short] and not [overnight], a held
+    exposure whose sign differs from the target replaces that asset's previous
+    target so the deferred leg of a sign flip opens under on_change. A
+    [frozen] symbol is planned at its held exposure and skipped with
+    [overnight entry skipped], so the joint plan sizes the others around it.
     Raise [Invalid_argument] if the input arrays differ in length. *)
 val us_plan_action :
+  frozen:string list ->
+  short:bool -> overnight:bool ->
   rebalance:bool -> symbols:string array -> date:string ->
   account:Alpaca.account_t -> position_symbols:string list ->
   held:float array -> prices:float array ->
@@ -235,6 +245,7 @@ val check_tw_budget :
     Paper does not read contract info or limits. Audit logs default to stderr.
     TW snapshots are matched by code, independently of input array order. *)
 val decide :
+  ?frozen:string list ->
   ?provisional_close:float ->
   ?previous_session:string ->
   ?equity:float ->

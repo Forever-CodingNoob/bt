@@ -94,8 +94,14 @@ let us_plan_state ~cash ~held ~prices ~ratio ~previous_targets =
     invalid_arg "US plan arrays differ in length" in
   let () = if not (Float.is_finite ratio) || ratio <= 0. then
     failwith "US financing ratio is not positive" in
-  let values = Array.mapi (fun i shares -> shares *. prices.(i)) held in
+  let values = Array.mapi (fun i shares -> Float.max 0. (shares *. prices.(i))) held in
+  (* A negative Alpaca quantity is the short leg: its value is the proceeds
+     and the reserve holds them plus the Reg T collateral. *)
+  let short_values = Array.mapi (fun i shares ->
+    Float.max 0. (-. shares *. prices.(i))) held in
+  let short_ratio = (Engine.profile_of_market "us").short_initial_ratio in
   let total = Array.fold_left ( +. ) 0. values in
+  let short_total = Array.fold_left ( +. ) 0. short_values in
   let debit = Float.max 0. (-. cash) in
   let loans = Array.map (fun value ->
     if total = 0. then debit /. float_of_int count
@@ -103,15 +109,17 @@ let us_plan_state ~cash ~held ~prices ~ratio ~previous_targets =
   let margin_values = Array.mapi (fun i value ->
     Float.min value (loans.(i) /. ratio)) values in
   let cash = Float.max cash 0. in
-  { Engine.equity = cash +. total -. debit; cash;
+  { Engine.equity = cash +. total -. short_total -. debit; cash;
     cash_values = Array.mapi (fun i value -> value -. margin_values.(i)) values;
     margin_values; loans; interests = Array.make count 0.;
     tail_interests = Array.make count 0.; debt = 0.; receivables = 0.;
-    previous_targets; short_values = Array.make count 0.;
-    short_reserved = Array.make count 0.; short_borrow = Array.make count 0. }
+    previous_targets; short_values;
+    short_reserved = Array.map (fun value -> (1. +. short_ratio) *. value) short_values;
+    short_borrow = Array.make count 0. }
 
-let us_plan_action ~rebalance ~symbols ~date ~(account : Alpaca.account_t)
-    ~position_symbols ~held ~prices ~targets ~previous_targets =
+let us_plan_action ~frozen ~short ~overnight ~rebalance ~symbols ~date
+    ~(account : Alpaca.account_t) ~position_symbols ~held ~prices ~targets
+    ~previous_targets =
   let count = Array.length symbols in
   let () = if Array.length held <> count || Array.length prices <> count
     || Array.length targets <> count || Array.length previous_targets <> count then
@@ -119,14 +127,21 @@ let us_plan_action ~rebalance ~symbols ~date ~(account : Alpaca.account_t)
   let profile = Engine.profile_of_market "us" in
   let ratio = profile.default_financing_ratio in
   let state = us_plan_state ~cash:account.cash ~held ~prices ~ratio ~previous_targets in
-  let rec held_value index value =
-    if index = Array.length held then value
-    else held_value (index + 1) (value +. held.(index) *. prices.(index)) in
-  let value = held_value 0 0. in
+  let rec leg_values index long short =
+    if index = Array.length held then long, short
+    else
+      let value = held.(index) *. prices.(index) in
+      if value < 0. then leg_values (index + 1) long (short -. value)
+      else leg_values (index + 1) (long +. value) short in
+  let long_value, short_value = leg_values 0 0. 0. in
   let () = if not (Float.is_finite account.cash) then
     failwith "US account cash is not finite" in
-  let () = if account.short_market_value <> 0. || Array.exists (fun h -> h < 0.) held then
-    failwith "US account holds a short position" in
+  let held_short = Array.exists (fun h -> h < 0.) held in
+  let () = if short then
+      (if account.short_market_value <> 0. && not held_short then
+        failwith "US account holds a short outside the strategy")
+    else if account.short_market_value <> 0. || held_short then
+      failwith "US account holds a short position" in
   let () = List.iter (fun symbol ->
     if not (Array.exists (( = ) symbol) symbols) then
       failwith ("US account holds unsupported symbol " ^ symbol)) position_symbols in
@@ -134,29 +149,66 @@ let us_plan_action ~rebalance ~symbols ~date ~(account : Alpaca.account_t)
     (* ponytail: 1% tolerance for broker marks versus provisional prices;
        retain alongside the positions-list check for valuation consistency. *)
     if not (Float.is_finite account.long_market_value)
-      || abs_float (account.long_market_value -. value) > 0.01 *. account.long_market_value
+      || abs_float (account.long_market_value -. long_value) > 0.01 *. account.long_market_value
+    then failwith "US account holds other symbols" in
+  let () =
+    (* Alpaca marks the short leg as a negative number. *)
+    if not (Float.is_finite account.short_market_value)
+      || abs_float (-. account.short_market_value -. short_value)
+         > 0.01 *. (-. account.short_market_value)
     then failwith "US account holds other symbols" in
   let () = if not (Float.is_finite state.equity) || state.equity <= 0. then
     failwith "US account equity is not positive" in
+  let exposure i = held.(i) *. prices.(i) /. state.equity in
+  (* A frozen symbol keeps its holding: the joint plan sizes the others
+     around it and its own action is a skip. *)
+  let is_frozen i = List.mem symbols.(i) frozen in
+  let targets = Array.mapi (fun i target ->
+    if is_frozen i then exposure i else target) targets in
+  let previous_targets = Array.mapi (fun i previous ->
+    if is_frozen i then exposure i else previous) previous_targets in
+  (* A carried short never flips in one session: the held sign replaces a
+     previous target of the other sign, so the deferred leg opens under
+     on_change at the next decision and nothing else changes. *)
+  let previous_targets =
+    if short && not overnight then
+      Array.mapi (fun i previous ->
+        if compare (exposure i) 0. <> compare targets.(i) 0. then exposure i else previous)
+        previous_targets
+    else previous_targets in
+  let state = { state with previous_targets } in
   if not rebalance && targets = previous_targets then
-    state, Array.make (Array.length symbols) (Skip "target unchanged")
+    state, Array.mapi (fun i _ ->
+      if is_frozen i then Skip "overnight entry skipped"
+      else Skip "target unchanged") symbols
   else
-    let plan = Engine.plan_fills
+    let plan = Engine.plan_fills ~frozen:(Array.mapi (fun i _ -> is_frozen i) symbols)
       ~costs:(Array.map (fun symbol -> Engine.default_costs ~market:"us" ~symbol) symbols)
       ~capital:1. ~profile ~financing_ratios:(Array.make (Array.length symbols) ratio)
       ~state ~prices ~targets ~force:rebalance in
     let actions = Array.mapi (fun i (item : Engine.planned_asset) ->
-      if not rebalance && targets.(i) = previous_targets.(i) then Skip "target unchanged"
+      if is_frozen i then Skip "overnight entry skipped"
+      else if not rebalance && targets.(i) = previous_targets.(i) then Skip "target unchanged"
       else
-        let net = item.plan_buy_cash +. item.plan_buy_margin
-          -. item.plan_sell_cash -. item.plan_sell_margin in
+        let net = item.plan_buy_cash +. item.plan_buy_margin +. item.plan_short_cover
+          -. item.plan_sell_cash -. item.plan_sell_margin -. item.plan_short_open in
         if net = 0. then Skip "no trade planned"
         else
           let price = prices.(i) in
+          (* A sign flip closes the old leg only. The short leg is whole
+             shares: the order is the change from the held count to the
+             planner's quantized final holding, exact on a full cover. *)
+          let short_shares =
+            Engine.shares_of_value ~capital:1. ~price item.plan_short_final in
           let side, shares =
-            if net > 0. then `Buy, net /. price
-            else `Sell, (if item.plan_final_value = 0. then held.(i)
-              else Float.min (-. net /. price) held.(i)) in
+            if net > 0. then
+              `Buy, (if held.(i) < 0. then -. held.(i) -. short_shares
+               else net /. price)
+            else
+              `Sell, (if held.(i) > 0. then
+                (if item.plan_final_value = 0. then held.(i)
+                 else Float.min (-. net /. price) held.(i))
+               else short_shares +. held.(i)) in
           let qty = float_of_string (Alpaca.qty_string shares) in
           if qty = 0. || (side = `Buy && qty *. price < 1.) then
             Skip "below $1 minimum order value"
@@ -631,16 +683,18 @@ let align_history ~symbols arrays =
   fetched_through, List.map
     (Data.filter_dates ~keep:(fun date -> Hashtbl.mem keep date)) arrays
 
-let decision_targets ast stocks arrays provisional ratios =
+let decision_targets ?short_ratio ast stocks arrays provisional ratios =
   let index = ref 0 in
   let assets = List.map2 (fun (alias, _, _) bars ->
     let provisional_bar = provisional.(!index) in
     let () = incr index in
     alias, Array.append bars [|provisional_bar|]) stocks arrays in
-  let strategy = Dsl.compile_ast ast ~params:[] ~assets in
+  let short_cap = Option.map (fun ratio -> 1. /. ratio) short_ratio in
+  let strategy = Dsl.compile_ast ?short_cap ast ~params:[] ~assets in
   let length = Array.length strategy.Engine.targets.(0) in
   let row i = Array.map (fun targets -> targets.(i)) strategy.targets in
-  let effective i = fst (Engine.effective_targets ~financing_ratios:ratios (row i)) in
+  let effective i =
+    fst (Engine.effective_targets ?short_ratio ~financing_ratios:ratios (row i)) in
   effective (length - 1),
   (if length = 1 then Array.make (List.length stocks) 0. else effective (length - 2))
 
@@ -721,13 +775,15 @@ let check_tw_budget ~log ~symbols ~snapshots ~contract_infos
   if margin > limits.margin_available then failwith (Printf.sprintf
     "TW margin budget short: planned %.10g, available %.10g" margin limits.margin_available)
 
-let decide ?provisional_close ?previous_session ?equity ?tw_balance
+let decide ?(frozen = []) ?provisional_close ?previous_session ?equity ?tw_balance
     ?tw_settlements ?tw_positions ?tw_position_details ?tw_snapshots
     ?tw_contract_infos ?tw_trading_limits
     ?(tw_log = fun text -> Printf.eprintf "%s\n%!" text) mode
     ~session_date ~strat_path ~data_dir =
   let ast = Dsl.parse_file strat_path in
   let rebalance = Option.value (Dsl.rebalance_of ~filename:strat_path ast) ~default:false in
+  let short = Dsl.short_of ~filename:strat_path ast in
+  let overnight = Dsl.overnight_of ~filename:strat_path ast in
   let stocks = Dsl.stocks_of ~filename:strat_path ast in
   let market = strategy_market stocks in
   let symbols = Array.of_list (List.map (fun (_, _, s) -> s) stocks) in
@@ -764,16 +820,18 @@ let decide ?provisional_close ?previous_session ?equity ?tw_balance
         (Array.to_list (Array.map fst loaded)) in
       let provisional = Array.map snd loaded in
       let () = Array.iter check_session provisional in
-      let ratios = Array.make (Array.length symbols)
-        (Engine.profile_of_market "us").default_financing_ratio in
+      let profile = Engine.profile_of_market "us" in
+      let ratios = Array.make (Array.length symbols) profile.default_financing_ratio in
+      let short_ratio = if short then Some profile.short_initial_ratio else None in
       let targets, previous_targets =
-        decision_targets ast stocks arrays provisional ratios in
+        decision_targets ?short_ratio ast stocks arrays provisional ratios in
       let account = Alpaca.account mode in
       let held = Array.map (Alpaca.position_qty mode) symbols in
       let position_symbols = Alpaca.positions mode in
       let prices = Array.map (fun (b : Data.bar) -> b.c) provisional in
-      let state, actions = us_plan_action ~rebalance ~symbols ~date:session_date
-        ~account ~position_symbols ~held ~prices ~targets ~previous_targets in
+      let state, actions = us_plan_action ~frozen ~short ~overnight ~rebalance
+        ~symbols ~date:session_date ~account ~position_symbols ~held ~prices
+        ~targets ~previous_targets in
       { fetched_through; equity = state.equity; cash = state.cash;
         debit = Array.fold_left ( +. ) 0. state.loans; legs = [];
         assets = Array.mapi (fun i symbol ->
@@ -862,7 +920,7 @@ let decide ?provisional_close ?previous_session ?equity ?tw_balance
           short_values = Array.make (Array.length symbols) 0.;
           short_reserved = Array.make (Array.length symbols) 0.;
           short_borrow = Array.make (Array.length symbols) 0. } in
-      let plan = Engine.plan_fills ~costs:(Array.map tw_live_debit_costs symbols)
+      let plan = Engine.plan_fills ~frozen:[||] ~costs:(Array.map tw_live_debit_costs symbols)
         ~capital:1. ~profile:(Engine.profile_of_market "tw")
         ~financing_ratios:ratios ~state ~prices ~targets ~force:rebalance in
       let rollover = Array.to_list (Array.mapi (fun i symbol ->

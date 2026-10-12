@@ -195,8 +195,12 @@ val effective_targets :
   financing_ratios:float array -> float array -> float array * bool
 
 (** Return the exact pure per-bar fill plan used by [run]; capital must be
-    finite and strictly positive. *)
+    finite and strictly positive. A [frozen] asset is never [plan_changed],
+    whatever its target and [force]: its trade is exactly zero and the other
+    assets are sized around its holding. An empty [frozen] freezes nothing;
+    otherwise its length must match the assets. *)
 val plan_fills :
+  frozen:bool array ->
   costs:costs array ->
   capital:float ->
   profile:market_profile ->

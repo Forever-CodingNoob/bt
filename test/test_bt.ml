@@ -4602,7 +4602,7 @@ let short_state ?(short_values = [| 0.; 0. |]) ?(short_reserved = [| 0.; 0. |])
 let test_short_joint_scaling () =
   (* Flat account, capital 1000000 at price 10 so 0.5 is 50000 whole shares. *)
   let plan =
-    Engine.plan_fills ~costs:[| zero_costs; zero_costs |] ~capital:1000000.
+    Engine.plan_fills ~frozen:[||] ~costs:[| zero_costs; zero_costs |] ~capital:1000000.
       ~profile:us_profile ~financing_ratios:[| 0.5; 0.5 |]
       ~state:(short_state ~equity:1. ~cash:1. ~cash_values:[| 0.; 0. |]
                 ~previous_targets:[| 0.; 0. |] ())
@@ -4627,7 +4627,7 @@ let test_short_leg_plan () =
   let costs = { zero_costs with Engine.fee_bps = 100. } in
   let plan ?short_values ?short_reserved ~equity ~cash ~cash_values
       ~previous_targets targets =
-    Engine.plan_fills ~costs:[| costs; costs |] ~capital:1000.
+    Engine.plan_fills ~frozen:[||] ~costs:[| costs; costs |] ~capital:1000.
       ~profile:us_profile ~financing_ratios:[| 0.5; 0.5 |]
       ~state:(short_state ?short_values ?short_reserved ~equity ~cash
                 ~cash_values ~previous_targets ())
@@ -4691,7 +4691,7 @@ let test_short_leg_plan () =
      so the plan's total cost is zero and only the clamp is recorded. *)
   let minimum = { zero_costs with Engine.min_fee = 1. } in
   let clamped =
-    Engine.plan_fills ~costs:[| minimum; minimum |] ~capital:1000.
+    Engine.plan_fills ~frozen:[||] ~costs:[| minimum; minimum |] ~capital:1000.
       ~profile:us_profile ~financing_ratios:[| 0.5; 0.5 |]
       ~state:(short_state ~equity:1. ~cash:0. ~cash_values:[| 1.; 0. |]
                 ~previous_targets:[| 1.; 0. |] ())
@@ -5491,7 +5491,7 @@ let test_us_plan_action_foreign_symbol () =
       status = "ACTIVE";
       trading_blocked = false; account_number = "fixture" } in
   (* A short holding array must not silently drop QQQ under on_change. *)
-  assert (match Live.us_plan_action ~rebalance:false ~symbols:[|"SPY"; "QQQ"|]
+  assert (match Live.us_plan_action ~frozen:[] ~short:false ~overnight:false ~rebalance:false ~symbols:[|"SPY"; "QQQ"|]
     ~date:"2025-06-24" ~account:{ account with cash = 500.; long_market_value = 500. }
     ~position_symbols:["SPY"; "QQQ"]
     ~held:[|5.|] ~prices:[|100.; 100.|]
@@ -5500,7 +5500,7 @@ let test_us_plan_action_foreign_symbol () =
     | exception Invalid_argument message ->
         message = "US plan arrays differ in length"
     | exception Failure _ -> false);
-  match Live.us_plan_action ~rebalance:false ~symbols:[|"SPY"; "QQQ"|]
+  match Live.us_plan_action ~frozen:[] ~short:false ~overnight:false ~rebalance:false ~symbols:[|"SPY"; "QQQ"|]
     ~date:"2025-06-24" ~account ~position_symbols:["SPY"; "FOREIGN"]
     ~held:[|5.; 0.|] ~prices:[|100.; 100.|]
     ~targets:[|0.5; 0.|] ~previous_targets:[|0.5; 0.|] with
@@ -5541,7 +5541,7 @@ let test_us_plan_action_pair_matches_run () =
         short_market_value = 0.; initial_margin = 0.; shorting_enabled = true;
         status = "ACTIVE";
         trading_blocked = false; account_number = "fixture" } in
-    let state, actions = Live.us_plan_action ~rebalance:false ~symbols
+    let state, actions = Live.us_plan_action ~frozen:[] ~short:false ~overnight:false ~rebalance:false ~symbols
       ~date:"2025-06-24" ~account ~position_symbols:["SPY"; "QQQ"]
       ~held ~prices:[|price; price|] ~targets:t1 ~previous_targets:t0 in
     let () = assert_close e1 state.Engine.equity in
@@ -5615,7 +5615,7 @@ let test_us_plan_action_checks () =
       trading_blocked = false; account_number = "paper-account" }
   in
   let choose account held =
-    let state, actions = Live.us_plan_action ~rebalance:false ~symbols:[|"SPY"|]
+    let state, actions = Live.us_plan_action ~frozen:[] ~short:false ~overnight:false ~rebalance:false ~symbols:[|"SPY"|]
       ~date:"2025-06-24" ~account ~position_symbols:["SPY"]
       ~held:[|held|] ~prices:[|100.|] ~targets:[|0.5|]
       ~previous_targets:[|0.5|] in
@@ -5671,7 +5671,7 @@ let test_us_plan_action_orders () =
       trading_blocked = false; account_number = "paper-account" }
   in
   let choose ~rebalance ~cash ~held ~price ~target ~previous_target =
-    let state, actions = Live.us_plan_action ~rebalance ~symbols:[|"SPY"|]
+    let state, actions = Live.us_plan_action ~frozen:[] ~short:false ~overnight:false ~rebalance ~symbols:[|"SPY"|]
       ~date:"2025-06-24" ~account:(account ~cash ~held ~price)
       ~position_symbols:["SPY"] ~held:[|held|] ~prices:[|price|]
       ~targets:[|target|] ~previous_targets:[|previous_target|] in
@@ -5770,7 +5770,7 @@ let test_us_plan_action_matches_run () =
         trading_blocked = false; account_number = "paper-account" }
     in
     let state, actions =
-      Live.us_plan_action ~rebalance:false ~symbols:[|"SPY"|]
+      Live.us_plan_action ~frozen:[] ~short:false ~overnight:false ~rebalance:false ~symbols:[|"SPY"|]
         ~date:"2025-06-24" ~account ~position_symbols:["SPY"]
         ~held:[|held|] ~prices:[|price|] ~targets:[|t1|]
         ~previous_targets:[|t0|]
@@ -5798,6 +5798,222 @@ let test_us_plan_action_matches_run () =
      down payment: refinance cash inventory while sending only the buy. *)
   check ~refinance:true 0.8 1.5
 
+let test_us_short_plan_state () =
+  let state = Live.us_plan_state ~cash:1600. ~held:[|-3.; 4.|]
+    ~prices:[|100.; 100.|] ~ratio:0.5 ~previous_targets:[|-0.3; 0.4|] in
+  (* -3 shares at 100 is a 300 short leg reserving 1.5 * 300 = 450; the
+     4 long shares are 400 of cash inventory; equity 1600 + 400 - 300. *)
+  assert (state.Engine.short_values = [|300.; 0.|]);
+  assert (state.short_reserved = [|450.; 0.|]);
+  assert (state.short_borrow = [|0.; 0.|]);
+  assert (state.cash_values = [|0.; 400.|]);
+  assert (state.margin_values = [|0.; 0.|] && state.loans = [|0.; 0.|]);
+  assert (state.cash = 1600. && state.equity = 1700.);
+  (* A debit splits over the long values only: cash -100 against 600 of
+     SPY funds 200 of margin inventory; equity 0 + 600 - 300 - 100 = 200. *)
+  let levered = Live.us_plan_state ~cash:(-100.) ~held:[|-3.; 6.|]
+    ~prices:[|100.; 100.|] ~ratio:0.5 ~previous_targets:[|-0.3; 0.6|] in
+  assert (levered.loans = [|0.; 100.|]);
+  assert (levered.margin_values = [|0.; 200.|]);
+  assert (levered.cash_values = [|0.; 400.|]);
+  assert (levered.short_values = [|300.; 0.|]);
+  assert (levered.equity = 200.)
+
+let test_us_short_plan_checks () =
+  let base : Alpaca.account_t =
+    { equity = 1.; cash = 1600.; long_market_value = 400.;
+      short_market_value = -300.; initial_margin = 0.; shorting_enabled = true;
+      status = "ACTIVE"; trading_blocked = false; account_number = "paper-account" }
+  in
+  let choose ?(short = true) account held =
+    Live.us_plan_action ~frozen:[] ~short ~overnight:false ~rebalance:false
+      ~symbols:[|"SPY"; "QQQ"|] ~date:"2025-06-24" ~account
+      ~position_symbols:["SPY"; "QQQ"] ~held ~prices:[|100.; 100.|]
+      ~targets:[|-0.3; 0.4|] ~previous_targets:[|-0.3; 0.4|]
+  in
+  let fails ?short expected account held =
+    assert_failure (fun () ->
+      match choose ?short account held with
+      | _ -> assert false
+      | exception Failure message ->
+          assert (message = expected);
+          failwith message)
+  in
+  (* A file without short keeps the old rejection for a held short. *)
+  fails ~short:false "US account holds a short position" base [|-3.; 4.|];
+  (* With short, a short mark but no short strategy holding is foreign. *)
+  fails "US account holds a short outside the strategy" base [|0.; 4.|];
+  (* -3 SPY at 100 matches the -300 mark; both targets are unchanged. *)
+  let state, actions = choose base [|-3.; 4.|] in
+  assert (state.Engine.equity = 1700.);
+  assert (actions = [|Live.Skip "target unchanged"; Live.Skip "target unchanged"|]);
+  (* The short mark check tolerates 1% of -short_market_value: 298 and 302
+     differ from 300 by 2, under 2.98 and 3.02; 295 and 305 differ by 5. *)
+  List.iter (fun short_market_value ->
+    ignore (choose { base with short_market_value } [|-3.; 4.|]))
+    [-298.; -302.];
+  List.iter (fun short_market_value ->
+    fails "US account holds other symbols" { base with short_market_value } [|-3.; 4.|])
+    [-295.; -305.; Float.nan];
+  (* The long mark is still checked on its own leg: 403 passes, 410 fails. *)
+  ignore (choose { base with long_market_value = 403. } [|-3.; 4.|]);
+  fails "US account holds other symbols" { base with long_market_value = 410. } [|-3.; 4.|];
+  (* A short-only book has a zero long mark and equity 1600 - 300 = 1300. *)
+  let state, _ = choose { base with long_market_value = 0. } [|-3.; 0.|] in
+  assert (state.Engine.equity = 1300.)
+
+let test_us_short_plan_parity () =
+  let symbols = [|"SPY"; "QQQ"|] in
+  let capital = 1000. in
+  let profile = Engine.profile_of_market "us" in
+  let costs = Array.map (fun symbol -> Engine.default_costs ~market:"us" ~symbol) symbols in
+  let margin : Engine.margin =
+    { financing_rate = 0.; maintenance_override = None;
+      ratios = [|0.5; 0.5|]; loan_term_months = None } in
+  let check ?(price = 100.) t0 t1 =
+    let bars = [|bar "2025-06-23" price price;
+      bar "2025-06-24" price price; bar "2025-06-25" price price|] in
+    let result = Engine.run
+      (Array.map (fun symbol -> "us/" ^ symbol, bars) symbols)
+      { Engine.targets = Array.mapi (fun i first -> [|first; t1.(i); t1.(i)|]) t0 }
+      costs ~profile ~margin ~capital ~fill:Engine.Close_same ~rebalance:false in
+    let e1 = List.assoc "2025-06-23" result.equity_curve *. capital in
+    let e2 = List.assoc "2025-06-24" result.equity_curve *. capital in
+    let ordinary = List.filter (fun (f : Engine.fill_event) ->
+      f.date = "2025-06-24" && f.from_e <> f.to_e) result.fills in
+    (* The signed holding is the bar-1 fill's exposure times E1 over the
+       price. Alpaca reports a short as a negative whole-share quantity, so
+       the short leg is rounded off the product's last-ulp error. *)
+    let held = Array.map (fun symbol ->
+      match List.find_opt (fun (f : Engine.fill_event) ->
+        f.date = "2025-06-23" && f.stock = "us/" ^ symbol) result.fills with
+      | Some fill ->
+          let shares = fill.to_e *. e1 /. price in
+          if shares < 0. then Float.round shares else shares
+      | None -> 0.) symbols in
+    let long_value = Array.fold_left (fun sum h -> sum +. Float.max 0. (h *. price)) 0. held in
+    let short_value = Array.fold_left (fun sum h -> sum +. Float.min 0. (h *. price)) 0. held in
+    let account : Alpaca.account_t =
+      { equity = 1.; cash = e1 -. long_value -. short_value;
+        long_market_value = long_value; short_market_value = short_value;
+        initial_margin = 0.; shorting_enabled = true; status = "ACTIVE";
+        trading_blocked = false; account_number = "fixture" } in
+    let state, actions = Live.us_plan_action ~frozen:[] ~short:true
+      ~overnight:false ~rebalance:false ~symbols ~date:"2025-06-24" ~account
+      ~position_symbols:["SPY"; "QQQ"] ~held ~prices:[|price; price|]
+      ~targets:t1 ~previous_targets:t0 in
+    let () = assert_close ~tolerance:1e-9 e1 state.Engine.equity in
+    Array.iteri (fun i action ->
+      match List.find_opt (fun (f : Engine.fill_event) ->
+        f.stock = "us/" ^ symbols.(i)) ordinary with
+      | None -> assert (action = Live.Skip "target unchanged")
+      | Some fill ->
+          (* Exposure times equity is the signed position value; the delta
+             over the price is the signed quantity the engine filled, whole
+             shares on the short leg. *)
+          let expected = (fill.to_e *. e2 -. fill.from_e *. e1) /. price in
+          match action with
+          | Live.Order { side; qty; _ } ->
+              assert (side = if expected > 0. then `Buy else `Sell);
+              assert_close ~tolerance:1.01e-9 (abs_float expected) qty
+          | Live.Skip _ | Live.Orders _ -> assert false) actions;
+    actions
+  in
+  (* Open from flat: 0.3 of 1000 less the sell charge is 2.9999 shares,
+     so the order is a 2-share sell, never a skip. *)
+  let opened = check [|0.; 0.|] [|-0.3; 0.|] in
+  assert (opened.(0) = Live.Order { side = `Sell; qty = 2.; id = "bt-SPY-2025-06-24" });
+  (* Add 2 to 4 shares, reduce 4 to 1, and cover 2 to zero on a cash book. *)
+  assert ((check [|-0.3; 0.|] [|-0.5; 0.|]).(0)
+    = Live.Order { side = `Sell; qty = 2.; id = "bt-SPY-2025-06-24" });
+  assert ((check [|-0.5; 0.|] [|-0.2; 0.|]).(0)
+    = Live.Order { side = `Buy; qty = 3.; id = "bt-SPY-2025-06-24" });
+  assert ((check [|-0.3; 0.|] [|0.; 0.|]).(0)
+    = Live.Order { side = `Buy; qty = 2.; id = "bt-SPY-2025-06-24" });
+  (* A levered book: SPY 1.2 sells to 0.8, repaying its loan, and the freed
+     cash funds the QQQ short's collateral. *)
+  ignore (check [|1.2; 0.|] [|0.8; -0.3|]);
+  (* At 100.1 the dollar values are not share multiples: the order is the
+     change from the held count to the planner's floored final holding.
+     Add 3 to 4 (0.49 of 999.98 at 100.1 is 4.89 shares, floored to 4);
+     reduce 4 to 2 (0.21 of 999.98 is 2.09, floored to 2). *)
+  assert ((check ~price:100.1 [|-0.31; 0.|] [|-0.49; 0.|]).(0)
+    = Live.Order { side = `Sell; qty = 1.; id = "bt-SPY-2025-06-24" });
+  assert ((check ~price:100.1 [|-0.49; 0.|] [|-0.21; 0.|]).(0)
+    = Live.Order { side = `Buy; qty = 2.; id = "bt-SPY-2025-06-24" })
+
+let test_us_short_sign_flip () =
+  let account ~cash ~held : Alpaca.account_t =
+    { equity = 1.; cash;
+      long_market_value = Array.fold_left (fun s h -> s +. Float.max 0. (h *. 100.)) 0. held;
+      short_market_value = Array.fold_left (fun s h -> s +. Float.min 0. (h *. 100.)) 0. held;
+      initial_margin = 0.; shorting_enabled = true; status = "ACTIVE";
+      trading_blocked = false; account_number = "paper-account" } in
+  let choose ?(overnight = false) ?(frozen = []) ~date ~cash ~held
+      ~previous_targets () =
+    snd (Live.us_plan_action ~frozen ~short:true ~overnight ~rebalance:false
+      ~symbols:[|"SPY"; "QQQ"|] ~date ~account:(account ~cash ~held)
+      ~position_symbols:["SPY"; "QQQ"] ~held ~prices:[|100.; 100.|]
+      ~targets:[|-0.3; 0.4|] ~previous_targets)
+  in
+  (* Session 1: SPY flips from 0.5 long to -0.3 short. The planner would
+     sell 5 and open the short in one bar; the live order closes the 5
+     held shares only. QQQ at 0.4 is unchanged. *)
+  let first = choose ~date:"2025-06-24" ~cash:100. ~held:[|5.; 4.|]
+    ~previous_targets:[|0.5; 0.4|] () in
+  assert (first = [|Live.Order { side = `Sell; qty = 5.; id = "bt-SPY-2025-06-24" };
+    Live.Skip "target unchanged"|]);
+  (* Session 2: SPY is flat and its target is still -0.3. The flat holding
+     has no sign, so the previous target becomes 0 and the leg opens:
+     0.3 * (1000 - 0.007 of SEC and TAF sell fees) / 100 = 2.99998 shares,
+     floored to 2. QQQ still skips. *)
+  let second = choose ~date:"2025-06-25" ~cash:600. ~held:[|0.; 4.|]
+    ~previous_targets:[|-0.3; 0.4|] () in
+  assert (second = [|Live.Order { side = `Sell; qty = 2.; id = "bt-SPY-2025-06-25" };
+    Live.Skip "target unchanged"|]);
+  (* Under overnight the flat account keeps the strategy's previous target,
+     so an unchanged target skips and the session stays flat. *)
+  let flat = choose ~overnight:true ~date:"2025-06-25" ~cash:600. ~held:[|0.; 4.|]
+    ~previous_targets:[|-0.3; 0.4|] () in
+  assert (flat = [|Live.Skip "target unchanged"; Live.Skip "target unchanged"|]);
+  (* A frozen SPY keeps its 5 held shares (target 0.5 of the 1000 equity):
+     the joint plan sizes QQQ around it from 6 shares down to 0.4 of E1,
+     where E1 is 1000 less the sell charges of about 0.014, so the sell is
+     2 shares plus 0.4 * 0.014 / 100, about 2.00006; SPY skips with the
+     overnight reason even though its target flipped. *)
+  let frozen = choose ~overnight:true ~frozen:["SPY"] ~date:"2025-06-25"
+    ~cash:(-100.) ~held:[|5.; 6.|] ~previous_targets:[|0.5; 0.6|] () in
+  assert (frozen.(0) = Live.Skip "overnight entry skipped");
+  (match frozen.(1) with
+   | Live.Order { side = `Sell; qty; id } ->
+       assert (id = "bt-QQQ-2025-06-25" && qty > 2. && qty < 2.0001)
+   | _ -> assert false)
+
+let test_us_frozen_plan () =
+  let account : Alpaca.account_t =
+    { equity = 1.; cash = 1300.; long_market_value = 0.;
+      short_market_value = -300.; initial_margin = 0.; shorting_enabled = true;
+      status = "ACTIVE"; trading_blocked = false; account_number = "fixture" } in
+  let state, actions = Live.us_plan_action ~frozen:["SPY"] ~short:true
+    ~overnight:true ~rebalance:false ~symbols:[|"SPY"; "QQQ"|]
+    ~date:"2025-06-24" ~account ~position_symbols:["SPY"] ~held:[|-3.; 0.|]
+    ~prices:[|100.; 100.|] ~targets:[|0.; 0.|] ~previous_targets:[|0.; 0.|] in
+  (* Equity is 1300 - 300 = 1000: frozen SPY keeps -0.3 exposure in both
+     target arrays, so the global unchanged gate must retain its skip reason. *)
+  assert (state.Engine.previous_targets = [|-0.3; 0.|]);
+  assert (actions = [|Live.Skip "overnight entry skipped"; Live.Skip "target unchanged"|]);
+  let plan = Engine.plan_fills ~frozen:[|true; false|]
+    ~costs:[|zero_costs; zero_costs|] ~capital:1. ~profile:us_profile
+    ~financing_ratios:[|0.5; 0.5|] ~state ~prices:[|100.; 100.|]
+    ~targets:[|0.; 0.5|] ~force:true in
+  let frozen = plan.Engine.planned_assets.(0) in
+  (* Daily forcing cannot cover the frozen 3-share short or release its
+     450 reserve; the other asset buys 0.5 * 1000 = 500 from free cash 850. *)
+  assert (not frozen.Engine.plan_changed);
+  assert (frozen.plan_trade = 0. && frozen.plan_short_final = 300.);
+  assert (frozen.plan_short_open = 0. && frozen.plan_short_cover = 0.);
+  assert (plan.planned_assets.(1).plan_buy_cash = 500.)
+
 let test_us_live_fractional () =
   let order_fields body =
     let input =
@@ -5817,7 +6033,7 @@ let test_us_live_fractional () =
         status = "ACTIVE"; trading_blocked = false;
         account_number = "paper-account" }
     in
-    let _, actions = Live.us_plan_action ~rebalance:true ~symbols:[|"SPY"|]
+    let _, actions = Live.us_plan_action ~frozen:[] ~short:false ~overnight:false ~rebalance:true ~symbols:[|"SPY"|]
       ~date:"2025-06-24" ~account ~position_symbols:["SPY"]
       ~held:[|held|] ~prices:[|300.|] ~targets:[|Float.max 0. target|]
       ~previous_targets:[|0.|] in
@@ -5873,7 +6089,7 @@ let test_us_live_plan_policy () =
         status = "ACTIVE";
         trading_blocked = false; account_number = "paper-account" }
     in
-    let _, actions = Live.us_plan_action ~rebalance ~symbols:[|"SPY"|]
+    let _, actions = Live.us_plan_action ~frozen:[] ~short:false ~overnight:false ~rebalance ~symbols:[|"SPY"|]
       ~date:"2025-06-24" ~account ~position_symbols:["SPY"]
       ~prices:[|100.|] ~held:[|4.|] ~targets:[|target|]
       ~previous_targets:[|previous_target|] in
@@ -5912,7 +6128,7 @@ let test_us_live_quantity_limit () =
         status = "ACTIVE";
         trading_blocked = false; account_number = "paper-account" }
     in
-    let _, actions = Live.us_plan_action ~rebalance:true ~symbols:[|"SPY"|]
+    let _, actions = Live.us_plan_action ~frozen:[] ~short:false ~overnight:false ~rebalance:true ~symbols:[|"SPY"|]
       ~date:"2025-06-24" ~account ~position_symbols:["SPY"]
       ~held:[|held|] ~prices:[|300.|] ~targets:[|0.|]
       ~previous_targets:[|0.|] in
@@ -6910,7 +7126,7 @@ let test_intraday_session_boundaries () =
 let test_engine_fill_planner () =
   let plan ~cash ~cash_value ~margin_value ~loan ~previous target =
     (* State values are TWD, so capital is 1 like broker/live.ml. *)
-    Engine.plan_fills ~costs:[| zero_costs |] ~capital:1.
+    Engine.plan_fills ~frozen:[||] ~costs:[| zero_costs |] ~capital:1.
       ~profile:(Engine.profile_of_market "tw") ~financing_ratios:[| 0.6 |]
       ~state:
         { Engine.equity = 1000000.; cash;
@@ -6971,7 +7187,7 @@ let test_engine_fill_planner () =
 let test_engine_share_quantum () =
   let plan profile ~price ~cash ~cash_value ~margin_value ~loan
       ~previous target =
-    Engine.plan_fills ~costs:[| zero_costs |] ~capital:1000000. ~profile
+    Engine.plan_fills ~frozen:[||] ~costs:[| zero_costs |] ~capital:1000000. ~profile
       ~financing_ratios:[| 0.6 |]
       ~state:
         { Engine.equity = 1.; cash; cash_values = [| cash_value |];
@@ -7006,7 +7222,7 @@ let test_engine_share_quantum () =
 
 let test_engine_tw_sell_partition () =
   let plan =
-    Engine.plan_fills ~costs:[| zero_costs |] ~capital:1.
+    Engine.plan_fills ~frozen:[||] ~costs:[| zero_costs |] ~capital:1.
       ~profile:(Engine.profile_of_market "tw")
       ~financing_ratios:[| 0.6 |]
       ~state:
@@ -7168,7 +7384,7 @@ let test_engine_tw_plan_live_quantity () =
   let price = 43.27 in
   let value = 7000. *. price in
   let plan =
-    Engine.plan_fills ~costs:[| zero_costs |] ~capital:1.
+    Engine.plan_fills ~frozen:[||] ~costs:[| zero_costs |] ~capital:1.
       ~profile:(Engine.profile_of_market "tw")
       ~financing_ratios:[| 0.6 |]
       ~state:
@@ -7197,7 +7413,7 @@ let test_engine_tw_plan_live_quantity () =
 let test_engine_tw_executed_cost () =
   let costs = Engine.default_costs ~market:"tw" ~symbol:"00685L" in
   let plan ~equity =
-    Engine.plan_fills ~costs:[| costs |] ~capital:1000000.
+    Engine.plan_fills ~frozen:[||] ~costs:[| costs |] ~capital:1000000.
       ~profile:(Engine.profile_of_market "tw")
       ~financing_ratios:[| 0.6 |]
       ~state:
@@ -7230,7 +7446,7 @@ let test_engine_tw_executed_cost () =
 let test_engine_tw_fee_cycle () =
   let costs = { zero_costs with Engine.fee_bps = 2.85 } in
   let plan =
-    Engine.plan_fills ~costs:[| costs |] ~capital:1000000.
+    Engine.plan_fills ~frozen:[||] ~costs:[| costs |] ~capital:1000000.
       ~profile:(Engine.profile_of_market "tw")
       ~financing_ratios:[| 0.6 |]
       ~state:
@@ -7259,7 +7475,7 @@ let test_engine_capital_guard () =
   in
   let rejects capital =
     match
-      Engine.plan_fills ~costs:[| zero_costs |] ~capital
+      Engine.plan_fills ~frozen:[||] ~costs:[| zero_costs |] ~capital
         ~profile:(Engine.profile_of_market "us")
         ~financing_ratios:[| 0.6 |] ~state ~prices:[| 1. |]
         ~targets:[| 0. |] ~force:false
@@ -7274,7 +7490,7 @@ let test_engine_capital_guard () =
 let test_engine_mandatory_capital_cost () =
   let costs = Engine.default_costs ~market:"tw" ~symbol:"2330" in
   let plan =
-    Engine.plan_fills ~costs:[| costs |] ~capital:1.
+    Engine.plan_fills ~frozen:[||] ~costs:[| costs |] ~capital:1.
       ~profile:(Engine.profile_of_market "tw")
       ~financing_ratios:[| 0.6 |]
       ~state:
@@ -7801,7 +8017,7 @@ let test_tw_production_cash () =
 let test_tw_live_plan_legs () =
   let plan ~equity ~cash ~cash_value ~margin_value ~loan ~previous target =
     (* State values are TWD, so capital is 1 like broker/live.ml. *)
-    Engine.plan_fills ~costs:[| zero_costs |] ~capital:1.
+    Engine.plan_fills ~frozen:[||] ~costs:[| zero_costs |] ~capital:1.
       ~profile:(Engine.profile_of_market "tw") ~financing_ratios:[| 0.6 |]
       ~state:
         { Engine.equity; cash; cash_values = [| cash_value |];
@@ -7880,7 +8096,7 @@ let test_tw_odd_sell_never_precedes_buy () =
             List.concat_map
               (fun target ->
                 let plan =
-                  Engine.plan_fills
+                  Engine.plan_fills ~frozen:[||]
                     ~costs:[| Engine.default_costs ~market:"tw"
                                  ~symbol:"2330" |]
                     ~capital:1. ~profile:(Engine.profile_of_market "tw")
@@ -7946,7 +8162,7 @@ let test_tw_odd_sell_never_precedes_buy () =
   List.iter (check false) legs
 
 let test_tw_live_pair_legs () =
-  let base = Engine.plan_fills ~costs:[|zero_costs|] ~capital:1.
+  let base = Engine.plan_fills ~frozen:[||] ~costs:[|zero_costs|] ~capital:1.
     ~profile:(Engine.profile_of_market "tw") ~financing_ratios:[|0.6|]
     ~state:{ Engine.equity = 100000.; cash = 100000.;
       cash_values = [|0.|]; margin_values = [|0.|]; loans = [|0.|];
@@ -8004,7 +8220,7 @@ let test_tw_position_totals_set () =
 
 let test_tw_live_legs_split () =
   let plan ~cash ~margin target =
-    Engine.plan_fills ~costs:[| zero_costs |] ~capital:1.
+    Engine.plan_fills ~frozen:[||] ~costs:[| zero_costs |] ~capital:1.
       ~profile:(Engine.profile_of_market "tw")
       ~financing_ratios:[| 0.6 |]
       ~state:
@@ -8167,7 +8383,7 @@ let test_tw_live_input_guards () =
     (execute { buy with code = "2890" })) in
   let () = assert (fails "TW leg code does not match executor code"
     (execute { buy with exchange = "OTC" })) in
-  let plan = Engine.plan_fills ~costs:[|zero_costs|] ~capital:1.
+  let plan = Engine.plan_fills ~frozen:[||] ~costs:[|zero_costs|] ~capital:1.
     ~profile:(Engine.profile_of_market "tw") ~financing_ratios:[|0.6|]
     ~state:{ Engine.equity = 100000.; cash = 100000.;
       cash_values = [|0.|]; margin_values = [|0.|]; loans = [|0.|];
@@ -10327,7 +10543,46 @@ let test_live_pair_cli_guards () =
     "" "live trading needs distinct symbols: SPY";
   check "stock \"us/SPY\" as a\nstock \"us/QQQ\" as b\na.target 0.5\nb.target 0.5\n"
     "--provisional-close 100" "--provisional-close needs a one-stock strategy"
+
+let test_short_clamped_add_whole_shares () =
+  let check ~capital ~equity ~held ~added =
+    let price = 100.1 in
+    let before = held *. price /. capital in
+    let open_ = added *. price /. capital in
+    let reserved = 1.5 *. before in
+    (* Reg T collateral funds added + 0.5 shares, floored to added.
+       The unchanged long consumes all other equity. *)
+    let available = 0.5 *. (added +. 0.5) *. price /. capital in
+    let long = equity -. 0.5 *. before -. available in
+    let plan =
+      Engine.plan_fills ~frozen:[||] ~costs:[| zero_costs; zero_costs |]
+        ~capital ~profile:us_profile ~financing_ratios:[| 0.5; 0.5 |]
+        ~state:(short_state ~equity ~cash:(reserved +. available)
+          ~cash_values:[| 0.; long |] ~short_values:[| before; 0. |]
+          ~short_reserved:[| reserved; 0. |]
+          ~previous_targets:[| -. before /. equity; long /. equity |] ())
+        ~prices:[| price; price |] ~targets:[| -1.; long /. equity |]
+        ~force:false
+    in
+    let short = plan.Engine.planned_assets.(0) in
+    (* Revalue held + added shares in one multiplication: adding the two
+       separately marked values rounds one ulp below this exact quantum. *)
+    let expected = (held +. added) *. price /. capital in
+    let () = assert (before +. open_ < expected) in
+    let () = assert plan.Engine.planned_funding_clamp in
+    let () = assert (short.Engine.plan_short_open = open_) in
+    let () = assert (short.Engine.plan_short_final = expected) in
+    assert
+      (Engine.shares_of_value ~capital ~price short.Engine.plan_short_final
+       = held +. added)
+  in
+  (* Three held plus one added at 100.1 / 10000 must recover four shares;
+     the live dollar-valued path holds two and adds three, recovering five. *)
+  let () = check ~capital:10000. ~equity:1. ~held:3. ~added:1. in
+  check ~capital:1. ~equity:1000. ~held:2. ~added:3.
+
 let () =
+  let () = test_short_clamped_add_whole_shares () in
   let () = test_version_cli () in
   let () = test_daytrade_cli () in
   let () = test_intraday_latency () in
@@ -10367,6 +10622,11 @@ let () =
   test_us_plan_action_checks ();
   test_us_plan_action_orders ();
   test_us_plan_action_matches_run ();
+  test_us_short_plan_state ();
+  test_us_short_plan_checks ();
+  test_us_short_plan_parity ();
+  test_us_short_sign_flip ();
+  test_us_frozen_plan ();
   test_us_live_fractional ();
   test_us_live_plan_policy ();
   test_us_live_quantity_limit ();
