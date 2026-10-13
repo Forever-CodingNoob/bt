@@ -2025,6 +2025,19 @@ let alpaca_fixture name =
         Filename.concat "fixtures/alpaca" name])
 
 let test_version_cli () =
+  let project_path = locate ["dune-project"; "../../../dune-project"] in
+  let version : string =
+    match
+      read_file project_path
+      |> String.split_on_char '\n'
+      |> List.map String.trim
+      |> List.find_opt (fun line ->
+           String.starts_with ~prefix:"(version " line
+           && String.ends_with ~suffix:")" line)
+    with
+    | Some line -> String.trim (String.sub line 9 (String.length line - 10))
+    | None -> failwith "dune-project has no (version X) line"
+  in
   let binary = locate ["_build/default/bin/bt.exe"; "../bin/bt.exe"] in
   List.iter
     (fun flag ->
@@ -2039,7 +2052,8 @@ let test_version_cli () =
           in
           (* Both version flags report the current release and exit successfully. *)
           let () = assert (Sys.command invocation = 0) in
-          assert (String.starts_with ~prefix:"bt 0.12.0" (read_file stdout_path))))
+          assert
+            (String.starts_with ~prefix:("bt " ^ version) (read_file stdout_path))))
     ["--version"; "-v"]
 
 let test_dividend_tax_cli () =

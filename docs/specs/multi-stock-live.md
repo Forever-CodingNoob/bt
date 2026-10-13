@@ -401,7 +401,7 @@ The `limit_up` basis assumes the broker holds a market buy at the limit-up price
 
 #### Measured and unmeasured
 
-Readings on the production SinoPac account with 0050, on Friday 2026-10-02 and Monday 2026-10-05 (`.superpowers/sdd/tw-limits-probe/log.md`):
+Readings on the production SinoPac account with 0050, on Friday 2026-10-02 and Monday 2026-10-05, and with 0056 on Tuesday 2026-10-13 (`.superpowers/sdd/tw-limits-probe/log.md`):
 
 | Question | Reading | Log lines |
 |---|---|---|
@@ -411,15 +411,12 @@ Readings on the production SinoPac account with 0050, on Friday 2026-10-02 and M
 | Does a cancel release the hold? | Yes, at once. A resting buy of 1 share at 105 took `trading_used` from 0 to 105, and its cancel took it back to 0. | 34-35 |
 | Does an order rejected at placement hold anything? | No. A buy priced below `limit_down` failed at placement and left `trading_used` at 0. | 26, 33 |
 | What is `margin_limit`? | 0 at every reading. | 2, 7, 28 |
+| Does a filled sell add to `trading_available`? | No. `trading_used` was 52 (L3) unchanged after the lot sale. A filled sell adds nothing back while a buy hold is outstanding. | 137 |
+| What hold does the broker take for a `MKT` lot buy? | `limit_up x shares` at placement, kept after the fill. A `MKT` buy of 1 lot took `trading_used` to 64502 = 64450 (`limit_up` 64.45 x 1000) + 52 (L5), and kept that hold after the fill (L6). | 139 |
+| Does an unfillable FOK order hold anything? | No. An unfillable FOK buy was rejected at placement with status `Failed` (deal quantity 0), and `trading_used` stayed at 52 (L4). | 138 |
 
-> [!WARNING]
-> Three behaviors are unmeasured. The pre-check runs on the assumption in the last column until the [stage 2 acceptance](#stage-2-tw-production) measures them.
-
-| Question | Why unmeasured | Assumption |
-|---|---|---|
-| Does a filled sell add to `trading_available`? | The probe placed its sell while `trading_used` was 0, so "adds back" and "adds nothing" read the same. | Sells add nothing. |
-| Does an FOK kill after acceptance release its hold? | The probe placed no lot order. A cancel releases its hold, so a kill is expected to release too. | Kills release. No session depends on it (see the [budget rule](#budget-rule)). |
-| What hold does the broker take for a `MKT` lot buy? | The probe placed no `MKT` order. | `limit_up x lots x unit`. |
+> [!NOTE]
+> An accepted-then-killed FOK state does not exist to observe because Shioaji rejects an unfillable FOK at placement with status `Failed`. FOK kill release after acceptance remains unobservable.
 
 ## Errors
 
