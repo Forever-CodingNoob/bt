@@ -349,7 +349,9 @@ let last_cached_date path =
           match input_line input with
           | line ->
               let date = row_date line in
-              loop (if date = "" || date = "date" then last else Some date)
+              loop
+                (if date = "" || date = "date" || date = "ex_date" then last
+                 else Some date)
           | exception End_of_file -> last
         in
         loop None)
@@ -374,7 +376,24 @@ let should_probe_head ~from_ ~first_cached =
   | None -> false
   | Some date -> String.compare date first_cached < 0
 
-let append_rows ~header ~rows_path ~cache_path ~after =
+let with_cache_lock ~cache_path f =
+  let fd =
+    Unix.openfile (cache_path ^ ".lock")
+      [Unix.O_CREAT; Unix.O_RDWR; Unix.O_CLOEXEC] 0o600
+  in
+  Fun.protect
+    ~finally:(fun () -> Unix.close fd)
+    (fun () ->
+      let () = Unix.lockf fd Unix.F_LOCK 0 in
+      Fun.protect ~finally:(fun () -> Unix.lockf fd Unix.F_ULOCK 0) f)
+
+(* The caller holds the cache lock for the full fetch or this append. *)
+let append_rows_locked ~header ~rows_path ~cache_path ~after =
+  let last =
+    match after, last_cached_date cache_path with
+    | None, last | last, None -> last
+    | Some a, Some b -> Some (max a b)
+  in
   let needs_header =
     not (Sys.file_exists cache_path) || (Unix.stat cache_path).Unix.st_size = 0
   in
@@ -391,22 +410,27 @@ let append_rows ~header ~rows_path ~cache_path ~after =
       Fun.protect
         ~finally:(fun () -> close_in input)
         (fun () ->
-          let rec loop () =
+          let rec loop last =
             match input_line input with
             | line ->
                 let normalized = normalize_row line in
                 let date = row_date normalized in
-                let () =
-                  if date <> "" &&
-                     (match after with
-                      | None -> true
-                      | Some previous -> String.compare date previous > 0)
-                  then output_string output (normalized ^ "\n")
-                in
-                loop ()
+                if date <> "" &&
+                   (match last with
+                    | None -> true
+                    | Some previous -> String.compare date previous > 0)
+                then
+                  let () = output_string output (normalized ^ "\n") in
+                  loop (Some date)
+                else
+                  loop last
             | exception End_of_file -> ()
           in
-          loop ()))
+          loop last))
+
+let append_rows ~header ~rows_path ~cache_path ~after =
+  with_cache_lock ~cache_path (fun () ->
+    append_rows_locked ~header ~rows_path ~cache_path ~after)
 
 let prepend_rows ~header ~rows_path ~cache_path ~before =
   let directory = Filename.dirname cache_path in
@@ -511,33 +535,34 @@ let fetch_tw_prices ~token ~symbol ~from_ ~to_ ~cache_path =
     ".data[] | [.date, .open, .max, .min, .close, .Trading_Volume] | @csv"
   in
   let tw_header = "date,open,high,low,close,volume" in
-  let () =
-    match from_, first_cached_date cache_path with
-    | Some start_date, Some first
-      when should_probe_head ~from_ ~first_cached:first ->
-        let day_before = previous_date first in
-        fetch_rows ~token ~dataset:"TaiwanStockPrice" ~symbol
-          ~from_:start_date ~to_:day_before
-          ~expression:tw_expression
-          ~consume:(fun rows_path ->
-            prepend_rows ~header:tw_header ~rows_path ~cache_path
-              ~before:first)
-    | _ -> ()
-  in
-  let last_date = last_cached_date cache_path in
-  let start_date =
-    match last_date, from_ with
-    | Some date, _ -> next_date date
-    | None, Some date -> date
-    | None, None -> default_from
-  in
-  if String.compare start_date to_ <= 0 then
-    fetch_rows ~token ~dataset:"TaiwanStockPrice" ~symbol
-      ~from_:start_date ~to_
-      ~expression:tw_expression
-      ~consume:(fun rows_path ->
-        append_rows ~header:tw_header
-          ~rows_path ~cache_path ~after:last_date)
+  with_cache_lock ~cache_path (fun () ->
+    let () =
+      match from_, first_cached_date cache_path with
+      | Some start_date, Some first
+        when should_probe_head ~from_ ~first_cached:first ->
+          let day_before = previous_date first in
+          fetch_rows ~token ~dataset:"TaiwanStockPrice" ~symbol
+            ~from_:start_date ~to_:day_before
+            ~expression:tw_expression
+            ~consume:(fun rows_path ->
+              prepend_rows ~header:tw_header ~rows_path ~cache_path
+                ~before:first)
+      | _ -> ()
+    in
+    let last_date = last_cached_date cache_path in
+    let start_date =
+      match last_date, from_ with
+      | Some date, _ -> next_date date
+      | None, Some date -> date
+      | None, None -> default_from
+    in
+    if String.compare start_date to_ <= 0 then
+      fetch_rows ~token ~dataset:"TaiwanStockPrice" ~symbol
+        ~from_:start_date ~to_
+        ~expression:tw_expression
+        ~consume:(fun rows_path ->
+          append_rows_locked ~header:tw_header
+            ~rows_path ~cache_path ~after:last_date))
 
 let fetch_dividends ~token ~symbol ~to_ ~cache_path =
   with_temp ".json" (fun json_path ->
@@ -841,6 +866,7 @@ let read_bars ~market:_ path =
         if header <> "date,open,high,low,close,volume" then
           failf "%s: expected header date,open,high,low,close,volume" path
       in
+      let dates = Hashtbl.create 256 in
       let rec loop line_number acc =
         match input_line input with
         | line when line = "" -> loop (line_number + 1) acc
@@ -855,6 +881,12 @@ let read_bars ~market:_ path =
                     c = float_field path line_number "close" c;
                     v = float_field path line_number "volume" v }
               | _ -> failf "%s:%d: malformed CSV row" path line_number
+            in
+            let () =
+              if Hashtbl.mem dates bar.date then
+                failf "%s: duplicate date %s" path bar.date
+              else
+                Hashtbl.add dates bar.date ()
             in
             if bar.o > 0. && bar.h > 0. && bar.l > 0. && bar.c > 0. then
               loop (line_number + 1) (bar :: acc)
@@ -1340,66 +1372,67 @@ let fetch_us ~token ~symbol ~from_ ~to_ ~directory =
               let () = on_cashdiv cp in
               on_div dp)))))
   in
-  (* Head-gap backfill *)
-  let () =
-    match from_, first_cached_date price_cache with
-    | Some start_date, Some first
-      when should_probe_head ~from_ ~first_cached:first ->
-        let day_before = previous_date first in
-        (try
-          do_range ~start:start_date ~stop:day_before ~prev_close:None
-            ~on_prices:(fun pp ->
-              prepend_rows ~header:ph ~rows_path:pp
-                ~cache_path:price_cache ~before:first)
-            ~on_events:(fun ep ->
-              if Sys.file_exists events_cache then
-                prepend_rows ~header:eh ~rows_path:ep
-                  ~cache_path:events_cache ~before:first
-              else
-                rewrite_rows ~header:eh ~rows_path:ep
-                  ~cache_path:events_cache)
-            ~on_cashdiv:(fun cp ->
-              if Sys.file_exists cashdiv_cache then
-                prepend_rows ~header:ch ~rows_path:cp
-                  ~cache_path:cashdiv_cache ~before:first
-              else
-                rewrite_rows ~header:ch ~rows_path:cp
-                  ~cache_path:cashdiv_cache)
-            ~on_div:(fun dp ->
-              if Sys.file_exists div_cache then
-                prepend_rows ~header:dh ~rows_path:dp
-                  ~cache_path:div_cache ~before:first
-              else
-                rewrite_rows ~header:dh ~rows_path:dp
-                  ~cache_path:div_cache)
-        with Failure message -> keep message)
-    | _ -> ()
-  in
-  (* Forward append *)
-  let last = last_cached_date price_cache in
-  let start_date =
-    match last, from_ with
-    | Some date, _ -> next_date date
-    | None, Some date -> date
-    | None, None -> default_from
-  in
-  if String.compare start_date to_ <= 0 then
-    let prev_close = last_cached_close price_cache in
-    (try
-      do_range ~start:start_date ~stop:to_ ~prev_close
-        ~on_prices:(fun pp ->
-          append_rows ~header:ph ~rows_path:pp
-            ~cache_path:price_cache ~after:last)
-        ~on_events:(fun ep ->
-          append_rows ~header:eh ~rows_path:ep
-            ~cache_path:events_cache ~after:last)
-        ~on_cashdiv:(fun cp ->
-          append_rows ~header:ch ~rows_path:cp
-            ~cache_path:cashdiv_cache ~after:last)
-        ~on_div:(fun dp ->
-          append_rows ~header:dh ~rows_path:dp
-            ~cache_path:div_cache ~after:last)
-    with Failure message -> keep message)
+  with_cache_lock ~cache_path:price_cache (fun () ->
+    (* Head-gap backfill *)
+    let () =
+      match from_, first_cached_date price_cache with
+      | Some start_date, Some first
+        when should_probe_head ~from_ ~first_cached:first ->
+          let day_before = previous_date first in
+          (try
+            do_range ~start:start_date ~stop:day_before ~prev_close:None
+              ~on_prices:(fun pp ->
+                prepend_rows ~header:ph ~rows_path:pp
+                  ~cache_path:price_cache ~before:first)
+              ~on_events:(fun ep ->
+                if Sys.file_exists events_cache then
+                  prepend_rows ~header:eh ~rows_path:ep
+                    ~cache_path:events_cache ~before:first
+                else
+                  rewrite_rows ~header:eh ~rows_path:ep
+                    ~cache_path:events_cache)
+              ~on_cashdiv:(fun cp ->
+                if Sys.file_exists cashdiv_cache then
+                  prepend_rows ~header:ch ~rows_path:cp
+                    ~cache_path:cashdiv_cache ~before:first
+                else
+                  rewrite_rows ~header:ch ~rows_path:cp
+                    ~cache_path:cashdiv_cache)
+              ~on_div:(fun dp ->
+                if Sys.file_exists div_cache then
+                  prepend_rows ~header:dh ~rows_path:dp
+                    ~cache_path:div_cache ~before:first
+                else
+                  rewrite_rows ~header:dh ~rows_path:dp
+                    ~cache_path:div_cache)
+          with Failure message -> keep message)
+      | _ -> ()
+    in
+    (* Forward append *)
+    let last = last_cached_date price_cache in
+    let start_date =
+      match last, from_ with
+      | Some date, _ -> next_date date
+      | None, Some date -> date
+      | None, None -> default_from
+    in
+    if String.compare start_date to_ <= 0 then
+      let prev_close = last_cached_close price_cache in
+      (try
+        do_range ~start:start_date ~stop:to_ ~prev_close
+          ~on_prices:(fun pp ->
+            append_rows_locked ~header:ph ~rows_path:pp
+              ~cache_path:price_cache ~after:last)
+          ~on_events:(fun ep ->
+            append_rows ~header:eh ~rows_path:ep
+              ~cache_path:events_cache ~after:last)
+          ~on_cashdiv:(fun cp ->
+            append_rows ~header:ch ~rows_path:cp
+              ~cache_path:cashdiv_cache ~after:last)
+          ~on_div:(fun dp ->
+            append_rows ~header:dh ~rows_path:dp
+              ~cache_path:div_cache ~after:last)
+      with Failure message -> keep message))
 
 let require_token name =
   match Sys.getenv_opt name with

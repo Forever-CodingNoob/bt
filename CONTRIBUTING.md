@@ -122,17 +122,24 @@ Git ignores these binaries.
 
 ```
 data/tw/<SYMBOL>/<SYMBOL>.csv            Price bars (date,open,high,low,close,volume)
+data/tw/<SYMBOL>/<SYMBOL>.csv.lock       Exclusive price-fetch lock (head and tail)
 data/tw/<SYMBOL>/<SYMBOL>.div.csv        Dividend factors (date,factor)
 data/tw/<SYMBOL>/<SYMBOL>.events.csv     Corporate-action factors (date,factor)
 data/tw/<SYMBOL>/<SYMBOL>.cashdiv.csv    Cash dividends (ex_date,cash_per_share,pay_date)
 data/tw/stockinfo.csv                    Financing ratio classification
 data/us/<SYMBOL>/<SYMBOL>.csv            Price bars (date,open,high,low,close,volume)
+data/us/<SYMBOL>/<SYMBOL>.csv.lock       Exclusive price-fetch lock (head and tail)
 data/us/<SYMBOL>/<SYMBOL>.events.csv     Corporate-action factors (date,factor)
 data/us/<SYMBOL>/<SYMBOL>.cashdiv.csv    Cash dividends (ex_date,cash_per_share,pay_date)
 data/us/<SYMBOL>/<SYMBOL>.div.csv        Dividend factors (date,factor)
+data/us/<SYMBOL>/<SYMBOL>.events.csv.lock  Exclusive corporate-action append lock
+data/us/<SYMBOL>/<SYMBOL>.cashdiv.csv.lock Exclusive cash-dividend append lock
+data/us/<SYMBOL>/<SYMBOL>.div.csv.lock   Exclusive dividend-factor append lock
 data/us/<SYMBOL>/1m/<YEAR>.csv           Minute bars (time,open,high,low,close,volume)
 data/us/calendar.csv                     Exchange sessions (date,open,close)
 ```
+
+Lock files remain beside their caches after release; do not remove them while a fetch may be running.
 
 ## Fixed contracts
 

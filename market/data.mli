@@ -90,7 +90,12 @@ val prepend_rows :
   before:string ->
   unit
 
-(** Append fetched CSV rows after an existing cache tail. *)
+(** Hold an exclusive [cache_path ^ ".lock"] lock through the callback.
+    Do not nest locks on the same cache, including calls to [append_rows]. *)
+val with_cache_lock : cache_path:string -> (unit -> 'a) -> 'a
+
+(** Lock the cache and append rows strictly after both [after] and its actual
+    tail, skipping repeated dates within the fetched rows. *)
 val append_rows :
   header:string ->
   rows_path:string ->
@@ -98,7 +103,8 @@ val append_rows :
   after:string option ->
   unit
 
-(** Read cached price bars (date,open,high,low,close,volume). *)
+(** Read cached price bars (date,open,high,low,close,volume).
+    Raises [Failure] with [PATH: duplicate date DATE] on duplicate dates. *)
 val read_bars : market:string -> string -> bar array
 
 (** Read a cash-dividend cache, filling missing pay dates. *)

@@ -2549,6 +2549,132 @@ let with_temp_market market function_ =
     ~finally:(fun () -> remove_tree root)
     (fun () -> function_ root directory)
 
+let test_append_rows_stale_after () =
+  with_temp_market "us" (fun _ directory ->
+    let header = "date,open,high,low,close,volume" in
+    let cache_path = Filename.concat directory "TEST.csv" in
+    let cached = header ^ "\n2026-10-21,100,101,99,100,1000\n" in
+    let output = open_out cache_path in
+    let () =
+      Fun.protect ~finally:(fun () -> close_out output)
+        (fun () -> output_string output cached)
+    in
+    with_temp_strategy "2026-10-21,100,101,99,100,1000\n" (fun rows_path ->
+      let () =
+        Data.append_rows ~header ~rows_path ~cache_path
+          ~after:(Some "2026-10-19")
+      in
+      (* The actual cache already contains October 21, so no bytes are added. *)
+      assert (read_file cache_path = cached)))
+
+let test_load_asset_duplicate_date () =
+  List.iter (fun market ->
+    with_temp_market market (fun data_dir directory ->
+      let symbol_dir = Filename.concat directory "TEST" in
+      let () = Unix.mkdir symbol_dir 0o700 in
+      let cache_path = Filename.concat symbol_dir "TEST.csv" in
+      let output = open_out cache_path in
+      let () =
+        Fun.protect ~finally:(fun () -> close_out output)
+          (fun () ->
+            output_string output
+              "date,open,high,low,close,volume\n\
+               2026-10-19,100,101,99,100,1000\n\
+               2026-10-21,100,101,99,100,1000\n\
+               2026-10-19,100,101,99,100,1000\n\
+               2026-10-22,100,101,99,100,1000\n")
+      in
+      let message =
+        try
+          let _ =
+            Data.load_asset ~market ~symbol:"TEST"
+              ~from_:(Some "2026-10-21") ~to_:None ~data_dir
+          in
+          None
+        with Failure message -> Some message
+      in
+      (* Nonadjacent duplicates fail even outside the requested date range. *)
+      let () =
+        assert (message = Some (cache_path ^ ": duplicate date 2026-10-19"))
+      in
+      with_temp_strategy
+        ("stock \"" ^ market ^ "/TEST\"\nrebalance on_change\ntarget 1.0\n")
+        (fun strategy_path ->
+          let binary = locate ["_build/default/bin/bt.exe"; "../bin/bt.exe"] in
+          let stderr_path = Filename.concat data_dir "duplicate.stderr" in
+          let command =
+            String.concat " "
+              [Filename.quote binary; "run"; Filename.quote strategy_path;
+               "--capital"; "10000"; "--data-dir"; Filename.quote data_dir;
+               "--out-dir"; Filename.quote data_dir; "--no-plot";
+               "2>" ^ Filename.quote stderr_path]
+          in
+          (* A corrupt cache is a normal CLI failure, not an uncaught exception. *)
+          let () = assert (Sys.command command = 1) in
+          (* Stderr identifies the cache and date, with no fatal-exception trace. *)
+          assert
+            (read_file stderr_path =
+             cache_path ^ ": duplicate date 2026-10-19\n"))))
+    ["us"; "tw"]
+
+let test_append_rows_sequential () =
+  with_temp_market "us" (fun _ directory ->
+    List.iter (fun (name, header, row19, row21) ->
+      let cache_path = Filename.concat directory name in
+      let output = open_out cache_path in
+      let () =
+        Fun.protect ~finally:(fun () -> close_out output)
+          (fun () -> output_string output (header ^ "\n"))
+      in
+      let after =
+        Data.with_cache_lock ~cache_path (fun () ->
+          Data.last_cached_date cache_path)
+      in
+      (* Both supported headers describe an empty cache, not a dated row. *)
+      let () = assert (after = None) in
+      with_temp_strategy (row19 ^ row19 ^ row21 ^ row21) (fun rows_path ->
+        let append () = Data.append_rows ~header ~rows_path ~cache_path ~after in
+        let () = append () in
+        let () = append () in
+        (* Repeated input and two stale-tail appends retain each date once. *)
+        assert (read_file cache_path = header ^ "\n" ^ row19 ^ row21)))
+      ["TEST.csv", "date,open,high,low,close,volume",
+       "2026-10-19,100,101,99,100,1000\n", "2026-10-21,100,101,99,100,1000\n";
+       "TEST.cashdiv.csv", "ex_date,cash_per_share,pay_date",
+       "2026-10-19,1,2026-11-19\n", "2026-10-21,1,2026-11-21\n"])
+
+let test_cache_lock () =
+  with_temp_market "us" (fun _ directory ->
+    let cache_path = Filename.concat directory "TEST.csv" in
+    let probe expected =
+      match Unix.fork () with
+      | 0 ->
+          (try
+            let fd = Unix.openfile (cache_path ^ ".lock") [Unix.O_RDWR] 0 in
+            let acquired =
+              Fun.protect ~finally:(fun () -> Unix.close fd)
+                (fun () ->
+                  match Unix.lockf fd Unix.F_TLOCK 0 with
+                  | () -> true
+                  | exception Unix.Unix_error ((Unix.EACCES | Unix.EAGAIN), _, _) ->
+                      false)
+            in
+            Unix._exit (if acquired = expected then 0 else 1)
+          with _ -> Unix._exit 2)
+      | child ->
+          let _, status = Unix.waitpid [] child in
+          (* A second process can acquire the lock exactly when it is free. *)
+          assert (status = Unix.WEXITED 0)
+    in
+    let () = Data.with_cache_lock ~cache_path (fun () -> probe false) in
+    let () = probe true in
+    let () =
+      try Data.with_cache_lock ~cache_path (fun () -> raise Exit)
+      with Exit -> ()
+    in
+    (* Exception cleanup releases the same lock without deleting its inode. *)
+    probe true)
+
 let test_tiingo_snap () =
   (* 7:1 split: Tiingo emits 7.000007000007001; snap to 7, event = 1/7. *)
   assert_close 7. (Data.snap_split_factor 7.000007000007001);
@@ -11404,6 +11530,10 @@ let test_short_clamped_add_whole_shares () =
   check ~capital:1. ~equity:1000. ~held:2. ~added:3.
 
 let () =
+  let () = test_load_asset_duplicate_date () in
+  let () = test_append_rows_stale_after () in
+  let () = test_append_rows_sequential () in
+  let () = test_cache_lock () in
   let () = test_short_clamped_add_whole_shares () in
   let () = test_version_cli () in
   let () = test_daytrade_cli () in
