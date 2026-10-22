@@ -7,6 +7,7 @@
 - [Build and test](#build-and-test)
 - [Style rules](#style-rules)
 - [Documentation style](#documentation-style)
+  - [Commit messages](#commit-messages)
 - [Tests](#tests)
 - [Fetching test data](#fetching-test-data)
 - [Data cache layout](#data-cache-layout)
@@ -92,6 +93,19 @@ dune test --root . --force   # all asserts must pass
 - Use ASCII-only typography. Never hard-wrap mid-sentence.
 - Follow Keep a Changelog 1.1.0 in `CHANGELOG.md`. Each notable commit adds an entry under `[Unreleased]`: every behavior change, and also a structural change a builder or contributor would notice (a source-tree restructure gets an entry even with zero behavior change). A release is a git tag plus a GitHub pre-release.
 - Put design specs in `docs/specs/` and implementation plans in `docs/plans/`. Give them simple undated filenames that state the content.
+
+### Commit messages
+
+- Format subjects as `type(scope): summary` (Conventional Commits) with `type` in `feat`, `fix`, `docs`, `test`, `refactor`, `chore`, or `release`.
+- Set `scope` to the component changed (`engine`, `lang`, `cli`, `broker/live`, `broker/alpaca`, `data`, `intraday`, `report`, `docs`, `plans`, or `contributing`). Omit `(scope)` only when a change spans the whole repo.
+- Write the summary in the imperative, in lower case, with no period, in 72 characters or fewer. Include a body only when the subject cannot carry the why.
+- Add a `Co-authored-by` trailer that names the model provider that wrote the content (`Co-authored-by: Gemini <noreply@google.com>`, `Co-Authored-By: Claude <noreply@anthropic.com>`, or `Co-authored-by: ChatGPT <noreply@openai.com>`). Read the model from the writing agent's session record instead of assuming it.
+
+```text
+fix(data): lock the price cache during a fetch and reject duplicate dates
+docs(cli): US live shorts and the queued overnight exit
+feat(broker/live): US short entry, asset flag gate, closes before opens
+```
 
 ## Tests
 
