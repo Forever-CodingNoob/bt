@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-10-23
+
 ### Added
 
 - Short positions in the backtest. A daily US file declares `short` to allow negative targets, floored at `-1 / short_initial_ratio` (-2.0). Without `short`, target-style compilation still floors negative targets at zero. The engine carries a separate short leg per asset: proceeds plus Reg T collateral (`(1 + 0.5) x proceeds`) are reserved cash, `Engine.effective_targets` scales long down payments and short collateral jointly, shorts are whole shares, a borrow fee accrues per calendar day (`--borrow-rate PCT`, default 0), the short pays dividends on the ex-date, and maintenance uses Alpaca's per-share-or-rate table (`--short-maintenance-ratio PCT` flattens it). A loan-free short book records calls and cures by buy-to-cover; bankruptcy and the end-of-data close cover every short. Short trips carry `(entry - exit) / entry`. `Engine.plan_state` and `Engine.planned_asset` gain short fields; `Engine.market_profile` gains the five short fields. DSL validation rejects duplicate declarations and intraday use; TW files reject `short` with `short targets are not supported for tw`.
@@ -275,7 +277,8 @@ Live trading in this release ships on test evidence only: the US paper acceptanc
 - Return-based engine with daily close-to-close signal prices.
 - TW dividend back-adjustment via FinMind factors.
 
-[Unreleased]: https://github.com/Forever-CodingNoob/bt/compare/v0.12.1...HEAD
+[Unreleased]: https://github.com/Forever-CodingNoob/bt/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/Forever-CodingNoob/bt/compare/v0.12.1...v0.13.0
 [0.12.1]: https://github.com/Forever-CodingNoob/bt/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/Forever-CodingNoob/bt/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/Forever-CodingNoob/bt/compare/v0.10.1...v0.11.0
